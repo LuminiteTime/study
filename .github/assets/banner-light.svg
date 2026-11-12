@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="luminais / study: courses for developers">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .dot { animation: drift 7s linear infinite; }
+    .late { animation-name: drift-late; }
+    @keyframes drift { from { transform: translateX(0); opacity: 0 } 8% { opacity: 1 } 92% { opacity: 1 } to { transform: translateX(1120px); opacity: 0 } }
+    @keyframes drift-late { from { transform: translate(0, -28px); opacity: 0 } 8% { opacity: 1 } 92% { opacity: 1 } to { transform: translate(1120px, -28px); opacity: 0 } }
+    @media (prefers-reduced-motion: reduce) { .dot { animation-play-state: paused } }
+  </style>
+  <rect width="1280" height="320" rx="16" fill="#FCFCFC"/>
+  <rect x="0.5" y="0.5" width="1279" height="319" rx="16" fill="none" stroke="#E0E0E0"/>
+  <text x="80" y="92" font-size="22" font-weight="600" fill="#202020">luminais <tspan fill="#646464">/</tspan> study</text>
+  <text x="80" y="168" font-size="56" font-weight="700" letter-spacing="-1.6" fill="#202020">Courses for developers</text>
+  <text x="80" y="210" font-size="22" fill="#646464">In Russian, free and open source under the MIT license.</text>
+  <line x1="80" y1="270" x2="1200" y2="270" stroke="#E0E0E0" stroke-width="1.5"/>
+  <line x1="900" y1="236" x2="900" y2="290" stroke="#202020" stroke-width="2" stroke-dasharray="4 4"/>
+  <text x="912" y="250" class="mono" font-size="14" fill="#646464">watermark</text>
+  <g transform="translate(80 270)">
+    <circle class="dot" r="6" fill="#0090FF" style="animation-delay: 0s"/>
+    <circle class="dot" r="6" fill="#0090FF" style="animation-delay: -1.4s"/>
+    <circle class="dot" r="6" fill="#0090FF" style="animation-delay: -2.8s"/>
+    <circle class="dot" r="6" fill="#0090FF" style="animation-delay: -4.2s"/>
+    <circle class="dot late" r="6" fill="#F76B15" style="animation-delay: -5.6s"/>
+  </g>
+</svg>
