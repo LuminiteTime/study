@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
+  <title>Курсы luminais</title>
+  <meta name="description" content="Открытые курсы для разработчиков: один проект от первого запуска до прода, объяснения сверены с исходниками.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap&subset=cyrillic" rel="stylesheet">
+  <link href="home.css" rel="stylesheet">
+</head>
+<body>
+<header class="top">
+  <a class="wordmark" href="./">luminais<span>/</span>study</a>
+  <a class="top-link" href="https://github.com/LuminiteTime/study">GitHub</a>
+</header>
+
+<main>
+  <section class="hero">
+    <h1>Курсы для тех, кто уже пишет код и хочет понять, как всё устроено внутри</h1>
+    <p class="lead">Каждый курс ведёт один проект от первого запуска до прода. Объяснения сверены с исходниками и документацией, цифры сняты с живого кластера. Код и тексты открыты под лицензией MIT.</p>
+  </section>
+
+  <section class="catalog" aria-labelledby="catalog-title">
+    <h2 class="label" id="catalog-title">Курсы</h2>
+    <ol class="courses">
+      <li>
+        <a class="course" href="flink/">
+          <span class="course-num">01</span>
+          <span class="course-body">
+            <span class="course-title">Flink в проде</span>
+            <span class="course-text">Apache Flink 2.2 для Java-разработчика, который работал со Spark. За 21 урок ты собираешь PayGuard, антифрод для потока платежей, и доводишь его до Kubernetes, мониторинга и разбора аварий.</span>
+            <span class="course-meta">21 урок · Java 17 · Kafka · Flink SQL · Kubernetes</span>
+          </span>
+          <svg class="course-motif" viewBox="0 0 160 64" aria-hidden="true">
+            <line class="motif-axis" x1="0" y1="40" x2="160" y2="40"/>
+            <line class="motif-mark" x1="104" y1="12" x2="104" y2="52"/>
+            <circle class="motif-dot" cx="0" cy="40" r="4"/>
+            <circle class="motif-dot" cx="0" cy="40" r="4"/>
+            <circle class="motif-dot" cx="0" cy="40" r="4"/>
+            <circle class="motif-dot is-late" cx="0" cy="40" r="4"/>
+          </svg>
+          <span class="course-go" aria-hidden="true">→</span>
+        </a>
+      </li>
+    </ol>
+  </section>
+
+  <section class="method" aria-labelledby="method-title">
+    <h2 class="label" id="method-title">Как устроены курсы</h2>
+    <dl class="principles">
+      <div>
+        <dt>Один проект насквозь</dt>
+        <dd>Каждый урок продолжает предыдущий. Снапшот проекта после урока лежит в репозитории, отставший проект можно заменить им и идти дальше.</dd>
+      </div>
+      <div>
+        <dt>Сверено с исходниками</dt>
+        <dd>Утверждение об устройстве фреймворка опирается на строки кода в теге релиза и на раздел документации, ссылки стоят рядом с текстом.</dd>
+      </div>
+      <div>
+        <dt>Теория, практика, задание</dt>
+        <dd>В уроке есть симуляторы, которые можно покрутить, команды для терминала, задача на проект, ответ для сверки и глоссарий.</dd>
+      </div>
+      <div>
+        <dt>Один файл</dt>
+        <dd>Курс собирается в одну HTML-страницу. Её можно сохранить и читать без сети, прогресс хранится в браузере.</dd>
+      </div>
+    </dl>
+  </section>
+</main>
+
+<footer class="foot">
+  <p>© 2026 <a href="https://luminais.tech/">Mikhail Trifonov</a>. Лицензия <a href="https://github.com/LuminiteTime/study/blob/main/LICENSE">MIT</a>.</p>
+  <p>Нашли ошибку или хотите добавить курс? <a href="https://github.com/LuminiteTime/study/issues">Откройте issue</a> или пришлите pull request.</p>
+</footer>
+</body>
+</html>

@@ -1,0 +1,298 @@
+/* Каталог курсов. Палитра та же, что в курсах: Radix gray, акцент чернилами, цвет только у данных. */
+:root {
+  color-scheme: light dark;
+  --bg: #FCFCFC;
+  --surface: #F3F3F3;
+  --line: #E0E0E0;
+  --line-strong: #BBBBBB;
+  --text: #202020;
+  --text-2: #646464;
+  --text-3: #8D8D8D;
+  --data-1: #0090FF;
+  --data-3: #F76B15;
+  --sans: 'Onest', system-ui, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, monospace;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --gutter: max(1rem, 4vw);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111111;
+    --surface: #191919;
+    --line: #3A3A3A;
+    --line-strong: #606060;
+    --text: #EEEEEE;
+    --text-2: #B4B4B4;
+    --text-3: #7B7B7B;
+    --data-1: #3B9EFF;
+    --data-3: #FF801F;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 1rem/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+.top,
+main,
+.foot {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 0 var(--gutter);
+}
+
+.top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding-top: 1.5rem;
+  padding-bottom: 1.5rem;
+}
+
+.wordmark {
+  font-weight: 600;
+  text-decoration: none;
+  letter-spacing: -0.01em;
+}
+
+.wordmark span {
+  color: var(--text-3);
+  margin: 0 0.15em;
+}
+
+.top-link {
+  font-size: 0.875rem;
+  color: var(--text-2);
+  text-underline-offset: 0.25em;
+}
+
+.hero {
+  padding: clamp(3rem, 10vw, 7.5rem) 0 clamp(3rem, 8vw, 6rem);
+}
+
+h1 {
+  margin: 0;
+  max-width: 18ch;
+  font-size: clamp(2.25rem, 5.6vw, 4.25rem);
+  font-weight: 700;
+  line-height: 1.04;
+  letter-spacing: -0.035em;
+  text-wrap: balance;
+}
+
+.lead {
+  margin: 1.75rem 0 0;
+  max-width: 60ch;
+  font-size: clamp(1.0625rem, 1.6vw, 1.25rem);
+  color: var(--text-2);
+  text-wrap: pretty;
+}
+
+.label {
+  margin: 0 0 1rem;
+  font: 500 0.8125rem/1 var(--mono);
+  color: var(--text-3);
+}
+
+.courses {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+
+.courses li {
+  border-bottom: 1px solid var(--line);
+}
+
+.course {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr) 10rem 2rem;
+  gap: 1.5rem;
+  align-items: center;
+  padding: 2rem 0;
+  text-decoration: none;
+  transition: opacity 0.4s var(--ease-out);
+}
+
+/* Наведение на одну строку приглушает остальные, как в оглавлении журнала. */
+.courses:has(.course:hover) .course:not(:hover) {
+  opacity: 0.45;
+}
+
+.course-num {
+  align-self: start;
+  padding-top: 0.6rem;
+  font: 500 0.875rem/1 var(--mono);
+  color: var(--text-3);
+}
+
+.course-body {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.course-title {
+  font-size: clamp(1.75rem, 3.6vw, 2.75rem);
+  font-weight: 600;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.course-text {
+  max-width: 62ch;
+  color: var(--text-2);
+}
+
+.course-meta {
+  font: 400 0.8125rem/1.5 var(--mono);
+  color: var(--text-3);
+}
+
+.course-go {
+  font-size: 1.5rem;
+  color: var(--text-3);
+  transition: transform 0.5s var(--ease-out), color 0.2s;
+}
+
+.course:hover .course-go,
+.course:focus-visible .course-go {
+  transform: translateX(0.375rem);
+  color: var(--text);
+}
+
+.course:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+/* Мотив Flink: события плывут по оси времени, одно приходит после водяного знака. */
+.course-motif {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.motif-axis {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.motif-mark {
+  stroke: var(--text);
+  stroke-width: 1.5;
+  stroke-dasharray: 3 3;
+}
+
+.motif-dot {
+  fill: var(--data-1);
+  animation: drift 6s linear infinite;
+}
+
+.motif-dot:nth-of-type(2) { animation-delay: -1.5s; }
+.motif-dot:nth-of-type(3) { animation-delay: -3s; }
+
+.motif-dot.is-late {
+  fill: var(--data-3);
+  animation-name: drift-late;
+  animation-delay: -4.5s;
+}
+
+@keyframes drift {
+  from { transform: translateX(0); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  to { transform: translateX(160px); opacity: 0; }
+}
+
+@keyframes drift-late {
+  from { transform: translate(0, -18px); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  to { transform: translate(160px, -18px); opacity: 0; }
+}
+
+.method {
+  padding: clamp(4rem, 10vw, 7rem) 0;
+}
+
+.principles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2.5rem 4rem;
+  margin: 1.5rem 0 0;
+}
+
+.principles dt {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.principles dd {
+  margin: 0.5rem 0 0;
+  max-width: 48ch;
+  color: var(--text-2);
+}
+
+.foot {
+  padding-top: 2rem;
+  padding-bottom: 3rem;
+  background: linear-gradient(var(--line), var(--line)) var(--gutter) 0 / calc(100% - 2 * var(--gutter)) 1px no-repeat;
+  font-size: 0.875rem;
+  color: var(--text-3);
+}
+
+.foot p {
+  margin: 0 0 0.25rem;
+}
+
+.foot a {
+  color: var(--text-2);
+  text-underline-offset: 0.2em;
+}
+
+@media (max-width: 720px) {
+  .course {
+    grid-template-columns: minmax(0, 1fr) 2rem;
+    gap: 1rem;
+    padding: 1.5rem 0;
+  }
+
+  .course-num,
+  .course-motif {
+    display: none;
+  }
+
+  .principles {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .course,
+  .course-go {
+    transition: none;
+  }
+
+  .motif-dot {
+    animation-play-state: paused;
+  }
+}
