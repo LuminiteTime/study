@@ -1,0 +1,74 @@
+<h2>Что будет в конце</h2>
+<p>Кластер хранит состояние в RocksDB и каждые 30 секунд делает инкрементальный чекпоинт в <code>data/checkpoints</code>. После падения задание перезапускается по экспоненциальной задержке и продолжает с последнего чекпоинта. Скрипт <code>chaos-kill-tm.sh</code> убивает TaskManager и меряет время восстановления.</p>
+<p>Скрипт отчёта <code>scripts/checkpoint-report.sh</code> относится к заданию, его пока не создавай.</p>
+
+<h2>Шаг 1. Чекпоинты и перезапуск в Compose</h2>
+<p>Код задания для чекпоинтов почти не меняется. Всё включается настройками кластера в <code>FLINK_PROPERTIES</code>, и ещё TaskManager получает политику перезапуска контейнера.</p>
+<div data-diff="lesson-10/docker-compose.yml lesson-11/docker-compose.yml"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-11/docker-compose.yml" data-lines="12-27"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Состояние живёт в RocksDB на диске TaskManager. Куча освобождается, и снимок можно делать инкрементально.</p>
+      <p class="tl">Чекпоинты и savepoint пишутся в <code>/flink-data</code>. Эта папка смонтирована из <code>./data</code> проекта ещё в прошлых уроках, поэтому снимки переживут контейнер. В проде здесь будет S3 или HDFS, общая для JobManager и всех TaskManager.</p>
+      <p class="tl">Инкрементальные чекпоинты включены. Без этой строки RocksDB каждый раз выгружала бы всё состояние.</p>
+      <p class="tl">Интервал 30 секунд. Ключ без значения по умолчанию, и пока его нет, чекпоинтов нет вовсе. Пауза 10 секунд гарантирует, что между концом одного чекпоинта и началом следующего задание работает спокойно.</p>
+      <p class="tl">Чекпоинт, который не уложился в 5 минут, отменяется. Три неудачи подряд по таймауту или в асинхронной фазе задание терпит, четвёртая вызывает перезапуск. По умолчанию допуск ноль. Сбой синхронной фазы на TaskManager перезапускает задачу всегда.</p>
+      <p class="tl"><code>RETAIN_ON_CANCELLATION</code> оставляет чекпоинты на диске после отмены задания, из них можно стартовать вручную. Хранятся три последних, по умолчанию один.</p>
+      <p class="tl">Стратегия перезапуска с экспоненциальной паузой. Первая пауза 1 секунда, каждая следующая вдвое длиннее, но не больше минуты.</p>
+      <p class="tl">Десять минут без сбоев сбрасывают паузу к начальной. Jitter 0,1 сдвигает каждую паузу случайно на 10 %, чтобы десяток заданий после общей аварии не ломились в Kafka одновременно.</p>
+    </div>
+  </div>
+</div>
+<p>Строка <code>restart: unless-stopped</code> у TaskManager относится к Docker. Если процесс TaskManager завершится сам, например от нехватки памяти, Docker поднимет контейнер снова, и в кластере опять появятся слоты. Без неё кластер остался бы без слотов, и перезапуски Flink ни к чему бы не привели.</p>
+
+<h2>Шаг 2. С какого места читать Kafka</h2>
+<p>Источники платежей и подтверждений раньше начинали с <code>latest</code>. При восстановлении из чекпоинта это неважно, но при новой отправке задания без чекпоинта <code>latest</code> пропустит всё, что накопилось в топике за время простоя.</p>
+<div data-diff="lesson-10/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-11/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<p><code>committedOffsets(OffsetResetStrategy.LATEST)</code> начинает с последнего закоммиченного смещения группы <code>groupId</code>. Если группа партицию ещё не читала, срабатывает запасная стратегия <code>LATEST</code>. Источник правил оставлен на <code>earliest</code>, ему нужна вся история правил. Класс <code>OffsetResetStrategy</code> приходит из клиента Kafka, новой зависимости не нужно.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Почему инициализатор смещений не мешает восстановлению. Перечислитель партиций восстанавливает из чекпоинта уже назначенные партиции и при поиске изменений вычитает их из найденных. Инициализатор применяется только к оставшимся новым партициям.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/enumerator/KafkaSourceEnumerator.java" data-lines="520-536" data-must="assignedSplits.keySet().forEach(dedupOrMarkAsRemoved);"></div>
+</div>
+<p>Этот же вызов всплывёт в уроке 14. Если положить SQL-коннектор Kafka в <code>lib/</code> того же кластера, <code>flink run</code> упадёт с <code>java.lang.NoSuchMethodError: ...OffsetsInitializer.committedOffsets(org.apache.kafka.clients.consumer.OffsetResetStrategy)</code>, потому что в SQL-jar клиент Kafka перепакован в другой пакет.</p>
+
+<h2>Шаг 3. Собери, подними и отправь</h2>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --dup 0.02 --bad 0.01 --burst 0.002"</pre>
+<p>Порядок прежний, сначала jar, потом контейнеры. Если кластер уже работает с конфигурацией прошлого урока, <code>docker compose up -d --wait</code> пересоздаст JobManager и TaskManager, потому что изменилось их окружение. Генератор даёт 200 платежей в секунду с 2 % повторов, 1 % битых записей и сериями по картам.</p>
+<pre data-lang="text" data-title="вывод" data-output>Job has been submitted with JobID 959e9026583b695ae1f4a2b0195cd313</pre>
+
+<h2>Шаг 4. Прочитай статистику чекпоинтов</h2>
+<p>Через полторы минуты пройдут три чекпоинта. Их статистику отдаёт REST JobManager.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB/checkpoints | jq '.counts, .history[0]'</pre>
+<p>В ответе <code>counts</code> содержит счётчики, а <code>history</code> последние чекпоинты от нового к старому. У каждого есть <code>end_to_end_duration</code> в миллисекундах, <code>checkpointed_size</code> и <code>state_size</code> в байтах. Ниже сводка с нашего стенда, размеры пересчитаны в КиБ.</p>
+<pre data-lang="json" data-title="сводка чекпоинтов, прогон стенда" data-output>{"counts":{"restored":0,"total":3,"in_progress":0,"completed":3,"failed":0},"recent":[{"id":3,"status":"COMPLETED","ms":390,"state_kb":12251,"written_kb":4825},{"id":2,"status":"COMPLETED","ms":318,"state_kb":8011,"written_kb":4831},{"id":1,"status":"COMPLETED","ms":328,"state_kb":3756,"written_kb":3756}]}</pre>
+<p>У первого чекпоинта записано столько же, сколько весит состояние. Предыдущего снимка нет, и все SST-файлы выгружаются впервые. У второго и третьего состояние выросло до 8011 и 12251 КиБ, а записано около 4,8 МиБ. Это и есть инкрементальность, остальные файлы взяты ссылками из <code>shared</code>. В другом прогоне те же два первых чекпоинта заняли 259 и 282 мс, второй записал 4591 КиБ при состоянии 5899 КиБ. Все чекпоинты укладываются в треть секунды при интервале 30 секунд.</p>
+<p>Загляни в каталог на своей машине. В <code>data/checkpoints/&lt;jobId&gt;</code> появятся <code>chk-N</code> с файлом <code>_metadata</code>, <code>shared</code> и <code>taskowned</code>. Завершённых <code>chk-N</code> хранится не больше трёх, лишние удаляются по <code>num-retained</code>.</p>
+
+<h2>Шаг 5. Убей TaskManager</h2>
+<p>Положи в <code>scripts/chaos-kill-tm.sh</code> скрипт, который проверяет восстановление.</p>
+<div data-code="lesson-11/scripts/chaos-kill-tm.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-11/scripts/chaos-kill-tm.sh" data-lines="7-27"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Находим запущенное задание. Если его нет, выходим с ошибкой, ломать нечего.</p>
+      <p class="tl">Запоминаем счётчик <code>restored</code> до аварии. Новое восстановление его увеличит, и по этому признаку мы отличим восстановление из чекпоинта от простого перезапуска.</p>
+      <p class="tl"><code>SIGKILL</code> убивает процесс мгновенно, без закрытия соединений и без последнего чекпоинта. Так выглядит падение машины или убийство по памяти.</p>
+      <p class="tl">Через две секунды поднимаем контейнер снова. Явная команда не зависит от политики перезапуска Docker.</p>
+      <p class="tl">Каждые две секунды опрашиваем REST. Готово, когда счётчик восстановлений вырос и все вершины снова в <code>RUNNING</code>.</p>
+      <p class="tl">Если за три минуты задание не поднялось, скрипт завершается с ошибкой. Это пригодится, когда скрипт попадёт в автоматическую проверку.</p>
+    </div>
+  </div>
+</div>
+<pre data-lang="bash" data-title="терминал">chmod +x scripts/chaos-kill-tm.sh
+scripts/chaos-kill-tm.sh</pre>
+<p>На нашем стенде при 200 платежах в секунду скрипт сообщил о восстановлении за 23 секунды. В это время входят пауза перед стартом контейнера, регистрация нового TaskManager, раскладка 13 вершин по слотам и чтение состояния из чекпоинта. Чекпоинт, который шёл в момент убийства, получил статус <code>FAILED</code>. Это ожидаемо, его подзадачи умерли до подтверждения, и задание откатилось к предыдущему завершённому.</p>
+<p>Проверь, что состояние действительно восстановилось. Повтори запрос из шага 4, счётчик <code>restored</code> станет равен 1. Платежи, обработанные после последнего завершённого чекпоинта, прочитаются из Kafka повторно. Состояние учтёт их один раз, ведь оно откатилось к моменту барьера. Алерты в <code>fraud.alerts</code> за этот промежуток могут прийти дважды, это задача урока 12.</p>

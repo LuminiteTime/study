@@ -1,0 +1,116 @@
+<h2>Что смотреть у потокового задания</h2>
+<p>Метрик много. На нашем стенде при работающем задании Prometheus знал 374 разных имени, и у каждого десятки рядов с разными метками. Чтобы не утонуть, удобно опираться на две известные схемы. RED описывает сервис со стороны того, кто его вызывает, через скорость (Rate), ошибки (Errors) и длительность (Duration). USE описывает ресурс через загрузку (Utilization), насыщение (Saturation) и ошибки (Errors). Задание Flink одновременно и сервис для команды антифрода, и потребитель ресурсов, поэтому полезны обе.</p>
+<table>
+<thead><tr><th>Вопрос</th><th>Метрика Flink</th><th>Где живёт</th></tr></thead>
+<tbody>
+<tr><td>Сколько платежей входит (Rate)</td><td><code>numRecordsOutPerSecond</code> оператора источника</td><td>TaskManager</td></tr>
+<tr><td>Насколько отстали от топика (Saturation)</td><td>лаг консьюмера Kafka <code>records_lag_max</code></td><td>TaskManager</td></tr>
+<tr><td>Насколько отстали по времени (Duration)</td><td><code>currentEmitEventTimeLag</code> источника</td><td>TaskManager</td></tr>
+<tr><td>Насколько занят оператор (Utilization)</td><td><code>busyTimeMsPerSecond</code></td><td>TaskManager</td></tr>
+<tr><td>Ждёт ли оператор соседа (Saturation)</td><td><code>backPressuredTimeMsPerSecond</code></td><td>TaskManager</td></tr>
+<tr><td>Падает ли задание (Errors)</td><td><code>numRestarts</code></td><td>JobManager</td></tr>
+<tr><td>Идут ли чекпоинты (Errors, Duration)</td><td><code>lastCheckpointCompletedTimestamp</code>, <code>numberOfFailedCheckpoints</code>, <code>lastCheckpointDuration</code></td><td>JobManager</td></tr>
+<tr><td>Хватает ли памяти (Utilization)</td><td><code>Status.JVM.Memory.Heap.Used</code>, время GC</td><td>каждый процесс</td></tr>
+</tbody>
+</table>
+<p>Метрики <code>busyTimeMsPerSecond</code> и <code>backPressuredTimeMsPerSecond</code> показывают, сколько миллисекунд из каждой секунды задача работала и сколько ждала свободного буфера у следующего оператора. Как по ним найти узкое место, подробно разберём в уроке 18. Здесь нам достаточно, что backpressure больше 500 мс в секунду пять минут подряд это повод для предупреждения.</p>
+<p>Колонка «где живёт» важнее, чем кажется. Метрики JobManager переживают падение TaskManager. Метрики TaskManager исчезают вместе с ним. Проверим это на двух метриках источника.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Отставание по времени события источник считает в TaskManager. Это текущее время на часах TaskManager минус время события последней выданной записи. Если источник простаивает, вместо текущего времени берётся момент начала простоя.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/metrics/groups/InternalSourceReaderMetricGroup.java" data-lines="154-167" data-must="getLastEmitTime() - lastEventTime"></div>
+<p>Время события пишет генератор по своим часам, а вычитается оно из часов TaskManager. На стенде метрика показала минус 23 мс. Задание не опережает время, просто часы генератора на машине разработчика и часы контейнера немного расходятся. На проде с синхронизацией времени через NTP расхождение будет того же порядка, и порог в секундах оно не задевает.</p>
+<p>Лаг Kafka коннектор берёт у клиента Kafka. Все метрики консьюмера регистрируются как Gauge в группе <code>KafkaSourceReader.KafkaConsumer</code> внутри группы оператора.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/metrics/KafkaSourceReaderMetrics.java" data-lines="126-139" data-must="kafkaConsumerMetricGroup.gauge(name.name(), () -&gt; metric.metricValue())"></div>
+<p>Консьюмер работает внутри подзадачи источника, то есть в TaskManager. Отсюда длинное имя <code>flink_taskmanager_job_task_operator_KafkaSourceReader_KafkaConsumer_records_lag_max</code>, где дефисы имени Kafka <code>records-lag-max</code> заменены подчёркиваниями. Когда TaskManager нет, консьюмера нет, и этого ряда в Prometheus тоже нет.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/" target="_blank" rel="noopener">Kafka connector, Monitoring</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/metrics/" target="_blank" rel="noopener">Metrics, System metrics</a></p>
+</div>
+
+<h2>Почему одного лага мало</h2>
+<p>Лаг Kafka выглядит как универсальный показатель здоровья. Отстали от топика, значит, что-то не так. У него три слепых пятна.</p>
+<ul>
+  <li>Лаг пропадает вместе с TaskManager. Prometheus перестаёт получать ряд, выражение с порогом возвращает пустой результат, и правило молчит. Так и вышло на стенде. TaskManager был остановлен 100 секунд, правило на чекпоинты сработало, правило на лаг нет.</li>
+  <li>Лаг бывает нулевым у больного задания. Источник читает быстро, а чекпоинты падают. Транзакции Kafka не фиксируются, и алерты не доходят до потребителей с <code>read_committed</code>. Это ловят правила на время последнего успешного чекпоинта и на число неудачных.</li>
+  <li>Лаг в записях не говорит о времени. Пять тысяч записей при 200 платежах в секунду означают 25 секунд опоздания. Ночью при десяти платежах в секунду это уже восемь минут. Время показывает <code>currentEmitEventTimeLag</code>.</li>
+</ul>
+<p>Модель ниже проигрывает правила PayGuard так, как их считает Prometheus, с шагом 10 секунд. Нажми «Пуск», через несколько шагов останови TaskManager, а потом верни его. Посмотри, когда загорается каждое правило и в какой момент появляется столбик лага.</p>
+
+<div class="viz" id="viz-l17">
+  <p class="viz-title">Пульт дежурного</p>
+  <div class="viz-controls">
+    <button class="primary" id="viz-l17-run" type="button">Пуск</button>
+    <button id="viz-l17-step" type="button">+10 с</button>
+    <button id="viz-l17-tm" type="button">Остановить TaskManager</button>
+    <button id="viz-l17-reset" type="button">Сброс</button>
+  </div>
+  <svg id="viz-l17-svg" role="img" aria-label="Сверху столбики лага Kafka в Prometheus, пустые места там, где ряда нет. Ниже пять полос, по одной на правило алерта, клетка серая, когда правило молчит, светлая в состоянии pending и красная в состоянии firing."></svg>
+  <p class="viz-note" id="viz-l17-note" aria-live="polite"></p>
+  <p class="viz-note">Модель упрощена. Вход 200 платежей в секунду, чекпоинт раз в 15 секунд, задание поднимается через 15 секунд после возврата TaskManager, как на стенде. Скорость, с которой задание догоняет топик, подобрана так, чтобы через минуту после возврата лаг был около 11 тысяч, как в замере. Пока задачам негде работать, каждая попытка чекпоинта считается неудачной.</p>
+</div>
+
+<p>Обрати внимание на две вещи. Пока TaskManager остановлен, полоса KafkaLagHigh серая, ряда нет. Тревогу поднимает SourceSilent на <code>absent</code>, как монитор на соскользнувшую прищепку. После возврата лаг большой, но правило висит в pending и ждёт две минуты. Если задание догонит топик раньше, алерт так и не загорится. При короткой аварии это правильно, будить человека уже незачем. Останови TaskManager подольше, и лаг продержится выше порога достаточно, чтобы правило дошло до firing.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Правило на порог молчит, когда нет данных</strong>
+    <p>Выражение <code>метрика &gt; 5000</code> возвращает ряды, где условие выполнено. Если ряда нет совсем, результат пустой, и Prometheus считает, что всё в порядке. На каждую метрику, которая живёт в TaskManager и на которой держится алерт, нужна пара в виде правила на <code>absent</code> или на встроенную метрику Prometheus <code>up</code>, которая равна нулю, когда цель опроса не ответила.</p>
+  </div>
+</div>
+
+<h2>Правило алерта и его состояния</h2>
+<p>Правило алерта в Prometheus это выражение PromQL и выдержка <code>for</code>. Prometheus вычисляет выражение каждые <code>evaluation_interval</code> секунд. Пока результат пустой, правило неактивно. Как только выражение вернуло хотя бы один ряд, алерт переходит в состояние pending. Если условие держится дольше <code>for</code>, алерт становится firing. Без <code>for</code> он загорается сразу. Пропал результат хотя бы на одну проверку, и отсчёт начинается заново.</p>
+<p>Firing в Prometheus ещё не звонок дежурному. Рассылкой в почту, Slack или систему дежурств занимается отдельный компонент Alertmanager. На учебном стенде его нет, алерты видны в интерфейсе Prometheus на вкладке Alerts и через его HTTP API. Что делать по каждому алерту, мы запишем в runbook в уроке 21.</p>
+<p>Выдержку подбирают под природу метрики. Перезапуск задания событие редкое и важное, ему выдержка не нужна. Один неудачный чекпоинт после деплоя на стенде урока 20 оказался нормой, подзадачи нового TaskManager ещё разворачивались. Поэтому правило на неудачные чекпоинты смотрит на серию, больше двух за десять минут. Это меньше, чем <code>tolerable-failed-checkpoints: 3</code> из урока 11, после которого задание само уходит в перезапуск, так что предупреждение придёт раньше падения.</p>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming главный источник сведений о потоковом запросе это прогресс каждого micro-batch. В объекте <code>StreamingQueryProgress</code> видно, сколько строк пришло и обработано в секунду и сколько длился батч, и по этим цифрам строят алерты.</p>
+<p>Во Flink батчей нет, и мерить длительность нечего. Здоровье задания видно по непрерывным метрикам операторов в TaskManager и по чекпоинтам в JobManager. Роль «батч опоздал» здесь играют отставание по времени события и время с последнего успешного чекпоинта.</p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">ℹ</div>
+  <div class="callout-content">
+    <strong class="callout-title">Метка размножает ряды</strong>
+    <p>Каждое новое значение метки создаёт новый временной ряд в Prometheus. Метка <code>rule</code> с пятью правилами даёт пять рядов на подзадачу. Номер карты в метке дал бы ряд на каждую карту, а в состоянии профиля на стенде было 8563 ключа. Число рядов называют кардинальностью, и от неё зависят память Prometheus и скорость запросов. В метки кладут только то, у чего мало значений.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l17">
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Метрика лага живёт в TaskManager. Нет процесса, нет ряда, выражение с порогом пустое, и правило молчит. Выручит правило на absent или на up."
+       data-explanation-wrong="Вспомни, где регистрируется лаг консьюмера и что Prometheus делает с рядом, когда цель опроса не отвечает.">
+    <h3 class="quiz-question">Ночью единственный TaskManager упал и не поднимается. Из правил настроено только «лаг больше 5000 две минуты». Что увидит дежурный?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Алерт через две минуты, потому что лаг растёт</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Алерт сразу, потому что метрика стала равна нулю</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Ничего, ряд лага пропал вместе с процессом и правилу не с чем сравнивать</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Приёмник алертов транзакционный, и без завершённого чекпоинта транзакции не фиксируются. Лаг и busy при этом могут выглядеть идеально."
+       data-explanation-wrong="Подумай, когда потребитель с read_committed видит запись из транзакционного приёмника. Читает источник быстро, вопрос в фиксации.">
+    <h3 class="quiz-question">Лаг нулевой, busy у всех операторов низкий, но команда антифрода не получает алертов уже 20 минут. Какое правило PayGuard должно было сработать первым?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>PayGuardCheckpointStale, нет успешного чекпоинта больше двух минут</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>PayGuardBackpressure, операторы ждут друг друга</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>PayGuardSourceSilent, источник перестал отдавать метрики</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Значение в addGroup(key, value) становится меткой, и каждая карта даст отдельный ряд на каждую подзадачу. Для разбивки по картам есть логи и топики, метрикам нужны метки с малым числом значений."
+       data-explanation-wrong="Вспомни, что GenericValueMetricGroup делает со значением и как репортер поступает с переменными группы.">
+    <h3 class="quiz-question">Коллега хочет видеть в Grafana число платежей по каждой карте и пишет addGroup("card", cardId).counter("payments"). Что будет?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Одна метрика, а номер карты попадёт в описание</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Номер карты станет меткой, и в Prometheus будут тысячи рядов на каждую подзадачу</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Flink откажется регистрировать столько групп и выбросит исключение</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

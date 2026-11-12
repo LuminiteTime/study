@@ -1,0 +1,172 @@
+/* Схемы времени: watermark, окна, партиции, корзины и таймеры, лента WAL. */
+
+/* Время: дорожка, прошедшее до watermark время, флажок watermark, окна по статусам. */
+.dg-lane {
+  stroke: var(--color-border);
+  stroke-width: 1;
+}
+
+.dg-past {
+  fill: var(--color-accent-light);
+  transition: width 60ms linear;
+}
+
+.dg-watermark line {
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+.dg-flag {
+  fill: var(--color-text);
+}
+
+.dg .dg-watermark text {
+  fill: var(--color-bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dg-dot {
+  fill: var(--color-text);
+}
+
+.dg-window rect,
+.dg-swatch {
+  fill: var(--color-surface);
+  stroke: var(--color-border-strong);
+  transition: fill var(--duration-normal), stroke var(--duration-normal);
+}
+
+.dg .dg-window text {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dg-window.is-fired rect,
+.dg-swatch.is-fired {
+  fill: var(--color-success-light);
+  stroke: var(--color-success);
+}
+
+.dg-window.is-refired rect,
+.dg-swatch.is-refired {
+  fill: var(--color-info-light);
+  stroke: var(--color-info);
+}
+
+.dg-window.is-gone rect,
+.dg-swatch.is-gone {
+  fill: none;
+  stroke-dasharray: 4 3;
+}
+
+.dg .dg-window.is-gone text {
+  fill: var(--color-text-muted);
+}
+
+.viz-swatch.dg-swatch {
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.viz-swatch.is-fired {
+  background: var(--color-success-light);
+  border-color: var(--color-success);
+}
+
+.viz-swatch.is-refired {
+  background: var(--color-info-light);
+  border-color: var(--color-info);
+}
+
+.viz-swatch.is-gone {
+  background: none;
+  border-style: dashed;
+}
+
+/* Партиции источника: свой watermark у каждой и линия «сейчас». */
+.dg-own-wm {
+  stroke: var(--color-actor-1);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
+
+.dg-lane.is-idle {
+  stroke-dasharray: 4 4;
+}
+
+.dg-now {
+  stroke: var(--color-border-strong);
+}
+
+/* Корзины состояния и таймеры. */
+.dg-bucket rect {
+  fill: var(--color-surface);
+  stroke: var(--color-border-strong);
+  stroke-dasharray: 4 3;
+}
+
+.dg-bucket.is-in rect {
+  fill: var(--color-actor-1-light);
+  stroke: var(--color-actor-1);
+  stroke-dasharray: none;
+}
+
+.dg .dg-bucket text {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.dg-timer path {
+  fill: var(--color-actor-3);
+}
+
+.dg .dg-timer text {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  fill: var(--color-text-secondary);
+}
+
+.dg-now.is-strong {
+  stroke: var(--color-actor-1);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 3;
+}
+
+/* Лента сегментов WAL. */
+.dg-wal {
+  fill: var(--color-surface);
+  stroke: var(--color-border);
+  transition: fill var(--duration-normal), stroke var(--duration-normal);
+}
+
+.dg-wal.is-freed {
+  fill: var(--color-accent-light);
+  stroke: var(--color-border-light);
+}
+
+.dg-wal.is-kept {
+  fill: var(--color-actor-1-light);
+  stroke: var(--color-actor-1);
+}
+
+.dg-wal.is-stuck {
+  fill: var(--color-error-light);
+  stroke: var(--color-error);
+}
+
+.dg-marker line {
+  stroke: var(--color-text);
+  stroke-width: 2;
+}
+
+.dg .dg-marker text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.dg-marker.is-slot line {
+  stroke: var(--color-actor-1);
+}

@@ -1,0 +1,34 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="постмортем|postmortem">Постмортем (postmortem)</dt><dd>Документ о разборе аварии. В нём хронология, влияние, корневая причина, усилившие факторы и действия, чтобы авария не повторилась. Виноватых в нём не ищут.</dd>
+<dt data-match="runbook">Runbook</dt><dd>Инструкция для дежурного. На каждый алерт в ней записано, что проверить первым, как отличить причины и что делать.</dd>
+<dt data-match="хаос-тест|chaos testing">Хаос-тестирование (chaos testing)</dt><dd>Плановые отказы компонентов на работающей системе с проверкой, что гарантии сохраняются и система восстанавливается сама.</dd>
+<dt data-match="InvalidPidMappingException">InvalidPidMappingException</dt><dd>Ошибка брокера Kafka. Продюсер прислал producerId, который не связан с его transactional.id. В клиенте 4.2.0 наследует ApplicationRecoverableException и требует пересоздать продюсера.</dd>
+<dt data-match="__transaction_state|журнал транзакций">__transaction_state</dt><dd>Служебный топик Kafka, где координатор транзакций хранит связи transactional.id с producerId, эпохой и состоянием транзакций.</dd>
+<dt data-match="координатор">Координатор транзакций (transaction coordinator)</dt><dd>Роль брокера Kafka, которая выдаёт продюсерам producerId и эпоху, ведёт их транзакции и фиксирует или отменяет их.</dd>
+<dt data-match="producerId|эпох">producerId и эпоха (epoch)</dt><dd>Номер продюсера и счётчик его поколений. По паре брокер отличает живого продюсера от устаревшего и не даёт старому зафиксировать транзакцию.</dd>
+<dt data-match="transactional.id|transactionalId">transactional.id</dt><dd>Постоянное имя транзакционного продюсера Kafka. Приёмник Flink строит его из префикса, номера подзадачи и номера чекпоинта.</dd>
+<dt data-match="committable">Committable</dt><dd>Объект, который Writer приёмника передаёт Committer на чекпоинте. У Kafka в нём имя транзакции, producerId и эпоха. Хранится в состоянии, пока транзакция не зафиксирована.</dd>
+<dt data-match="Committer">Committer</dt><dd>Оператор приёмника Sink V2, который фиксирует подготовленные транзакции после завершения чекпоинта. Его uid строится как Sink Committer плюс uid приёмника.</dd>
+<dt data-match="exponential-delay">Exponential-delay</dt><dd>Стратегия перезапуска Flink, при которой пауза между попытками растёт до предела. По умолчанию число попыток не ограничено.</dd>
+<dt data-match="allowNonRestoredState">allowNonRestoredState</dt><dd>Разрешение запустить задание из снимка, в котором есть состояние без подходящего оператора. Такое состояние отбрасывается.</dd>
+<dt data-match="uid">uid оператора</dt><dd>Постоянный идентификатор оператора, по которому Flink находит его состояние в savepoint и чекпоинте.</dd>
+<dt data-match="savepoint">Savepoint</dt><dd>Снимок состояния задания, который делают по команде, например перед апгрейдом. Из него запускают новую версию задания.</dd>
+<dt data-match="exactly-once">Exactly-once</dt><dd>Гарантия, что каждая запись отражается в результате ровно один раз, даже при сбоях. В Kafka держится на транзакциях и read_committed.</dd>
+<dt data-match="read_committed|read_uncommitted">read_committed</dt><dd>Уровень изоляции потребителя Kafka, при котором он видит только данные зафиксированных транзакций. read_uncommitted видит и отменённые.</dd>
+<dt data-match="PersistentVolumeClaim|PVC">PersistentVolumeClaim (PVC)</dt><dd>Заявка пода Kubernetes на постоянный том. Данные на нём переживают перезапуск и пересоздание контейнера.</dd>
+<dt data-match="ConfigMap">ConfigMap</dt><dd>Объект Kubernetes с данными в виде ключей и значений. Flink HA хранит в нём лидера и указатель на последний чекпоинт.</dd>
+<dt data-match="FlinkDeployment">FlinkDeployment</dt><dd>Ресурс оператора Flink в Kubernetes, описывающий кластер и задание. Оператор приводит кластер к его спецификации.</dd>
+<dt data-match="SASL">SASL</dt><dd>Simple Authentication and Security Layer. Способ аутентификации в протоколе Kafka, клиент представляется до первых запросов.</dd>
+<dt data-match="PLAIN">PLAIN</dt><dd>Механизм SASL, который передаёт логин и пароль как есть. Без TLS пароль виден в сети.</dd>
+<dt data-match="TLS|SASL_SSL|SASL_PLAINTEXT">TLS, SASL_SSL и SASL_PLAINTEXT</dt><dd>TLS шифрует соединение. SASL_SSL это аутентификация SASL поверх TLS, вариант для прода. SASL_PLAINTEXT это аутентификация без шифрования, вариант учебного стенда.</dd>
+<dt data-match="JAAS">JAAS</dt><dd>Java Authentication and Authorization Service. Стандартный механизм Java, клиент Kafka читает из строки JAAS модуль входа, логин и пароль.</dd>
+<dt data-match="надстройк|override file|COMPOSE_FILE">Надстройка Compose (override file)</dt><dd>Дополнительный файл Compose, который сливается с основным. Переменная COMPOSE_FILE перечисляет файлы через двоеточие.</dd>
+<dt data-match="GitHub Actions">GitHub Actions</dt><dd>Система CI в GitHub. Сценарии лежат в .github/workflows и запускаются по событиям репозитория, например push или тегу.</dd>
+<dt data-match="ghcr|Container Registry">GitHub Container Registry (ghcr.io)</dt><dd>Реестр образов контейнеров при GitHub. Сценарий публикует туда образ встроенным токеном GITHUB_TOKEN.</dd>
+<dt data-match="PublicEvolving|аннотаци">Аннотации стабильности</dt><dd>Метки Public, PublicEvolving и Experimental на классах Flink. По ним видно, какую совместимость Flink обещает между версиями. PublicEvolving между минорными версиями не обещает ничего.</dd>
+<dt data-match="release notes|заметк">Release notes</dt><dd>Заметки к выпуску. Список изменений версии, которые могут задеть работающие задания.</dd>
+<dt data-match="теневой коп|shadow copy">Теневая копия (shadow copy)</dt><dd>Способ обновления, при котором новый кластер поднимают рядом со старым, запускают задание из savepoint и гасят старый после проверки.</dd>
+<dt data-match="production readiness|чек-лист">Production readiness checklist</dt><dd>Список проверок перед первым запуском задания в проде. У Flink есть свой в документации.</dd>
+<dt data-match="Kafka">Apache Kafka</dt><dd>Распределённый журнал сообщений. Записи хранятся в топиках и читаются повторно.</dd>
+</dl>

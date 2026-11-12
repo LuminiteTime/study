@@ -1,0 +1,83 @@
+<h2>Что будет в конце</h2>
+<p>На твоей машине работают Kafka и кластер Flink из одного JobManager и одного TaskManager. Генератор пишет платежи в топик, а задание печатает их в лог. Это скелет, на котором будет расти весь проект.</p>
+
+<h2>Шаг 1. Создай проект</h2>
+<p>Создай папку <code>payguard</code> рядом со своим <code>Makefile</code>, а внутри два файла. Первый задаёт имя проекта. Gradle ставить не обязательно, wrapper можно скопировать из <code>solutions/lesson-01</code>, это папка <code>gradle/</code> и файлы <code>gradlew</code> и <code>gradlew.bat</code>. Wrapper сам скачает Gradle 9.8.1 при первом запуске.</p>
+<div data-code="lesson-01/settings.gradle.kts"></div>
+<p>Второй файл описывает сборку и зависимости.</p>
+<div data-code="lesson-01/build.gradle.kts"></div>
+
+<p>Разберём места, где сборка Flink-задания отличается от обычного Java-приложения. Самое важное здесь разделение зависимостей.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-01/build.gradle.kts" data-lines="23-36"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Создаём свою группу зависимостей <code>flinkProvided</code>. Классы Flink уже лежат в образе, и если положить их в jar второй раз, начнутся конфликты загрузчиков классов.</p>
+      <p class="tl">Эти классы нужны при компиляции и в тестах, поэтому <code>compileOnly</code> и <code>testImplementation</code> наследуют группу.</p>
+      <p class="tl"><code>flink-streaming-java</code> это DataStream API, <code>flink-clients</code> умеет запускать задание, <code>flink-connector-base</code> содержит общую основу коннекторов.</p>
+      <p class="tl">Коннектор Kafka в образе отсутствует, поэтому он идёт через <code>implementation</code> и попадает в jar. Его версия <code>5.0.0-2.2</code> читается как версия коннектора плюс версия Flink, под которую он собран.</p>
+      <p class="tl">Jackson нужен для JSON в генераторе и позже в задании.</p>
+      <p class="tl">Реализация логгера нужна только генератору на твоей машине. В кластере логгер уже есть.</p>
+    </div>
+  </div>
+</div>
+<p>Блок <code>tasks.shadowJar</code> собирает толстый jar, в котором лежит твой код и все зависимости из <code>implementation</code>. Строка с <code>Main-Class</code> нужна, чтобы <code>flink run</code> нашёл точку входа без лишних аргументов. Вызовы <code>mergeServiceFiles</code> и <code>filesMatching</code> склеивают файлы <code>META-INF/services</code> из разных библиотек. Без них коннектор теряет регистрацию своих компонентов. Исключение подписей <code>*.SF</code> нужно потому, что подпись чужого jar становится недействительной после пересборки.</p>
+
+<h2>Шаг 2. Опиши стенд в Docker Compose</h2>
+<p>Положи в корень проекта <code>docker-compose.yml</code>.</p>
+<div data-code="lesson-01/docker-compose.yml"></div>
+<p>Настройки Flink переданы переменной <code>FLINK_PROPERTIES</code>. Скрипт запуска образа дописывает её содержимое в родной <code>config.yaml</code>, поэтому ключи здесь проверенные и файл монтировать не нужно. Папка <code>build/libs</code> смонтирована в контейнер как <code>/jobs</code>, так собранный jar виден JobManager. У Kafka два слушателя. Контейнеры ходят на <code>kafka:9092</code>, а твоя машина на <code>localhost:9094</code>. Служба <code>kafka-init</code> создаёт топики с четырьмя партициями и завершается.</p>
+
+<h2>Шаг 3. Модель и генератор платежей</h2>
+<p>Платёж описан неизменяемым record. Сумма хранится в минимальных единицах валюты в <code>long</code>, чтобы не ловить ошибки округления <code>double</code>.</p>
+<div data-code="lesson-01/src/main/java/dev/study/payguard/model/PaymentEvent.java"></div>
+<p>Генератор создаёт нагрузку, близкую к настоящей. Треть платежей идёт в одного продавца <code>m-0000</code>, часть приходит с опозданием, часть дублируется, часть битая. Эта грязь понадобится нам в следующих уроках.</p>
+<div data-code="lesson-01/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java"></div>
+<div data-code="lesson-01/src/main/java/dev/study/payguard/loadgen/RawRecordSource.java"></div>
+<div data-code="lesson-01/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java"></div>
+<div data-code="lesson-01/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java"></div>
+
+<h2>Шаг 4. Первое задание</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/job/PayGuardJob.java</code>.</p>
+<div data-code="lesson-01/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-01/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="16-30"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Получаем окружение. При запуске через <code>flink run</code> оно подключено к кластеру. Как и <code>SparkSession</code>, оно служит точкой входа, но ничего не исполняет сразу.</p>
+      <p class="tl">Описываем источник Kafka. <code>setGroupId</code> задаёт группу потребителей, <code>latest</code> велит читать только новые записи, а <code>SimpleStringSchema</code> превращает байты в строку.</p>
+      <p class="tl"><code>fromSource</code> добавляет источник в граф. Про <code>noWatermarks</code> поговорим в уроке 5, пока время события нам не нужно. Третий аргумент это имя в интерфейсе.</p>
+      <p class="tl"><code>print</code> добавляет приёмник, который пишет записи в стандартный вывод TaskManager. В терминале клиента этих строк не будет.</p>
+      <p class="tl">До этой строки был только план. <code>env.execute</code> отправляет его на кластер, похоже на действие <code>start()</code> в Spark.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 5. Собери и запусти</h2>
+<p>На macOS сначала укажи JDK 17, если по умолчанию у тебя другая версия. Порядок команд здесь не случайный. Если поднять Compose раньше сборки, Docker смонтирует пустую папку <code>build/libs</code>, и jar в контейнере не появится.</p>
+<pre data-lang="bash" data-title="терминал">export JAVA_HOME=$(/usr/libexec/java_home -v 17)
+./gradlew shadowJar
+docker compose up -d --wait</pre>
+<p>Флаг <code>--wait</code> заставляет команду дождаться готовности контейнеров. Теперь спроси у кластера, как он себя чувствует. REST-интерфейс отвечает на порту 8081, там же открывается Web UI.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:8081/overview | jq .</pre>
+<pre data-lang="json" data-title="вывод" data-output>{
+  "taskmanagers": 1,
+  "slots-total": 4,
+  "slots-available": 4,
+  "jobs-running": 0,
+  "jobs-finished": 0,
+  "jobs-cancelled": 0,
+  "jobs-failed": 0,
+  "flink-version": "2.2.1",
+  "flink-commit": "450c63e"
+}</pre>
+<p>Поля <code>taskmanagers</code> и <code>slots-total</code> сразу показывают то, чего не было при твоём запуске через <code>Makefile</code>. Отправь задание и запусти генератор на пять платежей в секунду.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec jobmanager flink run --detached /jobs/payguard-1.0.0.jar
+./gradlew loadgen --args="--rate 5 --dup 0.02 --bad 0.01"</pre>
+<p>Флаг <code>--detached</code> отдаёт терминал сразу после отправки и оставляет задание работать. Вывод <code>print</code> живёт в логе TaskManager, смотри его из второго терминала.</p>
+<pre data-lang="bash" data-title="терминал">docker compose logs -f taskmanager | grep -E '[0-9]+> '</pre>
+<pre data-lang="text" data-title="вывод" data-output>1> {"paymentId":"3d7afcf2-701e-3e1b-be95-6415e9444aa4","cardId":"c-2982","merchantId":"m-0048","amountMinor":676,"currency":"EUR","country":"NL","eventTimeMs":1794084709909}
+1> {"paymentId":"8b470b4d-c563-a975-d7fa-cd92300f2f0f","cardId":"c-0422","merchantId":"m-0000","amountMinor":17305,"currency":"EUR","country":"FR","eventTimeMs":1794084710014}</pre>
+<p>Число перед <code>&gt;</code> это номер подзадачи плюс один. Открой <code>http://localhost:8081</code>, зайди в задание <code>payguard</code> и посмотри на его граф. В следующем уроке мы подробно разберём, что там нарисовано. Сервисы можно оставить запущенными или остановить командой <code>docker compose down</code>.</p>

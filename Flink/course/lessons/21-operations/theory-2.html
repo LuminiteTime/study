@@ -1,0 +1,145 @@
+<h2>Kafka с паролем</h2>
+<p>До этого урока брокер отвечал любому, кто дотянулся до порта. SASL (Simple Authentication and Security Layer) это способ аутентификации в протоколе Kafka. При подключении клиент представляется, брокер сверяет учётные данные и только после этого обрабатывает запросы. Механизм PLAIN передаёт логин и пароль открытым текстом, поэтому в проде его используют только поверх TLS, и такое сочетание называется SASL_SSL. На стенде включён SASL_PLAINTEXT без шифрования, чтобы не заводить сертификаты, и в коде это помечено комментарием.</p>
+<p>Клиенту нужны три свойства Kafka, <code>security.protocol</code>, <code>sasl.mechanism</code> и <code>sasl.jaas.config</code>. Документация коннектора показывает их в том же виде. JAAS (Java Authentication and Authorization Service) это стандартный механизм Java, в нём модуль входа и его параметры записываются одной строкой. Пароль в проекте приходит из переменной окружения, поэтому его нет ни в git, ни в jar.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Куда попадают свойства, которые мы передаём источнику. Смотри на поле <code>props</code>.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/KafkaSource.java" data-lines="98-116" data-must="private final Properties props;"></div>
+<p>И на то, от чего наследуется любой источник Flink.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/connector/source/SourceReaderFactory.java" data-lines="25-31" data-must="extends Serializable"></div>
+<p>Переменная окружения читается в <code>main</code> при построении графа. Пароль ложится в поле <code>props</code>, а источник сериализуется вместе с графом задания и уезжает на JobManager и TaskManager. Комментарий в <code>KafkaSecurity</code> об этом и предупреждает, в jar пароля нет, а в графе он есть. Для учебного стенда это приемлемо. В проде пароль лучше читать на стороне TaskManager из смонтированного секрета. Клиент Kafka 4.2.0 умеет подставлять значения через <code>config.providers</code>, это видно в его классе <code>AbstractConfig</code>, но с Flink мы такую схему не проверяли.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#security" target="_blank" rel="noopener">Kafka connector, Security</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/security/security-ssl/" target="_blank" rel="noopener">SSL Setup</a></p>
+</div>
+
+<p>Защищать стоит и сам Flink. В чек-листе готовности к проду документация Flink прямо пишет, что кластер спроектирован для исполнения присланного кода, поэтому REST и Web UI нельзя выставлять в открытую сеть. TLS для внутренних соединений и REST настраивается отдельно, это раздел SSL Setup.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/production_ready/#secure-flink-cluster-access" target="_blank" rel="noopener">Production Readiness, Secure Flink Cluster Access</a></p>
+
+<h2>Выпуск образа из CI</h2>
+<p>В уроке 16 мы завели <code>ci.yml</code>, он гоняет тесты на каждый push. Теперь к нему добавляется <code>release.yml</code>, который срабатывает на тег версии вида <code>v1.0.0</code>. Он прогоняет быстрые и сквозные тесты, собирает толстый jar, строит образ по <code>docker/job.Dockerfile</code> из урока 20 и публикует его в реестр контейнеров GitHub (GitHub Container Registry, <code>ghcr.io</code>) с тегом, равным имени тега git.</p>
+<p>Дальше выкатка сводится к одной правке. В FlinkDeployment меняется поле <code>image</code>, оператор снимает savepoint и поднимает задание на новом образе, это режим <code>savepoint</code> из урока 20. Откат делается той же правкой назад. Поэтому образ помечается неизменяемой версией. Тег <code>latest</code> в этой схеме опасен по той же причине, что и в уроке 1, им нельзя сказать, какой код сейчас работает.</p>
+<p>Честная оговорка. <code>release.yml</code> лежит в снапшоте, но на GitHub не запускался, публикацию в <code>ghcr.io</code> мы не проверяли.</p>
+
+<h2>Почему курс на Flink 2.2.1, если вышел 2.3.0</h2>
+<p>На главной странице курса обещано разобрать этот выбор. Flink 2.3.0 уже есть на Maven Central и в Docker Hub, и тег <code>flink:latest</code> указывает на него. Обновление потокового задания затрагивает четыре вещи, и каждую проверяют отдельно.</p>
+
+<h3>Есть ли коннекторы под новую версию</h3>
+<p>Коннекторы Flink живут в отдельных репозиториях и выходят по своему графику. Версия артефакта состоит из двух частей, <code>5.0.0-2.2</code> значит коннектор 5.0.0, собранный под Flink 2.2. На 8 ноября 2026 года в Maven Central у <code>flink-connector-kafka</code> последние версии <code>5.0.0-2.1</code> и <code>5.0.0-2.2</code>, у <code>flink-connector-jdbc-core</code> <code>4.1.0-2.1</code> и <code>4.1.0-2.2</code>. На странице загрузок Flink для Kafka Connector 5.0.0 указана совместимость с 2.1.x и 2.2.x. Артефактов под 2.3 нет ни у одного из двух.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Матрица CI коннектора на теге v5.0.0. По ней видно, на каких версиях Flink его тестируют.</p>
+<div data-src="kafka:.github/workflows/push_pr.yml" data-lines="28-36" data-must="flink: &amp;flink_versions [ 2.2.0, 2.1.1 ]"></div>
+<p>Для сравнения список версий Flink, которые знает оператор 1.16.1.</p>
+<div data-src="operator:flink-kubernetes-operator-api/src/main/java/org/apache/flink/kubernetes/operator/api/spec/FlinkVersion.java" data-lines="47-53" data-must="v2_3(2, 3),"></div>
+<p>Оператор версию 2.3 уже знает, в его перечислении есть <code>v2_3</code> и даже <code>v2_4</code>. Блокирует обновление коннектор, на теге v5.0.0 его не тестировали на 2.3.</p>
+</div>
+
+<p>В Spark модуль Kafka для Structured Streaming выпускается вместе со Spark и имеет тот же номер версии. Вопроса «вышел ли коннектор» при обновлении Spark не возникает. Во Flink этот вопрос первый, и ответ на него часто приходит через несколько недель после релиза движка.</p>
+
+<h3>Совместим ли код</h3>
+<p>Классы Flink помечены аннотациями стабильности, и документация по обновлению даёт для них таблицу гарантий. <code>@Public</code> между минорными версиями сохраняет совместимость по исходникам, но код может потребовать перекомпиляции. <code>@PublicEvolving</code> между минорными версиями не гарантирует ничего. Класс без аннотации считается внутренним. <code>@Experimental</code> не обещает совместимости даже между патч-версиями. <code>KafkaSource</code> в цитате выше помечен <code>@PublicEvolving</code>. Сам <code>KafkaSink</code> тоже помечен <code>@PublicEvolving</code> и реализует интерфейс Flink, у которого стоит <code>@Experimental</code>.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Объявление приёмника Kafka и интерфейса, который он реализует для работы после Committer.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaSink.java" data-lines="76-80" data-must="SupportsPostCommitTopology&lt;KafkaCommittable&gt;"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/connector/sink2/SupportsPostCommitTopology.java" data-lines="25-32" data-must="@Experimental"></div>
+<p>Коннектор связан с API, которое между минорными версиями Flink может меняться без предупреждения. Поэтому jar, собранный с <code>5.0.0-2.2</code>, на 2.3 никто не обещает, и коннектор пересобирают под каждую минорную версию.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/upgrading/#api-compatibility-guarantees" target="_blank" rel="noopener">API compatibility guarantees</a></p>
+</div>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Похожая хрупкость есть и со стороны клиента Kafka. Тот же <code>FlinkKafkaInternalProducer</code> достаёт внутренние поля продюсера рефлексией. Смотри, что происходит, если поля нет.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/FlinkKafkaInternalProducer.java" data-lines="280-292" data-must="Incompatible KafkaProducer version"></div>
+<p>Если в своей сборке поднять <code>kafka-clients</code> выше версии, с которой собран коннектор, и в новой версии внутреннее поле переименуют, exactly-once приёмник упадёт с этим сообщением, как только понадобится <code>resumeTransaction</code>. Версию клиента Kafka разумно оставлять той, что приезжает с коннектором.</p>
+</div>
+
+<h3>Совместимо ли состояние</h3>
+<p>Сама процедура обновления движка описана в документации в три шага. Остановить задание со savepoint на старой версии, обновить кластер, запустить задание на новой версии из этого savepoint. Есть два способа. При обновлении на месте (in-place) старый кластер останавливают и обновляют. При теневой копии (shadow copy) рядом поднимают новый, запускают задание из savepoint там и гасят старый, только когда всё работает. Для PayGuard в Kubernetes это смена образа и <code>flinkVersion</code> в FlinkDeployment с режимом <code>savepoint</code>.</p>
+<p>Таблица совместимости savepoint в документации 2.2 заканчивается на столбце 1.20.x, про переход 2.2 на 2.3 в ней ничего нет. Поэтому совместимость состояния проверяют двумя способами. Читают release notes новой версии и прогоняют restore-тест из урока 16 на зависимостях новой версии, а потом поднимают теневую копию из настоящего savepoint.</p>
+
+<h3>Что изменилось в поведении</h3>
+<p>Release notes, заметки к выпуску, перечисляют изменения, которые могут задеть работающее задание. В заметках к 2.3 есть, например, исправление <code>MiniBatchGroupAggFunction</code>, которая в одном из режимов mini-batch агрегации молча теряла записи, и чекпоинты во время восстановления из unaligned-чекпоинта. Первое касается SQL-заданий урока 14, второе урока 18. При переходе через несколько версий читают заметки к каждой промежуточной.</p>
+
+<table>
+<thead><tr><th>Проверка</th><th>Где смотреть</th><th>Итог для 2.3.0 в ноябре 2026</th></tr></thead>
+<tbody>
+<tr><td>Коннекторы</td><td>Maven Central, страница загрузок Flink, CI коннектора</td><td>Kafka и JDBC собраны только под 2.1 и 2.2</td></tr>
+<tr><td>Код</td><td>Аннотации стабильности, сборка и тесты на новой версии</td><td>Нечего собирать, пока нет коннекторов</td></tr>
+<tr><td>Состояние</td><td>Release notes, restore-тест, теневая копия</td><td>Проверять после выхода коннекторов</td></tr>
+<tr><td>Поведение</td><td>Release notes каждой промежуточной версии</td><td>Изменения в SQL и восстановлении стоит учесть</td></tr>
+<tr><td>Оператор</td><td>Перечисление <code>FlinkVersion</code>, документация оператора</td><td>1.16.1 знает <code>v2_3</code></td></tr>
+</tbody>
+</table>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/upgrading/#api-compatibility-guarantees" target="_blank" rel="noopener">API compatibility guarantees</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/upgrading/#upgrading-the-flink-framework-version" target="_blank" rel="noopener">Upgrading the Flink Framework Version</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/upgrading/#compatibility-table" target="_blank" rel="noopener">Compatibility Table</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.3/release-notes/flink-2.3/" target="_blank" rel="noopener">Release Notes Flink 2.3</a></p>
+
+<div class="callout callout-accent">
+  <div class="callout-icon">💡</div>
+  <div class="callout-content">
+    <strong class="callout-title">Обновление начинается с самого медленного компонента</strong>
+    <p>Свежая версия движка ничего не даёт, пока под неё не вышли коннекторы, которыми пользуется задание. Поэтому в проде версию Flink выбирают по самому отстающему коннектору и закрепляют её везде, от образа до Gradle. Когда выйдет <code>flink-connector-kafka</code> под 2.3, PayGuard надо будет провести через все пять проверок из таблицы, и только потом менять образ.</p>
+  </div>
+</div>
+
+<h2>Что ты построил за курс</h2>
+<p>PayGuard прошёл путь от задания, которое печатало платежи в лог, до системы, которую можно передать дежурной смене.</p>
+<table>
+<thead><tr><th>Часть системы</th><th>Уроки</th></tr></thead>
+<tbody>
+<tr><td>Чтение из Kafka, разбор, DLQ для битых записей, свои типы без Kryo</td><td>1-4</td></tr>
+<tr><td>Время события, окна, состояние карт с TTL, правила без перезапуска, обогащение из PostgreSQL, CEP</td><td>5-10</td></tr>
+<tr><td>Чекпоинты на RocksDB, exactly-once в Kafka, идемпотентная запись в PostgreSQL, savepoint и rescale</td><td>11-13</td></tr>
+<tr><td>Отчёты на Flink SQL, CDC и Paimon</td><td>14-15</td></tr>
+<tr><td>Пять уровней тестов, метрики и алерты, поиск узких мест, расчёт памяти, Kubernetes с HA</td><td>16-20</td></tr>
+<tr><td>Разбор аварии, хаос-тест, SASL, выпуск образа, проверка обновления</td><td>21</td></tr>
+</tbody>
+</table>
+
+<h2>Что делать дальше</h2>
+<ul>
+  <li>Довести безопасность до прода. SASL_SSL с настоящими сертификатами для Kafka, TLS для REST и внутренних соединений Flink, пароли из секретов на стороне TaskManager.</li>
+  <li>Попробовать автоскейлер оператора. Он меняет параллелизм по нагрузке, и в уроке 20 мы его не трогали.</li>
+  <li>Следить за выходом <code>flink-connector-kafka</code> под 2.3 и пройти на PayGuard всю проверку совместимости из этого урока, с теневой копией и restore-тестом.</li>
+  <li>Перенести Kafka и PostgreSQL в управляемые сервисы или кластеры с репликацией и повторить хаос-тест уже против них.</li>
+  <li>Читать исходники дальше. Когда в логах появится незнакомое исключение, ищи его в коде коннектора и рантайма, как в этом уроке. Обычно ветка, куда оно попадает, объясняет поведение задания лучше документации.</li>
+</ul>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/production_ready/" target="_blank" rel="noopener">Production Readiness Checklist</a>, <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/managing/autoscaler/" target="_blank" rel="noopener">Operator Autoscaler</a></p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l21">
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Ошибка поднимается из состояния приёмника при каждом восстановлении. Пока committable в снимке, рестарты бесполезны. Сначала чинят хранилище брокера, потом запускают задание без состояния приёмника, целиком без состояния или со сменой uid и allowNonRestoredState."
+       data-explanation-wrong="Посмотри, откуда при рестарте берётся транзакция с producerId 31. Её приносит восстановленный committable, и он будет тем же при любом числе попыток.">
+    <h3 class="quiz-question">После сбоя брокера задание крутится в RESTARTING с InvalidPidMappingException при коммите. Коллега предлагает увеличить паузу между рестартами и подождать. Что делать?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Подождать, брокер со временем восстановит связь transactional.id с producerId</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Перевести приёмник в AT_LEAST_ONCE и перезапустить задание из того же чекпоинта</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Дать брокеру постоянное хранилище и запустить задание без состояния приёмника</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Счётчик восстановлений рос, пока не было базы. JDBC-приёмник падал на открытии, exponential-delay растягивал паузы, а когда PostgreSQL вернулся, задание поехало дальше без дублей в fraud.alerts. Сработает PayGuardJobRestarted, и это правильный сигнал."
+       data-explanation-wrong="Сверь с итогом хаос-теста. Дублей при read_committed ноль, задание RUNNING. Что показывает история исключений в этот период?">
+    <h3 class="quiz-question">Во время хаос-теста PostgreSQL лежал 30 секунд, и счётчик восстановлений вырос с 1 до 5. Это ошибка в PayGuard?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Да, exactly-once нарушен, каждое восстановление дало дубли в fraud.alerts</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Нет, приёмник в базу не открывался, стратегия перезапуска ждала базу, гарантии сохранились</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Да, задание надо было настроить на fixed-delay, тогда восстановление было бы одно</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Без коннектора под 2.3 нечего собирать и тестировать, а KafkaSource помечен PublicEvolving, совместимость с другой минорной версией никто не обещает. Сначала коннекторы, потом сборка, restore-тест и теневая копия."
+       data-explanation-wrong="Посмотри на таблицу гарантий для PublicEvolving и на то, что в jar лежит коннектор, собранный под 2.2.">
+    <h3 class="quiz-question">Платформенная команда предлагает поменять образ PayGuard на flink:2.3.0-java17, раз он вышел. В jar лежит flink-connector-kafka 5.0.0-2.2. Что ответить?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Подождать коннектор под 2.3, потом собрать проект с ним и пройти restore-тест и теневую копию</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Можно менять, минорные версии Flink обратно совместимы для всех классов</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Можно менять, если запустить задание без savepoint, тогда совместимость не важна</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

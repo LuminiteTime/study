@@ -1,0 +1,110 @@
+<h2>Задание в статусе RUNNING, а алертов нет</h2>
+<p>Представь ночь. Web UI показывает задание <code>payguard</code> в статусе RUNNING, генератор пишет платежи, лаг Kafka нулевой. При этом команда антифрода уже час не получает ни одного алерта. Причина в чекпоинтах, они падают один за другим. В уроке 12 мы сделали приёмник алертов транзакционным, и потребитель с <code>read_committed</code> видит алерт только после завершённого чекпоинта. Нет чекпоинтов, нет и алертов, хотя каждый оператор честно работает.</p>
+<p>Web UI такое покажет, если в него посмотреть. Ночью в него никто не смотрит. Нужна система, которая сама снимает показатели со всех процессов кластера, хранит их историю и будит дежурного, когда показатель вышел за границу. В промышленной эксплуатации Flink это обычно связка из трёх частей. Flink публикует метрики, Prometheus их собирает и проверяет правила, Grafana рисует графики.</p>
+
+<h2>Прикроватный монитор и пост медсестры</h2>
+<p>В реанимации у каждой койки стоит монитор. Датчики снимают пульс, давление и насыщение крови кислородом, а центральный пост собирает показания со всех палат. Медсестра не смотрит в экраны без перерыва. Монитор сам подаёт сигнал, если пульс вышел за границу и держится там несколько секунд, а короткий скачок от кашля тревоги не вызывает.</p>
+<p>Самая неприятная поломка здесь тихая. Прищепка датчика соскользнула с пальца, и монитор перестал получать пульс. Порог «пульс выше 140» в этот момент сравнивать не с чем, поэтому он молчит. Для этого у мониторов есть отдельная тревога «датчик отключён», и она срабатывает на отсутствие сигнала.</p>
+<p>Во Flink датчики это метрики внутри JobManager и TaskManager. Центральный пост это Prometheus, он сам обходит процессы и забирает показания. Пороги с выдержкой это правила алертов с параметром <code>for</code>. Тревогу «датчик отключён» придётся написать самому, в PayGuard это правило на функции <code>absent</code>. Ниже ты увидишь, что без неё падение TaskManager проходит мимо правила на лаг.</p>
+
+<svg viewBox="0 0 860 200" role="img" aria-label="Путь метрики. Оператор пишет значение в группу метрик, репортер в каждом процессе Flink отдаёт его по HTTP на порту 9249, Prometheus забирает значения раз в 10 секунд, проверяет правила и отдаёт данные Grafana." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l17" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="20" width="300" height="160" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="160" y="42" font-weight="700">Процесс TaskManager</text>
+    <rect x="25" y="60" width="125" height="46" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="87" y="80">Оператор</text><text x="87" y="97" font-size="11">counter.inc()</text>
+    <rect x="170" y="60" width="125" height="46" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="232" y="80">MetricGroup</text><text x="232" y="97" font-size="11">область и метки</text>
+    <rect x="70" y="122" width="180" height="46" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="160" y="142">PrometheusReporter</text><text x="160" y="159" font-size="11">HTTP :9249 /metrics</text>
+    <rect x="380" y="70" width="170" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="465" y="95">Prometheus</text><text x="465" y="113" font-size="11">опрос раз в 10 с</text><text x="465" y="129" font-size="11">правила alerts.yml</text>
+    <rect x="620" y="25" width="220" height="60" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="730" y="50">Grafana</text><text x="730" y="68" font-size="11">дашборд PayGuard</text>
+    <rect x="620" y="115" width="220" height="60" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="730" y="140">Алерты</text><text x="730" y="158" font-size="11">pending, firing</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l17)">
+    <path d="M150 83H168"/><path d="M232 106L200 120"/><path d="M378 105L252 145"/><path d="M550 95L618 60"/><path d="M550 115L618 145"/>
+  </g>
+  <text x="315" y="190" font-size="11" fill="var(--color-text-secondary)" font-family="var(--font-body)">стрелка от Prometheus: он сам приходит за данными</text>
+</svg>
+
+<h2>Из чего состоит метрика Flink</h2>
+<p>Метрика во Flink это именованное значение, которое регистрируют в группе метрик (<code>MetricGroup</code>). Типов четыре.</p>
+<table>
+<thead><tr><th>Тип</th><th>Что хранит</th><th>Пример в PayGuard</th></tr></thead>
+<tbody>
+<tr><td>Counter</td><td>Целое число, которое увеличивают и могут уменьшать методами <code>inc</code> и <code>dec</code></td><td>Число алертов по правилу <code>velocity</code></td></tr>
+<tr><td>Gauge</td><td>Значение, которое вычисляется в момент чтения</td><td>Время последнего успешного чекпоинта, занятая куча</td></tr>
+<tr><td>Meter</td><td>Скорость событий в секунду</td><td><code>numRecordsOutPerSecond</code> источника</td></tr>
+<tr><td>Histogram</td><td>Распределение значений и его квантили</td><td>Задержка маркеров latency tracking, в PayGuard выключена</td></tr>
+</tbody>
+</table>
+<p>Каждая метрика живёт в дереве групп. Корень дерева задаёт процесс, JobManager или TaskManager. Дальше идут задание, задача (task), оператор. Это системная область (scope), её строит сам Flink. Внутри своей функции ты получаешь группу оператора через <code>getRuntimeContext().getMetricGroup()</code> и можешь добавить к ней свои уровни методом <code>addGroup</code>. Это пользовательская область.</p>
+<p>У группы есть переменные. Для оператора это хост, идентификатор TaskManager, имя задания, имя задачи, номер подзадачи, имя оператора и ещё несколько. Метод <code>addGroup(key, value)</code> с двумя аргументами добавляет свою переменную, и в PayGuard так появится переменная <code>rule</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверим, что делает <code>addGroup</code> с двумя аргументами. Он создаёт две вложенные группы, группу ключа и группу значения.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/metrics/groups/AbstractMetricGroup.java" data-lines="480-488" data-must="addGroup(key, ChildType.KEY).addGroup(value, ChildType.VALUE)"></div>
+<p>Группа значения кладёт пару в переменные и не добавляет себя в логическую область. Логическая область группы значения равна области родителя, то есть ключа.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/metrics/groups/GenericValueMetricGroup.java" data-lines="48-56" data-must="variables.put(ScopeFormat.asVariable(this.key), value)"></div>
+<p>Из этого следует правило, важное для Prometheus. Ключ <code>rule</code> войдёт в имя метрики, а значение <code>velocity</code> станет меткой. Если бы мы написали <code>addGroup("velocity")</code> с одним аргументом, каждое правило получило бы своё имя метрики, и сложить их одним запросом стало бы неудобно.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/metrics/" target="_blank" rel="noopener">Metrics</a></p>
+</div>
+
+<p>Meter заслуживает отдельного взгляда, потому что на нём построены почти все метрики «в секунду». Число записей на выходе оператора Flink считает счётчиком, а скорость получает обёрткой <code>MeterView</code> над этим счётчиком.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Группа ввода и вывода оператора регистрирует скорость как <code>MeterView</code> поверх счётчика записей.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/metrics/groups/InternalOperatorIOMetricGroup.java" data-lines="44-58" data-must="IO_NUM_RECORDS_OUT_RATE, new MeterView(numRecordsOut)"></div>
+<p>По умолчанию окно у <code>MeterView</code> шестьдесят секунд.</p>
+<div data-src="flink:flink-metrics/flink-metrics-core/src/main/java/org/apache/flink/metrics/MeterView.java" data-lines="41-41" data-must="DEFAULT_TIME_SPAN_IN_SECONDS = 60"></div>
+<p>Скорость считается как разница между текущим значением счётчика и самым старым значением в кольцевом буфере, делённая на длину окна.</p>
+<div data-src="flink:flink-metrics/flink-metrics-core/src/main/java/org/apache/flink/metrics/MeterView.java" data-lines="97-108" data-must="timeSpanInSeconds)"></div>
+<p>Значит, <code>numRecordsOutPerSecond</code> показывает среднее за последнюю минуту. После остановки потока метрика опускается к нулю плавно, в течение минуты. Для правила алерта это лишняя инерция, которую надо держать в голове.</p>
+</div>
+
+<h2>Как Prometheus получает метрики</h2>
+<p>Flink сам никуда метрики не отправляет. Их выносит наружу репортер (reporter), подключаемый модуль, который создаётся в каждом JobManager и TaskManager при старте. Репортер для Prometheus работает по модели pull. Он поднимает внутри процесса маленький HTTP-сервер, а Prometheus по расписанию приходит к каждому процессу и забирает текущие значения. Такой поход называется опросом (scrape). Jar репортера уже лежит в папке <code>plugins</code> образа Flink, отдельно его скачивать не нужно.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Фабрика берёт порт из настройки <code>port</code>, по умолчанию 9249. Значение может быть диапазоном.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/PrometheusReporterFactory.java" data-lines="27-39" data-must="DEFAULT_PORT = &quot;9249&quot;"></div>
+<p>Репортер перебирает порты диапазона и поднимает HTTP-сервер на первом свободном. Если не удалось ни на одном, процесс получает исключение.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/PrometheusReporter.java" data-lines="47-65" data-must="new HTTPServer(new InetSocketAddress(port), this.registry)"></div>
+<p>Диапазон нужен, когда на одной машине несколько процессов Flink. В нашем Compose каждый процесс в своём контейнере, поэтому хватает одного порта.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/metric_reporters/" target="_blank" rel="noopener">Metric Reporters</a></p>
+</div>
+
+<p>Теперь самое практичное. По какому имени искать метрику в Prometheus и какие у неё метки. Ответ даёт метод, который вызывается при регистрации каждой метрики.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Все переменные группы превращаются в метки. У ключа срезаются угловые скобки, у значения недопустимые символы заменяются фильтром.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="98-111" data-must="group.getAllVariables().entrySet()"></div>
+<p>Имя собирается из префикса <code>flink_</code>, логической области группы и имени метрики.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="142-147" data-must="SCOPE_PREFIX"></div>
+<p>Логическая область берётся у самой группы с разделителем <code>_</code>, а фильтр меняет всё, кроме латиницы, цифр, двоеточия и подчёркивания, на подчёркивание.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="263-266" data-must="getLogicalScope(CHARACTER_FILTER, SCOPE_SEPARATOR)"></div>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="68-74" data-must="replaceAll(&quot;_&quot;)"></div>
+<p>Логическая область состоит из названий уровней, у оператора в TaskManager это <code>taskmanager_job_task_operator</code>. Поэтому счётчик алертов PayGuard называется <code>flink_taskmanager_job_task_operator_rule_alerts</code>, а имя источника <code>Source: payments-raw</code> превращается в метку <code>operator_name="Source:_payments_raw"</code>. Документация говорит, что недопустимые символы удаляются. Код их заменяет, и правила PayGuard написаны по коду.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/metric_reporters/#prometheus" target="_blank" rel="noopener">Metric Reporters, Prometheus</a></p>
+</div>
+
+<p>Отсюда следствие про настройки <code>metrics.scope.*</code>. Они задают формат идентификатора вроде <code>localhost.taskmanager.1234.payguard.deduplicate.0.numRecordsIn</code>, и класс <code>ScopeFormats</code> читает их из конфигурации. Такими идентификаторами пользуются репортеры без меток, например JMX и Graphite. Репортер Prometheus строит имя по логической области, поэтому смена этих форматов имён в Prometheus не меняет. Состав меток регулируется другой настройкой, <code>metrics.reporter.&lt;имя&gt;.scope.variables.excludes</code>.</p>
+
+<h2>Четыре типа превращаются в два</h2>
+<p>В Prometheus свои типы метрик, и они не совпадают с типами Flink. Репортер переводит одни в другие.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>При создании коллектора Gauge, Counter и Meter попадают в одну ветку и становятся Gauge в Prometheus. Histogram получает своего посредника.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="155-175" data-must="case COUNTER:"></div>
+<p>Значение Counter отдаётся как его текущее число, значение Meter как его скорость.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="296-312" data-must="return meter.getRate();"></div>
+<p>Посредник гистограммы отдаёт тип Summary. Комментарий объясняет, почему не <code>SummaryMetricFamily</code>. Сумму всех значений у гистограммы Flink взять негде, поэтому в выводе есть число наблюдений и квантили .5, .75, .95, .98, .99 и .999, а ряда <code>_sum</code> нет.</p>
+<div data-src="flink:flink-metrics/flink-metrics-prometheus/src/main/java/org/apache/flink/metrics/prometheus/AbstractPrometheusReporter.java" data-lines="336-351" data-must="Type.SUMMARY"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/metric_reporters/#prometheus" target="_blank" rel="noopener">таблица соответствия типов</a></p>
+</div>
+
+<p>Counter становится Gauge потому, что счётчик Prometheus умеет только расти, а у Counter во Flink есть метод <code>dec</code>. Документация PromQL велит применять <code>rate</code> и <code>increase</code> только к счётчикам. Сам язык тип ряда не проверяет. Функция смотрит на значения и любое уменьшение считает сбросом счётчика, после которого отсчёт начался с нуля. На метриках Flink, которые по смыслу только растут, это работает. Правило PayGuard на <code>increase</code> от числа перезапусков на стенде сработало ровно тогда, когда должно было. Ошибётся функция на значении, которое законно уменьшается, поэтому <code>dec</code> в своих счётчиках лучше не вызывать.</p>
+<p>Сброс случается и без <code>dec</code>. После перезапуска задачи её метрики регистрируются заново и начинают с нуля. Для <code>rate</code> это обычный сброс. Меняются и метки вроде <code>task_attempt_id</code>, поэтому в запросах ряды почти всегда складывают через <code>sum by</code> по тем меткам, которые нужны на графике.</p>
+

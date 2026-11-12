@@ -1,0 +1,96 @@
+<h2>Что будет в конце</h2>
+<p>Рядом с основным кластером работает второй, для SQL. На нём запущено задание из файла <code>sql/merchant_revenue.sql</code>, которое пишет выручку продавцов по минутам в таблицу PostgreSQL. Java-кода в этой части нет, и <code>build.gradle.kts</code> пока не меняется. Файлы <code>src/main/resources/sql/risk_revenue.sql</code> и <code>SqlJobRunner.java</code> относятся к заданию, сейчас их создавать не нужно.</p>
+
+<h2>Шаг 1. Почему нельзя добавить коннектор в общий образ</h2>
+<p>Простой путь это положить <code>flink-sql-connector-kafka</code> в <code>lib/</code> основного кластера. Тогда отправка нашего DataStream-задания перестаёт проходить.</p>
+<pre data-lang="text" data-title="вывод flink run" data-output>java.lang.NoSuchMethodError: ...OffsetsInitializer.committedOffsets(org.apache.kafka.clients.consumer.OffsetResetStrategy)</pre>
+<p>Причину мы разобрали в теории. Класс <code>org.apache.flink.*</code> пришёл из <code>lib/</code>, его метод ждёт перепакованный тип, а задание скомпилировано с обычным. Лечение здесь архитектурное. SQL живёт на отдельном кластере со своим образом, DataStream-задания остаются на старом.</p>
+
+<h2>Шаг 2. Образ с коннекторами</h2>
+<p>Создай <code>docker/Dockerfile</code>.</p>
+<div data-code="lesson-14/docker/Dockerfile"></div>
+<p>Инструкция <code>ADD</code> скачивает файл по URL прямо при сборке образа, а <code>--chown</code> отдаёт его пользователю <code>flink</code>, от имени которого работает процесс. В <code>lib/</code> ложатся толстый коннектор Kafka, две части JDBC-коннектора и драйвер PostgreSQL.</p>
+<p>Две последние строки появились после реальной ошибки. Без них SQL с JDBC-коннектором завершается так.</p>
+<pre data-lang="text" data-title="вывод sql-client.sh" data-output>[ERROR] Could not execute SQL statement. Reason: java.lang.ClassNotFoundException: io.openlineage.client.utils.jdbc.JdbcExtractor</pre>
+<p>OpenLineage это библиотека для отслеживания происхождения данных. В POM артефакта <code>flink-connector-jdbc-core</code> версии 4.1.0-2.2 она указана обычной зависимостью, поэтому в его jar не входит. В образ её надо добавить отдельно, это файлы <code>openlineage-java</code> и <code>openlineage-sql-java</code> 1.32.0.</p>
+
+<h2>Шаг 3. Второй кластер в Compose</h2>
+<p>Добавь в <code>docker-compose.yml</code> общий блок настроек и две службы.</p>
+<div data-diff="lesson-13/docker-compose.yml lesson-14/docker-compose.yml"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-14/docker-compose.yml" data-lines="35-54"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>x-flink-sql-common</code> это YAML-якорь, общий кусок настроек для двух служб. Compose игнорирует ключи с префиксом <code>x-</code> и разрешает на них ссылаться.</p>
+      <p class="tl"><code>image</code> вместе с <code>build</code> велит собрать образ из папки <code>docker</code> и дать ему имя.</p>
+      <p class="tl"><code>profiles: [sql]</code> означает, что службы стартуют только при флаге <code>--profile sql</code>. Обычный <code>docker compose up</code> их не трогает.</p>
+      <p class="tl"><code>jobmanager.rpc.address</code> указывает на собственный JobManager этого кластера. Память и слоты задаём отдельно от основного.</p>
+      <p class="tl">Бэкенд RocksDB и чекпоинты каждые 15 с работают для SQL так же, как для DataStream. Каталог свой, чтобы снимки двух кластеров не смешивались.</p>
+      <p class="tl">Папка <code>./sql</code> смонтирована только для чтения, из неё клиент возьмёт скрипт.</p>
+    </div>
+  </div>
+</div>
+<p>Порт JobManager отображён на <code>8082</code>, основной кластер остаётся на <code>8081</code>.</p>
+
+<h2>Шаг 4. Таблица в PostgreSQL</h2>
+<p>Допиши таблицу результата в конец <code>sql/init.sql</code>.</p>
+<div data-code="lesson-14/sql/init.sql" data-lines="22-28"></div>
+<p>Первичный ключ здесь совпадает с ключом в DDL Flink, по нему идёт upsert. Образ PostgreSQL выполняет <code>init.sql</code> только при пустом каталоге данных. Если стенд уже поднимался, сначала останови его командой <code>docker compose --profile sql down</code>, тогда новый контейнер создаст таблицы заново.</p>
+
+<h2>Шаг 5. Запрос</h2>
+<p>Создай <code>sql/merchant_revenue.sql</code>.</p>
+<div data-code="lesson-14/sql/merchant_revenue.sql"></div>
+<p>Разберём объявление источника.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-14/sql/merchant_revenue.sql" data-lines="4-22"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Поля повторяют JSON нашего <code>PaymentEvent</code>, поэтому имена в camelCase.</p>
+      <p class="tl"><code>event_time</code> это вычисляемая колонка. <code>TO_TIMESTAMP_LTZ</code> превращает миллисекунды в метку времени, и в сообщении Kafka такого поля нет.</p>
+      <p class="tl"><code>WATERMARK FOR</code> делает колонку атрибутом времени события и разрешает опоздание на 10 с. Этот же приём из урока 5 здесь занимает одну строку.</p>
+      <p class="tl"><code>connector</code>, <code>topic</code> и адрес брокера связывают таблицу с топиком. Сама таблица данных не хранит.</p>
+      <p class="tl"><code>latest-offset</code> велит читать только новые записи при первом запуске.</p>
+      <p class="tl"><code>json.ignore-parse-errors</code> пропускает записи и поля с ошибками разбора вместо падения задания. Нашей DLQ из урока 3 в этом запросе нет, поэтому битые записи никуда не сохраняются.</p>
+    </div>
+  </div>
+</div>
+<p>Приёмник <code>merchant_revenue_1m</code> объявлен с <code>PRIMARY KEY ... NOT ENFORCED</code>. Эти слова значат, что Flink не проверяет уникальность сам и верит, что её обеспечивает внешняя система. <code>SET 'pipeline.name'</code> задаёт имя задания, которое ты увидишь в Web UI.</p>
+
+<h2>Шаг 6. Запусти</h2>
+<p>Порядок команд прежний, сначала сборка, потом Compose. Иначе смонтируется пустая <code>build/libs</code>.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose --profile sql up -d --wait
+docker compose --profile sql exec sql-jobmanager sql-client.sh -f /sql/merchant_revenue.sql</pre>
+<p>Флаг <code>--profile sql</code> включает службы профиля вместе с обычными, поэтому поднимутся оба кластера. Первый запуск дольше из-за сборки образа. Флаг <code>-f</code> у SQL Client выполняет файл по одной инструкции и завершается на первой ошибке. <code>INSERT</code> клиент по умолчанию выполняет асинхронно, то есть отправляет задание и выходит, а оно продолжает работать на кластере. Открой <code>http://localhost:8082</code> и убедись, что задание <code>payguard-sql-revenue</code> работает.</p>
+<p>Дай нагрузку.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew loadgen --args="--rate 200"</pre>
+<p>Генератор занимает терминал, поэтому через пару минут посмотри на результат из второго.</p>
+<pre data-lang="bash" data-title="второй терминал">docker compose exec postgres psql -U payguard -d payguard \
+  -c "SELECT count(*) AS rows_total, sum(payment_count) AS payments FROM merchant_revenue_1m"
+docker compose exec postgres psql -U payguard -d payguard \
+  -c "SELECT * FROM merchant_revenue_1m ORDER BY amount_minor DESC LIMIT 5"</pre>
+<p>В нашем прогоне за 100 с при 200 платежах в секунду таблица получила 100 строк с суммой 15423 платежа. Цифры объясняются так. Продавцов 50, значит, закрылось две минуты. 15423 платежа при такой скорости это около 77 с потока. Остальные ещё лежали в открытом окне или были отброшены как опоздавшие, потому что генератор задерживает часть платежей на срок до 30 с, а водяной знак разрешает 10 с. Пока первая минута не закроется, строк в таблице не будет совсем. Во втором запросе первым должен стоять <code>m-0000</code>, ему генератор отдаёт 30 % платежей.</p>
+
+<h2>Шаг 7. Посмотри на changelog своими глазами</h2>
+<p>Необязательный эксперимент. Запусти клиент без <code>-f</code> командой <code>docker compose --profile sql exec sql-jobmanager sql-client.sh</code>, вставь <code>CREATE TABLE payments</code> из скрипта и выполни два запроса ниже.</p>
+<pre data-lang="sql" data-title="SQL Client">SET 'sql-client.execution.result-mode' = 'tableau';
+SELECT merchantId, COUNT(*) AS cnt FROM payments GROUP BY merchantId;
+
+EXPLAIN CHANGELOG_MODE
+SELECT merchantId, window_start, COUNT(*)
+FROM TABLE(TUMBLE(TABLE payments, DESCRIPTOR(event_time), INTERVAL '1' MINUTE))
+GROUP BY merchantId, window_start, window_end;</pre>
+<p>Режим <code>tableau</code> печатает результат прямо в терминал с колонкой <code>op</code>, в ней появятся пометки <code>+I</code>, <code>-U</code> и <code>+U</code>. Запрос останови через Ctrl+C. Вывод <code>EXPLAIN CHANGELOG_MODE</code> показывает для каждого узла поле <code>changelogMode</code>. Мы выполнили <code>EXPLAIN CHANGELOG_MODE</code> для обоих запросов на стенде. Ниже раздел Optimized Physical Plan, длинные списки полей у источника обрезаны.</p>
+<pre data-lang="text" data-title="вывод, GROUP BY merchantId" data-output>GroupAggregate(groupBy=[merchantId], select=[merchantId, COUNT(*) AS cnt], changelogMode=[I,UA])
++- Exchange(distribution=[hash[merchantId]], changelogMode=[I])
+   +- Calc(select=[merchantId], changelogMode=[I])
+      +- TableSourceScan(table=[[default_catalog, default_database, payments, ...]], ..., changelogMode=[I])</pre>
+<pre data-lang="text" data-title="вывод, окно TUMBLE" data-output>Calc(select=[merchantId, window_start, EXPR$2], changelogMode=[I])
++- GlobalWindowAggregate(groupBy=[merchantId], window=[TUMBLE(slice_end=[$slice_end], size=[1 min])], ..., changelogMode=[I])
+   +- Exchange(distribution=[hash[merchantId]], changelogMode=[I])
+      +- LocalWindowAggregate(groupBy=[merchantId], window=[TUMBLE(time_col=[event_time], size=[1 min])], ..., changelogMode=[I])
+         +- Calc(select=[merchantId, Reinterpret(TO_TIMESTAMP_LTZ(eventTimeMs, 3)) AS event_time], changelogMode=[I])
+            +- TableSourceScan(table=[[default_catalog, default_database, payments, ...]], ..., changelogMode=[I])</pre>
+<p>Читай снизу вверх. Источник Kafka в обоих планах выдаёт только вставки, <code>I</code>. Обычная агрегация на выходе даёт <code>[I,UA]</code>, то есть вставку и обновление после изменения (<code>+U</code>). Каждый новый платёж меняет уже выданный счётчик продавца, поэтому такой поток примет только приёмник с поддержкой upsert. Оконная агрегация выдаёт только <code>I</code>. Окно закрывается по водяному знаку один раз, и его строка больше не меняется, поэтому результат можно писать даже в приёмник, который умеет только дописывать. Заодно видно, что оптимизатор сам разбил оконный запрос на две фазы. <code>LocalWindowAggregate</code> считает частичные суммы до обмена по сети, <code>GlobalWindowAggregate</code> складывает их после <code>Exchange</code>. Ту же схему для перекоса урок 18 строит руками на DataStream.</p>

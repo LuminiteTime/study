@@ -1,0 +1,106 @@
+<h2>Что будет в конце</h2>
+<p>Источник Kafka сам разбирает JSON и ставит каждому платежу метку времени из <code>eventTimeMs</code>. Watermark считается по каждой партиции с допуском 10 секунд, а молчащая минуту партиция перестаёт его держать. Ты найдёшь watermark в REST и в Web UI и поймёшь, почему у источника его не видно. Пробу опозданий напишешь в задании, её файлы сейчас создавать не нужно.</p>
+<p>Новых зависимостей нет, <code>build.gradle.kts</code> не меняется.</p>
+
+<h2>Шаг 1. Результат разбора</h2>
+<p>Схема десериализации обязана вернуть один объект на запись. Битая запись тоже должна дойти до DLQ, поэтому заводим обёртку, в которой заполнено ровно одно поле. Создай <code>model/ParsedRecord.java</code>.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/model/ParsedRecord.java"></div>
+<p>Это public record из двух полей-record, поэтому Flink сериализует его без Kryo, и запрет generic-типов из урока 3 продолжает действовать.</p>
+
+<h2>Шаг 2. Разбор в источнике</h2>
+<p>Создай <code>pipeline/ParsedRecordSchema.java</code>. Класс <code>PaymentValidator</code> из урока 3 остаётся как был.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/pipeline/ParsedRecordSchema.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-05/src/main/java/dev/study/payguard/pipeline/ParsedRecordSchema.java" data-lines="16-39"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>AbstractDeserializationSchema</code> берёт на себя описание типа результата. Её конструктор выводит тип <code>ParsedRecord</code> из параметра класса через <code>TypeExtractor</code>, наследнику остаётся написать <code>deserialize</code>.</p>
+      <p class="tl">Схема, как и функция, сериализуется на клиенте и едет в TaskManager. <code>ObjectMapper</code> создаётся в <code>open</code>, уже внутри подзадачи.</p>
+      <p class="tl">Байты превращаются в строку, затем в <code>PaymentEvent</code>. Валидатор из урока 3 решает, годится ли платёж. Годный оборачивается в <code>accepted</code>, негодный в <code>rejected</code> с причиной.</p>
+      <p class="tl">Синтаксическая ошибка JSON перехватывается и становится записью с причиной <code>bad-json</code>. Исключение из <code>deserialize</code> уронило бы задачу, эмиттер Kafka заворачивает его в <code>IOException</code>.</p>
+      <p class="tl">Время отказа берётся с часов машины, это момент разбора, его видно в DLQ.</p>
+    </div>
+  </div>
+</div>
+<p>Старый <code>ParsePaymentFunction</code> и его тест удали, их работу теперь делают схема и следующий класс. Новый тест схемы проверяет те же три случая.</p>
+<div data-code="lesson-05/src/test/java/dev/study/payguard/pipeline/ParsedRecordSchemaTest.java"></div>
+<p>Схеме не нужен тестовый стенд, это обычный объект. В <code>open</code> передаётся <code>null</code>, потому что наш метод контекст не читает.</p>
+
+<h2>Шаг 3. Развилка после источника</h2>
+<p>Из источника выходит <code>ParsedRecord</code>. Разведём его на поток платежей и побочный выход отказов. Создай <code>pipeline/SplitParsedRecords.java</code>.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/pipeline/SplitParsedRecords.java"></div>
+<p>Метка <code>REJECTED</code> и способ работы с побочным выходом те же, что в уроке 3. Функция стала проще, потому что разбирать ей больше нечего.</p>
+
+<h2>Шаг 4. Стратегия watermark</h2>
+<p>Создай <code>pipeline/PaymentWatermarks.java</code>. Это единственное место, где задание решает, что такое время.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/pipeline/PaymentWatermarks.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-05/src/main/java/dev/study/payguard/pipeline/PaymentWatermarks.java" data-lines="10-18"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Допуск беспорядка 10 секунд и таймаут простоя одна минута вынесены в публичные константы, чтобы их было видно с первого взгляда и можно было взять в тестах.</p>
+      <p class="tl"><code>forBoundedOutOfOrderness</code> создаёт генератор, который мы разобрали в теории. Явный параметр <code>&lt;ParsedRecord&gt;</code> нужен компилятору, иначе он не узнает тип записи в лямбде ниже.</p>
+      <p class="tl">TimestampAssigner получает запись и метку Kafka. Принятому платежу ставится его <code>eventTimeMs</code>. У отказа времени события нет, и он берёт метку Kafka. Генератор не задаёт её сам, поэтому её ставит продюсер в момент отправки, и она близка к текущему времени.</p>
+      <p class="tl"><code>withIdleness</code> оборачивает генератор проверкой простоя. Партиция без записей дольше минуты перестаёт держать общий watermark.</p>
+    </div>
+  </div>
+</div>
+<p>Отказы тоже двигают watermark, ведь генератор видит все записи сплита. Их метка Kafka почти совпадает с текущим временем, поэтому watermark от них не убегает вперёд.</p>
+
+<h2>Шаг 5. Задание</h2>
+<p>Открой <code>PayGuardJob</code>. Источник теперь отдаёт <code>ParsedRecord</code>, а вместо <code>noWatermarks</code> передаётся наша стратегия. Начало метода <code>main</code> выглядит так.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="29-39"></div>
+<p>Метод сборки источника меняет тип и схему.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="60-68"></div>
+<p>Подсчёт сумм по продавцам из урока 4 остаётся прежним. До задания подключи его прямо к переменной <code>split</code>, то есть цепочка начинается с <code>split.map(MerchantTotal::of)</code>. В задании между ними встанет проба.</p>
+<p>Оператор переименован в <code>split-parsed</code> и получил новый <code>uid</code>. Состояния у прежнего оператора не было, и чекпоинтов в проекте пока нет, поэтому смена <code>uid</code> ничего не ломает. В уроке 13 мы увидим, когда это опасно.</p>
+
+<h2>Шаг 6. Собери и запусти</h2>
+<p>Тесты, сборка, стенд. Порядок прежний, иначе Compose смонтирует пустую <code>build/libs</code>.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list</pre>
+<p>Если от прошлого урока осталось задание, останови его через <code>flink cancel &lt;JobID&gt;</code>. Затем отправь новое и запусти генератор с процентом битых записей. Флаг <code>--late</code> по умолчанию равен 0,05, это доля опоздавших платежей.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen --args="--rate 100 --bad 0.01"</pre>
+<pre data-lang="text" data-title="вывод submit.sh" data-output>Job has been submitted with JobID b891c20d5e8a11946fb87cf4f96fe80c</pre>
+<p>Битые записи должны по-прежнему попадать в DLQ, теперь их отсеивает схема. Прочитай начало топика той же командой, что в уроке 3.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic payments.dlq --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085416337}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085417451}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085424125}</pre>
+
+<h2>Шаг 7. Watermark в REST</h2>
+<p>У каждой вершины графа есть ресурс <code>/watermarks</code>. Пройдём по всем вершинам задания. Первая строка находит идентификатор работающего задания, цикл берёт идентификаторы вершин, а <code>jq -c '[.[].value]'</code> оставляет из ответа только значения по подзадачам.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+for V in $(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[].id'); do
+  curl -s localhost:8081/jobs/$JOB/vertices/$V/watermarks | jq -c '[.[].value]'
+done</pre>
+<pre data-lang="json" data-title="вывод" data-output>[]
+["1794085494920","1794085494920"]</pre>
+<p>Первая строка относится к вершине с источником, вторая к вершине <code>merchant-running-total</code>. Значение это миллисекунды от начала эпохи Unix, 7 ноября 2026 года, 21:04:54.920 по UTC. Команда <code>date -r 1794085494</code> на macOS переведёт его в твой часовой пояс. Обе подзадачи показывают одно число, как и на схеме из теории.</p>
+<p>Пустой список у источника выглядит как поломка, хотя watermark там есть. Причина в том, что именно отдаёт этот ресурс.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Обработчик REST читает у каждой подзадачи одну метрику уровня задачи, <code>currentInputWatermark</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/rest/handler/job/metrics/JobVertexWatermarksHandler.java" data-lines="86-98" data-must="MetricNames.IO_CURRENT_INPUT_WATERMARK"></div>
+<p>Эту метрику на уровне задачи регистрирует задача с сетевым входом. Код ниже из <code>OneInputStreamTask</code>. В задаче источника такой регистрации нет, у неё нет входа из сети.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/OneInputStreamTask.java" data-lines="129-135" data-must="IO_CURRENT_INPUT_WATERMARK"></div>
+<p>Поэтому watermark источника видно только по вершине, которая его получила. У операторов внутри цепочки есть своя метрика с тем же именем на уровне оператора. Её регистрирует <code>OperatorChain</code>, в списке метрик подзадачи она начинается с имени оператора, например <code>split-parsed</code>.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/metrics/" target="_blank" rel="noopener">Metrics</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/rest_api/" target="_blank" rel="noopener">REST API</a></p>
+</div>
+
+<h2>Шаг 8. Watermark в Web UI</h2>
+<p>Открой <code>http://localhost:8081</code> и задание <code>payguard</code>. На прямоугольнике вершины <code>merchant-running-total</code> есть строка <code>Low Watermark</code>. Щёлкни по вершине, в нижней панели открой вкладку <code>Watermarks</code>. Там значения по подзадачам и рядом дата в часовом поясе браузера.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Web UI берёт тот же ресурс REST и считает <code>Low Watermark</code> как минимум по подзадачам. Значение не больше <code>Long.MIN_VALUE</code> превращается в «нет watermark».</p>
+<div data-src="flink:flink-runtime-web/web-dashboard/src/app/services/metrics.service.ts" data-lines="147-167" data-must="lowWatermark = minValue"></div>
+<p>Отсюда два практических вывода. У вершины источника строки <code>Low Watermark</code> не будет, список пуст. Если вместо числа во вкладке написано <code>No Watermark (Watermarks are only available if EventTime is used)</code>, вершина получила только начальное значение <code>Long.MIN_VALUE</code>. Так было в уроках 1-4 с <code>noWatermarks</code>, и так бывает, когда ни одна партиция ещё ничего не прислала.</p>
+</div>
+
+<p>Как читать число. Сравни watermark с текущим временем. Разница около 10 секунд значит, что всё в порядке, это наш допуск. Разница, которая растёт, значит, что одна партиция отстала или замолчала, а таймаут простоя ещё не истёк.</p>

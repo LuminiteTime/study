@@ -1,0 +1,16 @@
+<h2>Задание. Итоги продавцов в PostgreSQL</h2>
+<p>Минутные итоги по продавцам сейчас уходят в топик <code>merchant.stats</code> в режиме at-least-once. После каждого падения там появляются повторы. Отчётам нужна таблица, в которой у каждого продавца одна строка на окно. Перенеси итоги в PostgreSQL и сделай запись идемпотентной.</p>
+<ol>
+  <li>Добавь в <code>build.gradle.kts</code> JDBC-коннектор Flink версии <code>4.1.0-2.2</code>, модули <code>flink-connector-jdbc-core</code> и <code>flink-connector-jdbc-postgres</code>. Драйвер PostgreSQL в проекте уже есть.</li>
+  <li>Опиши в <code>sql/init.sql</code> таблицу <code>merchant_stats</code> с колонками продавца, начала и конца окна, числа платежей, суммы и времени обновления. Первичный ключ выбери так, чтобы одно окно продавца было одной строкой.</li>
+  <li>Напиши класс <code>JdbcSinks</code> с методом <code>merchantStats()</code>, который возвращает приёмник для <code>MerchantStats</code>. Запрос вставки при конфликте ключа обновляет итоги.</li>
+  <li>В <code>PayGuardJob</code> замени приёмник итогов на новый, назови его <code>merchant-stats-postgres</code> с таким же <code>uid</code>. Поле <code>merchantStatsTopic</code> из <code>JobConfig</code> и топик <code>merchant.stats</code> из <code>kafka-init</code> больше не нужны, убери их.</li>
+</ol>
+<p>Готово, если после двух убийств TaskManager под нагрузкой в 200 платежей в секунду задание работает, в графе есть вершина с <code>merchant-stats-postgres: Writer</code>, а в таблице ровно по одной строке на продавца и окно для всех 50 продавцов.</p>
+<p>Подсказки.</p>
+<ul>
+  <li>Новый строитель приёмника лежит в пакете <code>org.apache.flink.connector.jdbc.core.datastream.sink</code>, класс <code>JdbcSink</code>. Нужен вариант at-least-once, транзакции здесь не понадобятся.</li>
+  <li>Адрес базы, пользователь и пароль уже есть в окружении JobManager и TaskManager, переменные <code>PAYGUARD_DB_URL</code>, <code>PAYGUARD_DB_USER</code> и <code>PAYGUARD_DB_PASSWORD</code>.</li>
+  <li>Окно продавца с допуском опоздания может сработать для одного окна несколько раз. Подумай, что должно произойти со строкой при втором срабатывании.</li>
+  <li>Образ PostgreSQL выполняет скрипты из <code>docker-entrypoint-initdb.d</code> только при создании пустой базы. Чтобы новая таблица появилась, контейнер базы придётся пересоздать вместе с его томом.</li>
+</ul>

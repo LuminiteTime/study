@@ -1,0 +1,313 @@
+{
+  "uid": "payguard",
+  "title": "PayGuard",
+  "schemaVersion": 41,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Платежей в секунду на входе",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(flink_taskmanager_job_task_operator_numRecordsOutPerSecond{job_name=\"payguard\",operator_name=\"Source:_payments_raw\"})",
+          "legendFormat": "payments.raw"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Лаг Kafka, записей",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(max by (subtask_index) (flink_taskmanager_job_task_operator_KafkaSourceReader_KafkaConsumer_records_lag_max{job_name=\"payguard\",operator_name=\"Source:_payments_raw\"}))",
+          "legendFormat": "payments.raw"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Отставание по времени события",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(flink_taskmanager_job_task_operator_currentEmitEventTimeLag{job_name=\"payguard\",operator_name=\"Source:_payments_raw\"})",
+          "legendFormat": "источник"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Занятость и backpressure (мс в секунду)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (task_name) (flink_taskmanager_job_task_busyTimeMsPerSecond{job_name=\"payguard\"})",
+          "legendFormat": "busy {{task_name}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (task_name) (flink_taskmanager_job_task_backPressuredTimeMsPerSecond{job_name=\"payguard\"})",
+          "legendFormat": "backpressure {{task_name}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Длительность чекпоинта",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "flink_jobmanager_job_lastCheckpointDuration{job_name=\"payguard\"}",
+          "legendFormat": "длительность"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Размер чекпоинта",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "flink_jobmanager_job_lastCheckpointSize{job_name=\"payguard\"}",
+          "legendFormat": "записано"
+        },
+        {
+          "refId": "B",
+          "expr": "flink_jobmanager_job_lastCheckpointFullSize{job_name=\"payguard\"}",
+          "legendFormat": "полное состояние"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Перезапуски и неудачные чекпоинты",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "flink_jobmanager_job_numRestarts{job_name=\"payguard\"}",
+          "legendFormat": "перезапуски"
+        },
+        {
+          "refId": "B",
+          "expr": "flink_jobmanager_job_numberOfFailedCheckpoints{job_name=\"payguard\"}",
+          "legendFormat": "неудачные чекпоинты"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Алерты по правилам, в минуту",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (rule) (rate(flink_taskmanager_job_task_operator_rule_alerts{job_name=\"payguard\"}[1m])) * 60",
+          "legendFormat": "{{rule}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Куча TaskManager",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "flink_taskmanager_Status_JVM_Memory_Heap_Used",
+          "legendFormat": "занято"
+        },
+        {
+          "refId": "B",
+          "expr": "flink_taskmanager_Status_JVM_Memory_Heap_Max",
+          "legendFormat": "максимум"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Время GC в секунду",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 32,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(flink_taskmanager_Status_JVM_GarbageCollector_All_Time[1m])",
+          "legendFormat": "GC"
+        }
+      ]
+    }
+  ]
+}

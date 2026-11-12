@@ -1,0 +1,231 @@
+<h2>Под убит, а куча заполнена наполовину</h2>
+<p>Типичная история первого месяца в Kubernetes. Задание с RocksDB работает неделю, потом под TaskManager начинает перезапускаться со статусом OOMKilled. Графики кучи JVM спокойные, заполнено процентов шестьдесят, исключений в логе нет. Процесс убивает ядро Linux, потому что контейнер вышел за свой лимит памяти.</p>
+<p>Причина почти всегда в памяти за пределами кучи. RocksDB живёт в нативной памяти, туда же JVM кладёт стеки потоков, скомпилированный код и метаданные классов. Если ты не знаешь, сколько каждая из этих частей может занять, лимит контейнера становится лотереей. Flink решает задачу явной моделью памяти. Ты задаёшь один размер процесса, а Flink до старта JVM делит его на области с известными границами и передаёт JVM соответствующие флаги.</p>
+<p>У Spark похожая забота устроена иначе. Там размер контейнера складывается из <code>spark.executor.memory</code> под кучу и отдельного <code>spark.executor.memoryOverhead</code> под всё остальное. Во Flink вне кучи лежит большая и важная часть, управляемая память под RocksDB, поэтому делить нужно точнее.</p>
+
+<h2>Гермомешок на сплав</h2>
+<p>Перед сплавом инструктор выдаёт каждому гермомешок на 60 литров и правила укладки. Сначала кладётся обязательное, аптечка и запасная обувь, у них фиксированный объём. Потом десятая часть мешка отводится на непредвиденное, но не меньше трёх литров и не больше десяти. Из оставшегося 40 % уходит под еду, 10 % под воду, а одежда занимает всё, что осталось. Если ты объявишь, что мешок 60 литров и вещей у тебя на 80, инструктор не пустит тебя в лодку ещё на берегу.</p>
+<p>TaskManager собирается точно так же. Мешок это <code>taskmanager.memory.process.size</code>. Аптечка и обувь это Metaspace и память фреймворка. Запас на непредвиденное это JVM Overhead, доля с нижней и верхней границей. Еда это managed memory, вода это сетевая память, одежда это куча задач. Конфликт настроек Flink ловит на берегу, при старте процесса, и TaskManager просто не запускается.</p>
+
+<h2>Карта памяти TaskManager</h2>
+<p>Ниже раскладка нашего стенда, у TaskManager <code>process.size</code> 2048m и доля managed 0,4. Цифры взяты из REST после запуска, их же покажет скрипт в практике.</p>
+
+<svg viewBox="0 0 860 220" role="img" aria-label="Полоса памяти TaskManager на 2048 МиБ. Слева куча JVM из Framework Heap 128 и Task Heap 537, затем direct-память из Framework Off-Heap 128 и Network 158, затем Managed 634, справа Metaspace 256 и JVM Overhead 204." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <g font-size="12" fill="var(--color-text)" font-family="var(--font-body)" text-anchor="middle">
+    <rect x="10" y="60" width="53" height="70" fill="var(--color-accent)" fill-opacity="0.45" stroke="var(--color-surface)"/>
+    <rect x="63" y="60" width="223" height="70" fill="var(--color-accent)" fill-opacity="0.85" stroke="var(--color-surface)"/>
+    <rect x="286" y="60" width="53" height="70" fill="var(--color-info)" fill-opacity="0.4" stroke="var(--color-surface)"/>
+    <rect x="339" y="60" width="66" height="70" fill="var(--color-info)" fill-opacity="0.85" stroke="var(--color-surface)"/>
+    <rect x="405" y="60" width="263" height="70" fill="var(--color-success)" fill-opacity="0.8" stroke="var(--color-surface)"/>
+    <rect x="668" y="60" width="106" height="70" fill="var(--color-text-muted)" fill-opacity="0.45" stroke="var(--color-surface)"/>
+    <rect x="774" y="60" width="85" height="70" fill="var(--color-text-muted)" fill-opacity="0.75" stroke="var(--color-surface)"/>
+    <text x="36" y="92">FW</text><text x="36" y="110">128</text>
+    <text x="174" y="92">Task Heap</text><text x="174" y="110">537</text>
+    <text x="312" y="92">FW off</text><text x="312" y="110">128</text>
+    <text x="372" y="92">Network</text><text x="372" y="110">158</text>
+    <text x="536" y="92">Managed</text><text x="536" y="110">634</text>
+    <text x="721" y="92">Metaspace</text><text x="721" y="110">256</text>
+    <text x="816" y="92">Overhead</text><text x="816" y="110">204</text>
+    <text x="148" y="40" fill="var(--color-text-secondary)">куча JVM, -Xmx 665</text>
+    <text x="345" y="40" fill="var(--color-text-secondary)">direct, 286</text>
+    <text x="536" y="40" fill="var(--color-text-secondary)">нативная, RocksDB</text>
+    <text x="763" y="40" fill="var(--color-text-secondary)">вне Total Flink</text>
+    <text x="339" y="165">Total Flink Memory 1587 МиБ</text>
+    <text x="763" y="165">460 МиБ</text>
+    <text x="430" y="205" font-weight="700">Total Process Memory 2048 МиБ = размер контейнера</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.2" fill="none">
+    <path d="M12 52V46H284V52"/><path d="M288 52V46H403V52"/><path d="M407 52V46H666V52"/><path d="M670 52V46H857V52"/>
+    <path d="M12 140V146H666V140"/><path d="M670 140V146H857V140"/><path d="M12 178V184H857V178"/>
+  </g>
+</svg>
+
+<table>
+<thead><tr><th>Область</th><th>Что в ней живёт</th><th>Как задаётся</th></tr></thead>
+<tbody>
+<tr><td>Framework Heap и Framework Off-Heap</td><td>Объекты самого TaskManager, не твоего кода</td><td>По 128m, обычно не трогают</td></tr>
+<tr><td>Task Heap</td><td>Объекты операторов, записи в полёте, состояние <code>HashMapStateBackend</code></td><td>Остаток после всех остальных областей</td></tr>
+<tr><td>Task Off-Heap</td><td>Direct-буферы и нативная память твоего кода и библиотек</td><td>0 по умолчанию</td></tr>
+<tr><td>Network</td><td>Сетевые буферы между подзадачами из урока 4</td><td>Доля 0,1 от Total Flink, не меньше 64m</td></tr>
+<tr><td>Managed</td><td>Кэш и memtable RocksDB, сортировки пакетных операторов</td><td>Доля 0,4 от Total Flink</td></tr>
+<tr><td>JVM Metaspace</td><td>Метаданные загруженных классов</td><td>256m</td></tr>
+<tr><td>JVM Overhead</td><td>Стеки потоков, кэш JIT, внутренние структуры JVM</td><td>Доля 0,1 от процесса, от 192m до 1g</td></tr>
+</tbody>
+</table>
+<p>По этим областям Flink собирает флаги JVM. В <code>-Xmx</code> попадает сумма двух куч, в <code>-XX:MaxDirectMemorySize</code> сумма двух off-heap и сетевой памяти, в <code>-XX:MaxMetaspaceSize</code> размер Metaspace. Managed memory и Overhead ни одним флагом не ограничены. За managed отвечает сам Flink, а Overhead остаётся запасом внутри лимита контейнера.</p>
+
+<h2>Как Flink делит process.size</h2>
+<p>Порядок вычислений жёсткий, и от него зависят формулы. Обозначим размер процесса P.</p>
+<ol>
+  <li>Overhead = 0,1 × P с обрезкой по границам 192m и 1g. Для P = 2048 МиБ получается 204,8 МиБ.</li>
+  <li>Total Flink = P − Metaspace − Overhead = 2048 − 256 − 204,8 = 1587,2 МиБ.</li>
+  <li>Managed = 0,4 × Total Flink = 634,9 МиБ. Network = 0,1 × Total Flink = 158,7 МиБ с обрезкой снизу по 64m.</li>
+  <li>Task Heap = Total Flink − 128 − 128 − 0 − Managed − Network = 537,6 МиБ.</li>
+</ol>
+<p>Куча задач получается последней и забирает остаток. Поэтому, подняв долю managed, ты отнимаешь память именно у кучи, и при маленьком процессе она может уйти в минус.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Точка входа выбирает одну из трёх веток по тому, какие размеры заданы явно. Обрати внимание на приоритет. Если заданы куча задач и managed, считается от них. Если задан Total Flink, от него. Размер процесса используется, только когда нет ни того, ни другого.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/util/config/memory/ProcessMemoryUtils.java" data-lines="72-87" data-must="deriveProcessSpecWithTotalProcessMemory(config)"></div>
+<p>Ветка от размера процесса сначала вычисляет Metaspace и Overhead и только потом вычитает их, получая Total Flink.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/util/config/memory/ProcessMemoryUtils.java" data-lines="109-121" data-must="totalProcessMemorySize.subtract("></div>
+<p>Дальше внутри Total Flink. Managed и сетевая память выводятся из долей, а куча задач получает то, что осталось после вычитания всех остальных областей. Проверка перед вычитанием и есть тот случай, когда одежда не влезла в мешок.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/util/config/memory/taskmanager/TaskExecutorFlinkMemoryUtils.java" data-lines="145-174" data-must="taskHeapMemorySize = totalFlinkMemorySize.subtract(totalFlinkExcludeTaskHeapMemorySize);"></div>
+<p>Доля умножается на базу, результат обрезается по min и max. Для сети и Overhead границы заданы опциями, для managed это ноль и бесконечность.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/util/config/memory/ProcessMemoryUtils.java" data-lines="305-317" data-must="base.multiply(rangeFraction.getFraction())"></div>
+<p>Значения по умолчанию для JVM-областей лежат в <code>TaskManagerOptions</code>. Metaspace 256m, Overhead от 192m до 1g.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/TaskManagerOptions.java" data-lines="535-560" data-must="192m"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/memory/mem_setup_tm/" target="_blank" rel="noopener">Set up TaskManager Memory</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/memory/mem_setup/" target="_blank" rel="noopener">Set up Flink's Process Memory</a></p>
+</div>
+
+<p>Калькулятор ниже повторяет эти вычисления в том же порядке, с теми же значениями по умолчанию и с тем же округлением. Поля без значения считаются незаданными, как отсутствующий ключ в конфиге. Кнопки подставляют три настоящих случая из курса. Сначала стенд, потом конфликт, на который мы нарвались в этом уроке, и старый конфиг из урока 1.</p>
+
+<div class="viz" id="viz-l19">
+  <p class="viz-title">Калькулятор памяти TaskManager</p>
+  <div class="viz-controls">
+    <button class="primary" type="button" data-preset="course">Стенд курса</button>
+    <button type="button" data-preset="conflict">process 1g и flink 2g</button>
+    <button type="button" data-preset="lesson1">Конфиг из урока 1</button>
+  </div>
+  <div class="viz-controls">
+    <label>process.size, МиБ <input type="number" id="viz-l19-process" min="256" max="65536" step="64" value="2048"></label>
+    <label>flink.size <input type="number" id="viz-l19-flink" min="0" step="64" value="" placeholder="не задан"></label>
+    <label>task.heap.size <input type="number" id="viz-l19-taskHeap" min="0" step="64" value="" placeholder="не задан"></label>
+    <label>managed.size <input type="number" id="viz-l19-managed" min="0" step="64" value="" placeholder="не задан"></label>
+  </div>
+  <div class="viz-controls">
+    <label>managed.fraction <input type="range" id="viz-l19-managedFraction" min="0" max="0.9" step="0.05" value="0.4"> <span id="viz-l19-managedFraction-value">0.40</span></label>
+    <label>network.fraction <input type="range" id="viz-l19-networkFraction" min="0" max="0.5" step="0.01" value="0.1"> <span id="viz-l19-networkFraction-value">0.10</span></label>
+    <label>jvm-overhead.fraction <input type="range" id="viz-l19-overheadFraction" min="0" max="0.5" step="0.01" value="0.1"> <span id="viz-l19-overheadFraction-value">0.10</span></label>
+    <label>Metaspace, МиБ <input type="number" id="viz-l19-metaspace" min="64" step="32" value="256"></label>
+    <label>Слотов <input type="number" id="viz-l19-slots" min="1" max="64" value="4"></label>
+  </div>
+  <svg id="viz-l19-svg" role="img" aria-label="Полоса памяти TaskManager, разделённая на области по введённым настройкам."></svg>
+  <table><thead><tr><th>Поле</th><th>Значение</th></tr></thead><tbody id="viz-l19-table"></tbody></table>
+  <p class="viz-note" id="viz-l19-result"></p>
+</div>
+
+<p>С кнопкой «Стенд курса» калькулятор выдаёт ровно те числа, что показал TaskManager на стенде, включая ёмкость блочного кэша RocksDB до байта. Попробуй сдвинуть managed.fraction к 0,8 при 2048 МиБ и посмотри, как тает Task Heap. Потом поставь 768 МиБ и долю 0,4, и TaskManager не стартует.</p>
+
+<h2>Когда настройки спорят</h2>
+<p>Опасно задавать сразу несколько размеров. Каждый новый явный размер убирает у Flink свободу, и в какой-то момент области перестают сходиться. Тогда ошибка всплывает на старте TaskManager, задание даже не начнёт разворачиваться.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Если заданы и размер процесса, и Total Flink, Overhead перестаёт быть долей и становится разностью. Когда разность отрицательная, Flink бросает исключение с текстом, который мы увидим в практике.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/util/config/memory/ProcessMemoryUtils.java" data-lines="189-206" data-must="is less than the sum of the derived"></div>
+<p>Все такие ошибки оборачиваются в одно сообщение с общим префиксом. По нему конфликт памяти легко найти в логе.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/clusterframework/TaskExecutorProcessUtils.java" data-lines="148-156" data-must="TaskManager memory configuration failed: "></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/memory/mem_trouble/" target="_blank" rel="noopener">Memory Troubleshooting</a></p>
+</div>
+
+<div class="callout callout-accent">
+  <div class="callout-icon">💡</div>
+  <div class="callout-content">
+    <strong class="callout-title">Задавай один размер</strong>
+    <p>Для контейнеров документация советует задавать только <code>taskmanager.memory.process.size</code>, равный лимиту контейнера. Остальное меняй долями. Доля подстраивается под размер процесса, а явный размер в мегабайтах однажды перестанет сходиться с новым лимитом пода.</p>
+  </div>
+</div>
+
+<h2>Куда идёт RocksDB</h2>
+<p>Из урока 7 ты знаешь, что RocksDB хранит состояние как пары байтов на локальном диске. Устроен он как LSM-дерево. Запись сначала попадает в memtable, отсортированную таблицу в памяти. Заполненная memtable сбрасывается на диск неизменяемым SST-файлом. Фоновые компакции сливают SST-файлы, выбрасывают перезаписанные версии и удалённые ключи, и на этом же шаге работает фильтр TTL из урока 7. Чтение ищет ключ в memtable, потом в блочном кэше, потом в файлах на диске, а фильтры Блума позволяют пропускать файлы, где ключа точно нет.</p>
+<p>Памяти RocksDB нужно на три вещи, на memtable, на блочный кэш и на индексы с фильтрами. По умолчанию Flink ограничивает все три размером managed memory слота. Внутри слота все экземпляры RocksDB делят один кэш и один менеджер буферов записи (write buffer manager), и память memtable засчитывается в тот же кэш.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Managed memory TaskManager делится между слотами поровну. Профиль слота по умолчанию получает свою часть делением на число слотов.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/taskexecutor/TaskExecutorResourceUtils.java" data-lines="115-130" data-must=".divide(numberOfSlots))"></div>
+<p>Память слота RocksDB по умолчанию берёт из managed, флаг включён, пока его не выключили.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/state/rocksdb/RocksDBMemoryConfiguration.java" data-lines="122-126" data-must="RocksDBOptions.USE_MANAGED_MEMORY.defaultValue()"></div>
+<p>Из бюджета слота создаётся общий кэш, а менеджер буферов записи получает этот кэш аргументом. Поэтому memtable и блоки данных конкурируют за одну и ту же память.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/state/rocksdb/RocksDBMemoryControllerUtils.java" data-lines="54-63" data-must="factory.createWriteBufferManager(writeBufferManagerCapacity, cache)"></div>
+<p>Ёмкость кэша и менеджера считается по двум формулам. Комментарий над ними объясняет, откуда тройка, менеджер буферов может превысить свою ёмкость в полтора раза.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/state/rocksdb/RocksDBMemoryControllerUtils.java" data-lines="96-113" data-must="(3 - writeBufferRatio) * totalMemorySize / 3"></div>
+<p>Проверим на стенде. Managed 665719939 байт на 4 слота дают 166429984 байта на слот. При <code>write-buffer-ratio</code> 0,5 кэш равен 2,5 × 166429984 / 3 = 138691653 байта. Ровно это значение показала метрика <code>block_cache_capacity</code>. Совпадение до байта значит, что весь managed слота достался RocksDB. Так и должно быть, других потребителей managed memory в слоте нашего задания нет.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/state_backends/#memory-management" target="_blank" rel="noopener">State Backends, Memory Management</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/large_state_tuning/#tuning-rocksdb-memory" target="_blank" rel="noopener">Tuning RocksDB Memory</a></p>
+</div>
+
+<p>Отсюда несколько практических следствий.</p>
+<ul>
+  <li>Удвоил число слотов на том же TaskManager, и кэш каждого слота уменьшился вдвое. Состояние осталось прежним, промахов кэша станет больше.</li>
+  <li>Каждое состояние в RocksDB это отдельное семейство колонок (column family) со своими memtable. Задание с десятком состояний делит тот же бюджет на большее число буферов записи.</li>
+  <li>Частые сбросы memtable лечатся ростом <code>state.backend.rocksdb.memory.write-buffer-ratio</code>, промахи на чтении ростом managed. Документация советует сначала просто дать больше managed, доля 0,4 консервативна для процессов в несколько гигабайт.</li>
+  <li>С <code>HashMapStateBackend</code> managed memory стримингу не нужна. Документация рекомендует поставить её в ноль, тогда куча задач получит эту память.</li>
+</ul>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Выключенный memory.managed и OOMKilled</strong>
+    <p>С <code>state.backend.rocksdb.memory.managed: false</code> каждый RocksDB выделяет память по своим настройкам на каждое семейство колонок. Документация оценивает верх примерно в 140 МБ на каждое состояние каждой задачи в каждом слоте, и таймеры тоже считаются. Flink эту память не учитывает, и под уходит за лимит. Если под всё же растёт при включённом контроле, документация предлагает переменную <code>MALLOC_ARENA_MAX=1</code> или больший JVM Overhead.</p>
+  </div>
+</div>
+
+<h2>ForSt и State V2</h2>
+<p>RocksDB держит всё состояние на локальном диске TaskManager. Размер состояния упирается в диск, а при восстановлении файлы надо скачать из хранилища чекпоинтов, и время растёт вместе с размером. Во Flink 2.0 появилось разделённое хранение состояния (disaggregated state). Его основа это бэкенд ForSt. Он устроен почти так же, как RocksDB, и настраивается похожими ключами, но кладёт SST-файлы во внешнее хранилище вроде S3 и использует локальный диск как кэш. Документация помечает эту часть как экспериментальную.</p>
+<p>Удалённое хранилище отвечает за миллисекунды, а memtable и кэш RocksDB за микросекунды. Если оператор будет ждать каждого чтения, пропускная способность рухнет. Поэтому вместе с ForSt пришёл State V2, асинхронный API состояния. Метод вроде <code>asyncValue()</code> возвращает <code>StateFuture</code>, а продолжение обработки ты пишешь цепочкой <code>thenAccept</code> или <code>thenCompose</code>. Пока одно чтение в пути, задача берёт следующие записи. Записи одного ключа Flink всё равно обрабатывает строго по порядку прихода, а твой код в продолжениях выполняется в потоке задачи, поэтому гонок в нём нет.</p>
+<p>В DataStream асинхронный режим включается вызовом <code>enableAsyncState()</code> на <code>KeyedStream</code> и требует переписать функции на новые интерфейсы состояния. В SQL переписывать ничего не нужно, хватает настройки <code>table.exec.async-state.enabled</code>. Асинхронные версии есть у агрегации без DISTINCT, соединений, Top-1 и Top-N на добавлениях, дедупликации по времени события и оконных агрегатов, остальные операторы молча вернутся к синхронному доступу.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Описание класса прямо говорит, ради чего он существует, и аннотация <code>@Experimental</code> подтверждает статус. Наследование от <code>AbstractManagedMemoryStateBackend</code> значит, что ForSt тоже берёт память из managed слота.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-forst/src/main/java/org/apache/flink/state/forst/ForStStateBackend.java" data-lines="89-99" data-must="spills to remote"></div>
+<p>Именно этот бэкенд умеет асинхронный доступ, у него метод возвращает <code>true</code>.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-forst/src/main/java/org/apache/flink/state/forst/ForStStateBackend.java" data-lines="399-402" data-must="supportsAsyncKeyedStateBackend"></div>
+<p>Основной каталог SST-файлов по умолчанию совпадает с каталогом чекпоинтов. Отсюда лёгкие чекпоинты, файлы уже лежат там, куда их пришлось бы копировать.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-forst/src/main/java/org/apache/flink/state/forst/ForStOptions.java" data-lines="55-67" data-must="state.backend.forst.primary-dir"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/disaggregated_state/" target="_blank" rel="noopener">Disaggregated State Management</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/state_v2/" target="_blank" rel="noopener">State V2</a></p>
+</div>
+<p>Синхронные операторы ForSt по умолчанию держит локально, разделение включается только для асинхронного API. Документация прямо пишет, что для небольшого состояния локальный бэкенд с синхронным доступом остаётся лучшим выбором. PayGuard в этом уроке остаётся на RocksDB, а ForSt мы попробуем на SQL-задании.</p>
+
+<h2>Capacity planning</h2>
+<p>Расчёт ресурсов под большое состояние начинается с вопроса, из чего состоит состояние и сколько каждая часть живёт. Удобно разделить его на две группы.</p>
+<ul>
+  <li>Состояние на ключ без срока. Профиль карты <code>CardProfile</code> живёт, пока существует карта, его объём равен числу карт, умноженному на размер записи.</li>
+  <li>Состояние на событие со сроком. Ключ дедупликации живёт час по TTL, ожидающий подтверждения платёж до 5 минут, буфер CEP до 10 минут. Его объём равен скорости потока, умноженной на срок и на размер записи.</li>
+</ul>
+<p>Получается формула S = N<sub>ключей</sub> × s<sub>ключа</sub> + R × Σ(T<sub>i</sub> × s<sub>i</sub>). Размеры записей лучше брать из замеров на стенде, по росту размера чекпоинта из урока 11 или по метрикам RocksDB. Оценка «на глаз» по полям класса почти всегда занижена, потому что в RocksDB к записи добавляются группа ключей, сериализованный ключ, индексы и версии до компакции.</p>
+<p>Дальше из размера состояния выводятся три вещи. Диск под рабочий каталог RocksDB с запасом на компакции. Хранилище чекпоинтов с запасом на несколько сохранённых снимков. Память под кэш, которой не обязательно вмещать всё состояние, достаточно горячей части, к которой задание обращается постоянно. Параллелизм документация советует выбирать так, чтобы в обычной работе не было постоянного backpressure, и оставлять запас на догонку после восстановления. Максимальный параллелизм выбери сразу с запасом, это ты помнишь по урокам 4 и 13.</p>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming состояние по умолчанию живёт в памяти экзекутора, а RocksDB подключается отдельным провайдером хранилища состояния. Его память настраивается своими ключами и не входит в единую модель с кучей. Во Flink RocksDB по умолчанию ограничен managed memory слота, и один размер процесса задаёт границы всех областей разом.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l19">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. С выключенным контролем RocksDB выделяет нативную память на каждое семейство колонок мимо бюджета Flink. Включённый managed-режим ограничивает его размером managed слота, и процесс помещается в лимит контейнера."
+       data-explanation-wrong="Посмотри, какая память растёт. Куча заполнена наполовину, значит, за лимит выходит нативная память RocksDB. Рост кучи только отнимет место у неё и у Overhead.">
+    <h3 class="quiz-question">Под TaskManager в Kubernetes регулярно получает OOMKilled. Куча заполнена на 50 %, в конфиге стоит state.backend.rocksdb.memory.managed false, в задании 12 состояний. Что сделать первым?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Задать taskmanager.memory.task.heap.size побольше</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Вернуть memory.managed в true, чтобы RocksDB жил в бюджете managed memory</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Поднять taskmanager.memory.network.fraction</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. HashMapStateBackend держит состояние в куче и managed memory не использует. Доля 0,4 простаивает, а куча задач получает только остаток. Ноль в managed вернёт эту память куче."
+       data-explanation-wrong="Вспомни, где живёт состояние HashMapStateBackend и кто потребляет managed memory в потоковом задании.">
+    <h3 class="quiz-question">Задание на HashMapStateBackend падает с OutOfMemoryError Java heap space. Размер процесса 4g, остальные настройки по умолчанию. Какое изменение даст куче больше всего памяти, не трогая размер пода?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Поставить taskmanager.memory.managed.fraction в 0</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Уменьшить jvm-overhead.fraction до 0,05</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Перейти на ForSt</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Managed делится между слотами поровну, и каждый слот теперь получает половину прежнего кэша. Состояние то же, кэш меньше, промахов больше."
+       data-explanation-wrong="Посмотри, как managed memory попадает в слот. Профиль слота получает managed TaskManager, делённую на число слотов.">
+    <h3 class="quiz-question">На TaskManager с RocksDB подняли число слотов с 4 до 8, ничего больше не меняя, и параллелизм задания вырос до 8. Задержка чтения состояния выросла. Почему?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Сетевых буферов стало меньше, и записи ждут отправки</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>RocksDB не умеет работать больше чем в четырёх слотах</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Блочный кэш каждого слота уменьшился вдвое</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

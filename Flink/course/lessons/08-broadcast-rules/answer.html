@@ -1,0 +1,24 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Константа правила стоит рядом с идентификатором velocity.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="21-22"></div>
+<p>Проверка вызывается из <code>processElement</code> до правила частоты. Оба правила получают один и тот же объект настроек, прочитанный из broadcast state один раз.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="45-50"></div>
+<p>Сама проверка.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="68-73"></div>
+<p>Если в сообщении нет поля <code>blockedCountries</code>, Jackson передаст в конструктор record <code>null</code>, поэтому сначала проверка на <code>null</code>. Состояние с ключом правилу не нужно. Решение зависит только от платежа и настроек, а идентификатор алерта строится из правила и <code>paymentId</code>, так что повторная обработка того же платежа даст тот же алерт. Снять блокировку можно новым сообщением с пустым списком.</p>
+<p>Тест присылает правило с DE и подаёт один платёж из DE.</p>
+<div data-code="lesson-08/src/test/java/dev/study/payguard/pipeline/DynamicRulesTest.java" data-lines="53-60"></div>
+<p>Проверь сборку и стенд. В нашем прогоне весь набор, 25 тестов, прошёл без падений.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test shadowJar
+docker compose exec jobmanager flink cancel &lt;JobID&gt;
+scripts/submit.sh
+./gradlew loadgen
+echo '{"velocityMaxPayments":1000,"blockedCountries":["PL"]}' | docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic rules.config
+docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic fraud.alerts --from-beginning --timeout-ms 10000 2&gt;/dev/null | grep -c '"ruleId":"blocked-country"'</pre>
+<p><code>--timeout-ms</code> завершает чтение, если 10 секунд нет новых записей, а <code>grep -c</code> считает строки с нужным правилом. На нашем стенде за 25 секунд при 100 платежах в секунду пришло 539 алертов <code>blocked-country</code>, задание не перезапускалось. Это около пятой части от 2500 платежей, и так и должно быть, генератор выбирает страну равномерно из пяти.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java" data-lines="17-17"></div>
+</div>

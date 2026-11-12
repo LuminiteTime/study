@@ -1,0 +1,113 @@
+<h2>Что будет в конце</h2>
+<p>Стенд показывает, на какие области Flink разбил память TaskManager, и ты сверишь их с калькулятором. RocksDB отдаёт в Prometheus метрики своего кэша и размера состояния. Рядом на SQL-кластере работает задание с ForSt и асинхронным доступом к состоянию. Java-код в этом уроке не меняется, правки только в Compose, скриптах и SQL. Задание урока решается расчётом, файлов для него создавать не нужно.</p>
+
+<h2>Шаг 1. Настройки памяти и метрики RocksDB</h2>
+<p>В <code>docker-compose.yml</code> к общему блоку Flink добавляются девять строк.</p>
+<div data-diff="lesson-18/docker-compose.yml lesson-19/docker-compose.yml"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-19/docker-compose.yml" data-lines="32-40"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Доля managed memory записана явно, хотя 0,4 и так значение по умолчанию. Так она видна в конфиге, и её удобно менять для экспериментов.</p>
+      <p class="tl">RocksDB живёт в бюджете managed memory слота. Это тоже значение по умолчанию, строка нужна как напоминание, что выключать его в контейнере опасно.</p>
+      <p class="tl">Две метрики кэша, ёмкость и занятый объём. В занятый входят и memtable, потому что менеджер буферов записи учитывает их в том же кэше.</p>
+      <p class="tl">Оценка числа ключей и объёма живых данных в SST-файлах каждого состояния.</p>
+      <p class="tl">Число идущих компакций и счётчик фоновых ошибок. Вторая метрика выше нуля значит, что RocksDB не может писать, чаще всего кончился диск.</p>
+      <p class="tl">Замер задержек обращений к состоянию, например чтения и записи <code>ValueState</code>. Ключ записан старым именем, о нём ниже.</p>
+    </div>
+  </div>
+</div>
+<p>Все нативные метрики RocksDB выключены по умолчанию, и включать их стоит выборочно. Каждая метрика это опрос свойства RocksDB по каждому состоянию каждой подзадачи.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Ключ замера задержек в Flink 2.2 называется <code>state.latency-track.keyed-state-enabled</code>. Имя с <code>state.backend</code> осталось как устаревшее и пока принимается.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/StateLatencyTrackOptions.java" data-lines="30-37" data-must="state.backend.latency-track.keyed-state-enabled"></div>
+<p>Работает и старый ключ, но в новых конфигах пиши новое имя. Устаревшие ключи однажды убирают, и тогда настройка молча перестанет действовать.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/metrics/" target="_blank" rel="noopener">Metrics</a></p>
+</div>
+
+<h2>Шаг 2. Скрипт разбора памяти</h2>
+<p>Создай <code>scripts/tm-memory.sh</code> и сделай его исполняемым командой <code>chmod +x scripts/tm-memory.sh</code>.</p>
+<div data-code="lesson-19/scripts/tm-memory.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-19/scripts/tm-memory.sh" data-lines="4-7"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Адрес REST можно переопределить переменной <code>FLINK_REST</code>, по умолчанию основной кластер на 8081.</p>
+      <p class="tl">Пустая строка отделяет настройку от работы.</p>
+      <p class="tl">Список TaskManager, из него берётся идентификатор первого.</p>
+      <p class="tl">Карточка TaskManager содержит объект <code>memoryConfiguration</code> с размерами областей в байтах. <code>map_values</code> делит каждое значение на 1048576 и отбрасывает дробную часть, получаются мебибайты.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 3. Перезапусти стенд и сверь память</h2>
+<p>Изменился <code>FLINK_PROPERTIES</code>, поэтому Compose пересоздаст JobManager и TaskManager. Запущенное задание при этом пропадёт. Состояние для урока не важно, задание можно отправить заново. Если хочешь его сохранить, сначала останови его со savepoint, как в уроке 13.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+scripts/submit.sh
+./gradlew loadgen --args="--rate 200"</pre>
+<p>Во втором терминале запусти скрипт.</p>
+<pre data-lang="bash" data-title="терминал">scripts/tm-memory.sh</pre>
+<p>Скрипт печатает JSON с десятью полями. На стенде курса получились такие значения в мебибайтах.</p>
+<table>
+<thead><tr><th>Поле</th><th>МиБ</th><th>Откуда</th></tr></thead>
+<tbody>
+<tr><td><code>frameworkHeap</code></td><td>128</td><td>Значение по умолчанию</td></tr>
+<tr><td><code>taskHeap</code></td><td>537</td><td>Остаток Total Flink</td></tr>
+<tr><td><code>frameworkOffHeap</code></td><td>128</td><td>Значение по умолчанию</td></tr>
+<tr><td><code>taskOffHeap</code></td><td>0</td><td>Значение по умолчанию</td></tr>
+<tr><td><code>networkMemory</code></td><td>158</td><td>0,1 × 1587,2</td></tr>
+<tr><td><code>managedMemory</code></td><td>634</td><td>0,4 × 1587,2</td></tr>
+<tr><td><code>jvmMetaspace</code></td><td>256</td><td>Значение по умолчанию</td></tr>
+<tr><td><code>jvmOverhead</code></td><td>204</td><td>0,1 × 2048</td></tr>
+<tr><td><code>totalFlinkMemory</code></td><td>1587</td><td>2048 − 256 − 204,8</td></tr>
+<tr><td><code>totalProcessMemory</code></td><td>2048</td><td>Из конфига</td></tr>
+</tbody>
+</table>
+<p>Сумма шести областей Total Flink даёт 1585, на два меньше <code>totalFlinkMemory</code>. Это не ошибка. Скрипт отбрасывает дробную часть у каждого поля отдельно, а у пяти полей она есть. Нажми в калькуляторе «Стенд курса», числа совпадут построчно. Куча JVM здесь 128 + 537 = 665 МиБ, это около 697 миллионов байт. Панель Grafana в уроке 17 показывала максимум кучи TaskManager 698 МБ, та же величина с точностью до округления и учёта сборщика мусора.</p>
+
+<h2>Шаг 4. Метрики RocksDB</h2>
+<p>Через минуту работы спроси у Prometheus метрики состояния <code>profile</code>, это профиль карты из <code>CardProfileFunction</code>. Имя состояния входит в имя метрики, поэтому регулярное выражение отбирает все метрики RocksDB этого состояния.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:9090/api/v1/query \
+  --data-urlencode 'query={__name__=~"flink_taskmanager_job_task_operator_profile_rocksdb_.*"}' \
+  | jq -r '.data.result[] | "\(.metric.__name__) \(.value[1])"'</pre>
+<p>Флаг <code>--data-urlencode</code> кодирует фигурные скобки и кавычки запроса для URL. Prometheus вернёт по строке на каждую метрику каждой подзадачи. Через 60 секунд при 200 платежах в секунду значения были такими.</p>
+<table>
+<thead><tr><th>Метрика</th><th>Значение</th><th>Как читать</th></tr></thead>
+<tbody>
+<tr><td><code>rocksdb_estimate_num_keys</code></td><td>8563</td><td>Оценка RocksDB. Генератор выдаёт 5000 карт, поэтому для точного счёта ключей она не годится, только для порядка величины</td></tr>
+<tr><td><code>rocksdb_estimate_live_data_size</code></td><td>41162 байта</td><td>Данные в SST-файлах. Почти всё записанное за минуту ещё лежит в memtable, поэтому число маленькое</td></tr>
+<tr><td><code>rocksdb_block_cache_capacity</code></td><td>138691653 байта, 132 МиБ</td><td>Ровно формула из теории и строка калькулятора</td></tr>
+<tr><td><code>rocksdb_block_cache_usage</code></td><td>32362256 байт, 31 МиБ</td><td>Занято блоками и memtable всех состояний слота</td></tr>
+</tbody>
+</table>
+<p>Сочетание последних двух строк объясняет, как читать кэш. Ёмкость фиксирована, а заполнение растёт, пока не упрётся в неё. Если usage долго стоит у capacity, а задержки чтения из замера состояния растут, кэша не хватает. На стенде с 5000 картами до этого далеко. Метрики <code>num_running_compactions</code> и <code>background_errors</code> полезны в алертах урока 17. Первая показывает, не захлёбывается ли RocksDB компакциями, вторая обязана быть нулём.</p>
+
+<h2>Шаг 5. Когда память не сходится</h2>
+<p>Проверим на себе, как выглядит конфликт. Временно поменяй в общем блоке <code>FLINK_PROPERTIES</code> значение <code>taskmanager.memory.process.size</code> на <code>1g</code> и добавь строку <code>taskmanager.memory.flink.size: 2g</code>. JobManager эти ключи не читает, упадёт только TaskManager. Пересоздай контейнеры и открой лог.</p>
+<pre data-lang="bash" data-title="терминал">docker compose up -d
+docker compose logs taskmanager | grep -A1 IllegalConfigurationException</pre>
+<pre data-lang="text" data-title="лог TaskManager" data-output>IllegalConfigurationException: TaskManager memory configuration failed: The configured Total Process Memory size (1024.000mb ...) is less than the sum of the derived Total Flink Memory size (2.000gb ...)</pre>
+<p>Это ветка из цитаты <code>deriveJvmOverheadFromTotalFlinkMemoryAndOtherComponents</code>. Явный Total Flink важнее размера процесса, и Overhead считается разностью, которая здесь отрицательна. Кнопка «process 1g и flink 2g» в калькуляторе выдаёт ту же ошибку. Из урока 1 ты знаешь второй случай. Старый конфиг с явными кучей задач, managed и Total Flink оставлял сети 0 байт, и TaskManager падал с <code>Derived Network Memory size (0 bytes) is not in configured Network Memory range</code>. Его воспроизводит третья кнопка. Лечение в обоих случаях одно, убрать лишние явные размеры и оставить <code>process.size</code>. Верни строки как были, выполни <code>docker compose up -d --wait</code> и отправь задание заново.</p>
+
+<h2>Шаг 6. ForSt на SQL-кластере</h2>
+<p>Асинхронный доступ к состоянию проще всего попробовать в SQL, где не нужно переписывать функции. Создай <code>sql/merchant_revenue_forst.sql</code>. Это тот же подсчёт выручки продавцов из урока 14, только без окна, чтобы агрегат держал состояние постоянно.</p>
+<div data-code="lesson-19/sql/merchant_revenue_forst.sql"></div>
+<p>Две строки <code>SET</code> в начале работают только для этого задания. <code>state.backend.type</code> заменяет RocksDB из конфига SQL-кластера на ForSt, <code>table.exec.async-state.enabled</code> выбирает асинхронные версии операторов. Мини-пакеты и двухфазную агрегацию асинхронный режим пока не поддерживает, у нас они и так выключены. Таблица для результата добавляется в <code>sql/init.sql</code>.</p>
+<div data-diff="lesson-18/sql/init.sql lesson-19/sql/init.sql"></div>
+<p>Postgres выполняет <code>init.sql</code> только при первом запуске на пустой базе. Если контейнер живёт с прошлых уроков, новой таблицы в нём нет. Проще всего пересоздать стенд командой <code>docker compose --profile sql down -v</code> и поднять заново. Флаг <code>-v</code> удаляет анонимные тома контейнеров, каталог <code>data</code> с чекпоинтами остаётся. После этого повтори команды шага 3.</p>
+<pre data-lang="bash" data-title="терминал">docker compose --profile sql up -d --wait
+docker compose --profile sql exec -T sql-jobmanager sql-client.sh -f /sql/merchant_revenue_forst.sql</pre>
+<p>Флаг <code>-T</code> отключает псевдотерминал, он не нужен, когда SQL Client читает файл. Через пару минут проверь, какой бэкенд достался заданию и как идут его чекпоинты.</p>
+<pre data-lang="bash" data-title="терминал">job=$(curl -s localhost:8082/jobs/overview \
+  | jq -r '.jobs[] | select(.name == "payguard-sql-forst" and .state == "RUNNING") | .jid')
+curl -s localhost:8082/jobs/$job/checkpoints/config | jq -r .state_backend
+FLINK_REST=http://localhost:8082 scripts/checkpoint-report.sh
+docker compose exec postgres psql -U payguard -d payguard \
+  -c "select count(*), sum(payment_count) from merchant_revenue_forst"</pre>
+<p>Задание ищется по имени из <code>pipeline.name</code>, потому что на SQL-кластере могут работать задания прошлых уроков. Скрипт <code>checkpoint-report.sh</code> берёт первое запущенное задание, если там их несколько, смотри историю чекпоинтов в Web UI на 8082. На стенде <code>state_backend</code> вернул <code>ForStStateBackend</code>. Чекпоинты занимали 32-41 мс при размере 118-125 КиБ, в графе была вершина <code>GroupAggregate[4]</code>, а в таблице оказалось 50 продавцов и 16200 платежей.</p>
+<p>Маленький размер чекпоинта здесь не заслуга ForSt, у 50 продавцов просто мало состояния. Основной каталог ForSt по умолчанию совпадает с каталогом чекпоинтов, у нас это локальный том <code>/flink-data/sql-checkpoints</code>. В проде там был бы S3, и выгода от лёгкого восстановления появилась бы на гигабайтах состояния. Останови задание, когда насмотришься, через Web UI или <code>flink cancel</code>.</p>

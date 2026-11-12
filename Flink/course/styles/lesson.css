@@ -1,0 +1,161 @@
+/* Урок: шапка, вкладки, проза, таблицы, раскрытие ответа и подвал. */
+.lesson-eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-2);
+}
+
+.lesson-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--text-4xl);
+  line-height: var(--leading-tight);
+  margin: 0 0 var(--space-3);
+  text-wrap: balance;
+}
+
+.lesson-lead {
+  font-size: var(--text-lg);
+  color: var(--color-text-secondary);
+  margin: 0 0 var(--space-6);
+}
+
+.lesson-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+  margin-bottom: var(--space-6);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.lesson-tab {
+  font: 600 var(--text-sm) var(--font-body);
+  padding: 8px 14px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  min-height: 40px;
+}
+
+.lesson-tab:hover {
+  background: var(--color-border-light);
+  color: var(--color-text);
+}
+
+.lesson-tab.active {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.lesson-panel {
+  display: none;
+}
+
+.lesson-panel.active {
+  display: block;
+}
+
+.lesson-panel > h2,
+.page-inner > h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-2xl);
+  line-height: var(--leading-snug);
+  margin: var(--space-10) 0 var(--space-3);
+}
+
+.lesson-panel > h2:first-child {
+  margin-top: 0;
+}
+
+.lesson-panel > h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-xl);
+  margin: var(--space-6) 0 var(--space-2);
+}
+
+.lesson-panel > p,
+.lesson-panel > ul,
+.lesson-panel > ol,
+.page-inner > p,
+.page-inner > ul {
+  font-size: var(--text-base);
+  line-height: var(--leading-prose);
+  margin: 0 0 var(--space-4);
+  max-width: var(--prose-width);
+}
+
+.lesson-panel li {
+  margin-bottom: var(--space-2);
+}
+
+.lesson-panel table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: var(--space-4) 0 var(--space-6);
+  font-size: var(--text-sm);
+  display: block;
+  overflow-x: auto;
+}
+
+.lesson-panel th,
+.lesson-panel td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  vertical-align: top;
+}
+
+.lesson-panel th {
+  font-weight: 700;
+  background: var(--color-bg-warm);
+}
+
+.answer-body[hidden] {
+  display: none;
+}
+
+.lesson-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-top: var(--space-12);
+  padding-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+}
+
+.lesson-panel > p a,
+.lesson-panel li a,
+.page-inner p a {
+  color: var(--color-accent-hover);
+}
+
+@media (max-width: 900px) {
+  .lesson-tabs {
+    padding-left: 52px;
+  }
+
+  .lesson-title {
+    font-size: var(--text-3xl);
+  }
+}
+
+.lesson-panel p,
+.lesson-panel li,
+.lesson-panel h2,
+.lesson-panel h3 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

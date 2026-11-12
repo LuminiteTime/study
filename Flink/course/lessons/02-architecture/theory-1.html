@@ -1,0 +1,170 @@
+<h2>Авария, которую объясняет устройство кластера</h2>
+<p>Ночью PayGuard перезапустили с параллелизмом 8 на кластере с четырьмя слотами. В мониторинге статус задания RUNNING, алертов о падении нет, а платежи никто целиком не проверяет. Через несколько минут задание падает с <code>NoResourceAvailableException</code>. Другой частый случай выглядит так. Задание годами запускалось из CI, его перевели в режим Application, и оно упало на чтении локального файла в <code>main</code>.</p>
+<p>Оба случая разбираются за минуту, если знать, какой процесс за что отвечает и в каком порядке они разговаривают. Этим мы и займёмся, причём пройдём весь путь по коду Flink 2.2.1.</p>
+
+<h2>Стройка на пять ролей</h2>
+<p>Представь строительную контору. Заказчик приносит проект в приёмную и может уехать домой. Приёмная регистрирует заказ и назначает на него отдельного прораба. Прораб считает, сколько рабочих мест ему нужно, и обращается к кадровику, который знает все бригады и их свободные места. Кадровик говорит бригаде, к кому идти, бригада сама приходит к прорабу, и тот выдаёт наряды.</p>
+<p>Во Flink заказчика зовут клиентом, приёмную зовут Dispatcher, прораба JobMaster, кадровика ResourceManager, бригаду TaskManager, а рабочее место слотом. Dispatcher, ResourceManager и все JobMaster живут внутри одного процесса JobManager, это написано прямо в разделе про архитектуру.</p>
+
+<svg viewBox="0 0 820 300" role="img" aria-label="Схема кластера. Клиент отправляет задание в Dispatcher внутри JobManager. Dispatcher запускает JobMaster. JobMaster получает слоты через ResourceManager от TaskManager и развёртывает там подзадачи." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l02a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="110" width="120" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="70" y="140">Клиент</text><text x="70" y="160" font-size="11">flink run, твой main</text>
+    <rect x="190" y="20" width="270" height="260" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="325" y="44" font-weight="700">JobManager</text>
+    <rect x="210" y="60" width="230" height="50" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="325" y="82">Dispatcher</text><text x="325" y="99" font-size="11">REST, Web UI, приём заданий</text>
+    <rect x="210" y="125" width="230" height="60" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="325" y="150">JobMaster</text><text x="325" y="168" font-size="11">один на задание, граф, снимки, сбои</text>
+    <rect x="210" y="200" width="230" height="60" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="325" y="225">ResourceManager</text><text x="325" y="243" font-size="11">учёт слотов всего кластера</text>
+    <rect x="540" y="50" width="265" height="100" rx="10" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="672" y="72" font-weight="700">TaskManager 1</text>
+    <rect x="555" y="85" width="72" height="50" rx="5" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="591" y="115" font-size="11">слот</text>
+    <rect x="636" y="85" width="72" height="50" rx="5" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="672" y="115" font-size="11">слот</text>
+    <rect x="717" y="85" width="72" height="50" rx="5" fill="var(--color-bg-warm)" stroke="var(--color-border)"/><text x="753" y="115" font-size="11">свободен</text>
+    <rect x="540" y="175" width="265" height="100" rx="10" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="672" y="197" font-weight="700">TaskManager 2</text>
+    <rect x="555" y="210" width="72" height="50" rx="5" fill="var(--color-bg-warm)" stroke="var(--color-border)"/><text x="591" y="240" font-size="11">свободен</text>
+    <rect x="636" y="210" width="72" height="50" rx="5" fill="var(--color-bg-warm)" stroke="var(--color-border)"/><text x="672" y="240" font-size="11">свободен</text>
+    <rect x="717" y="210" width="72" height="50" rx="5" fill="var(--color-bg-warm)" stroke="var(--color-border)"/><text x="753" y="240" font-size="11">свободен</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l02a)">
+    <path d="M130 130L208 90"/><path d="M325 110V123"/><path d="M325 185V198"/><path d="M440 150L538 105"/><path d="M440 230L538 235"/>
+  </g>
+</svg>
+
+<p>Со Spark роли похожи только частично, и таблица показывает, где сходство обманывает.</p>
+<table>
+<thead><tr><th>Вопрос</th><th>Spark</th><th>Flink</th></tr></thead>
+<tbody>
+<tr><td>Где выполняется main</td><td>В Driver, на твоей машине или в кластере по режиму</td><td>В клиенте при режиме Session, в JobManager при режиме Application</td></tr>
+<tr><td>Кто планирует работу</td><td>Driver</td><td>JobMaster, отдельный на каждое задание</td></tr>
+<tr><td>Кто исполняет</td><td>Executor</td><td>TaskManager</td></tr>
+<tr><td>Единица исполнения</td><td>Task, живёт одну стадию и завершается</td><td>Подзадача, поток работает всю жизнь задания</td></tr>
+<tr><td>Единица ресурсов</td><td>Ядра экзекутора</td><td>Слот, он разделяет только управляемую память и не изолирует CPU</td></tr>
+<tr><td>Если отправитель отключился</td><td>Driver обязан жить до конца приложения</td><td>Клиент при режиме detached может уйти сразу после отправки</td></tr>
+</tbody>
+</table>
+
+<h2>Путь задания шаг за шагом</h2>
+<p>Жми кнопку и смотри, кто с кем говорит, когда ты запускаешь <code>flink run</code> для нашего задания с параллелизмом 2.</p>
+
+<div class="flow-animation" id="flow-l02" data-steps='[
+  {"highlight":"flow-l02-1","label":"Клиент запускает твой main в своей JVM. На env.execute из вызовов DataStream API получается StreamGraph с тремя операторами."},
+  {"highlight":"flow-l02-2","label":"Клиент отправляет POST /jobs. В запросе сериализованный StreamGraph и jar.","packet":true,"from":"l02-1","to":"l02-2"},
+  {"highlight":"flow-l02-2","label":"Dispatcher проверяет, нет ли такого задания, сохраняет план методом putExecutionPlan и создаёт для него запускатель."},
+  {"highlight":"flow-l02-3","label":"Для задания стартует отдельный JobMaster.","packet":true,"from":"l02-2","to":"l02-3"},
+  {"highlight":"flow-l02-3","label":"JobMaster склеивает StreamGraph в JobGraph с одной вершиной и разворачивает её в ExecutionGraph с двумя подзадачами."},
+  {"highlight":"flow-l02-3","label":"Планировщик переводит задание в RUNNING и только теперь начинает искать слоты. Подзадачи ещё нигде не работают."},
+  {"highlight":"flow-l02-4","label":"JobMaster объявляет потребность в слотах методом declareRequiredResources.","packet":true,"from":"l02-3","to":"l02-4"},
+  {"highlight":"flow-l02-5","label":"ResourceManager находит свободные слоты и вызывает requestSlot у TaskManager, передавая адрес JobMaster.","packet":true,"from":"l02-4","to":"l02-5"},
+  {"highlight":"flow-l02-3","label":"TaskManager сам предлагает выделенные слоты этому JobMaster методом offerSlots.","packet":true,"from":"l02-5","to":"l02-3"},
+  {"highlight":"flow-l02-5","label":"JobMaster вызывает submitTask на каждую подзадачу и передаёт её описание.","packet":true,"from":"l02-3","to":"l02-5"},
+  {"highlight":"flow-l02-5","label":"TaskManager создаёт объект Task и запускает поток. Подзадача проходит DEPLOYING, INITIALIZING, RUNNING."},
+  {"highlight":"flow-l02-3","label":"TaskManager сообщает о каждой смене состояния методом updateTaskExecutionState. В интерфейсе вершина становится RUNNING.","packet":true,"from":"l02-5","to":"l02-3"}
+]'>
+  <div class="flow-actors">
+    <div class="flow-actor" id="flow-l02-1"><div class="flow-actor-icon">К</div><span>Клиент</span></div>
+    <div class="flow-actor" id="flow-l02-2"><div class="flow-actor-icon">D</div><span>Dispatcher</span></div>
+    <div class="flow-actor" id="flow-l02-3"><div class="flow-actor-icon">J</div><span>JobMaster</span></div>
+    <div class="flow-actor" id="flow-l02-4"><div class="flow-actor-icon">R</div><span>ResourceManager</span></div>
+    <div class="flow-actor" id="flow-l02-5"><div class="flow-actor-icon">T</div><span>TaskManager</span></div>
+  </div>
+  <div class="flow-packet"></div>
+  <div class="flow-step-label">Нажми «Следующий шаг»</div>
+  <div class="flow-controls">
+    <button class="btn flow-next-btn">Следующий шаг</button>
+    <button class="btn flow-reset-btn">Сначала</button>
+    <span class="flow-progress"></span>
+  </div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Начнём с клиента, и здесь есть сюрприз. Страница Deployment в документации до сих пор говорит, что клиент отправляет на кластер <code>JobGraph</code>. Посмотри, что передаётся в <code>submitJob</code> в коде версии 2.2.1. Команда <code>flink run</code> без флага <code>--target</code> выбирает как раз этого исполнителя.</p>
+<div data-src="flink:flink-clients/src/main/java/org/apache/flink/client/deployment/executors/AbstractSessionClusterExecutor.java" data-lines="93-106" data-must="submitJob(streamGraph)"></div>
+<div data-src="flink:flink-clients/src/main/java/org/apache/flink/client/cli/DefaultCLI.java" data-lines="71-75" data-must="RemoteExecutor.NAME"></div>
+<p>Клиент сериализует пользовательские объекты и отправляет <code>StreamGraph</code>. Обработчик REST на стороне кластера вызывает <code>gateway.submitJob</code>, и дальше управление у Dispatcher. Вот что он делает с планом.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/dispatcher/Dispatcher.java" data-lines="645-664" data-must="createJobMasterRunner"></div>
+<p>Сохранение плана идёт раньше запуска, поэтому при настроенной высокой доступности новый лидер найдёт его после сбоя. Отдельный запускатель создаётся на каждое задание, отсюда и правило «один JobMaster на задание».</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/flink-architecture/" target="_blank" rel="noopener">Flink Architecture</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/overview/" target="_blank" rel="noopener">Deployment overview</a></p>
+</div>
+
+<h2>Три графа одного задания</h2>
+<p>Один и тот же код проходит через три представления. На стройке это эскиз архитектора, рабочие чертежи и наряды на конкретных людей.</p>
+<ul>
+  <li>StreamGraph описывает логику. Каждый оператор твоей программы в нём отдельный узел.</li>
+  <li>JobGraph описывает, что исполняется как единое целое. Его вершины (JobVertex) это цепочки операторов, которые будут жить в одном потоке.</li>
+  <li>ExecutionGraph описывает параллельное исполнение. На каждую вершину приходится столько подзадач, сколько задано параллелизмом, и у каждой есть своё состояние и своя история попыток.</li>
+</ul>
+
+<svg viewBox="0 0 820 200" role="img" aria-label="Три графа задания PayGuard. В StreamGraph три оператора. В JobGraph они склеены в одну вершину. В ExecutionGraph эта вершина развёрнута в две подзадачи." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l02b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="12" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <text x="115" y="20" font-weight="700" font-size="13">StreamGraph</text>
+    <rect x="50" y="35" width="130" height="36" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="115" y="58">Source: payments-raw</text>
+    <rect x="50" y="85" width="130" height="36" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="115" y="108">drop-blank</text>
+    <rect x="50" y="135" width="130" height="36" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="115" y="158">Sink: stdout</text>
+    <text x="400" y="20" font-weight="700" font-size="13">JobGraph</text>
+    <rect x="305" y="60" width="190" height="86" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="400" y="88">Одна вершина</text><text x="400" y="108" font-size="11">Source -&gt; drop-blank -&gt; Sink</text><text x="400" y="128" font-size="11">параллелизм 2</text>
+    <text x="695" y="20" font-weight="700" font-size="13">ExecutionGraph</text>
+    <rect x="610" y="45" width="170" height="50" rx="6" fill="var(--color-surface)" stroke="var(--color-accent)"/><text x="695" y="66">Подзадача 1 из 2</text><text x="695" y="83" font-size="11">свой поток</text>
+    <rect x="610" y="115" width="170" height="50" rx="6" fill="var(--color-surface)" stroke="var(--color-accent)"/><text x="695" y="136">Подзадача 2 из 2</text><text x="695" y="153" font-size="11">свой поток</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none">
+    <path d="M115 71V84" marker-end="url(#arrow-l02b)"/><path d="M115 121V134" marker-end="url(#arrow-l02b)"/>
+    <path d="M190 103H300" marker-end="url(#arrow-l02b)"/><path d="M500 103H600" marker-end="url(#arrow-l02b)"/>
+  </g>
+</svg>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Где JobGraph появляется при обычном запуске. Для потокового задания планировщик по умолчанию это <code>DefaultScheduler</code>, и его фабрика получает план от JobMaster. Смотри на ветку с <code>StreamGraph</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/scheduler/DefaultSchedulerFactory.java" data-lines="87-96" data-must="getJobGraph(userCodeLoader)"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraph.java" data-lines="1166-1173" data-must="StreamingJobGraphGenerator.createJobGraph"></div>
+<p>Значит, склейка цепочек выполняется уже в JobManager. Если на этом шаге что-то сломается, полный стек ищи в логе JobManager. Затем сборщик сортирует вершины и прикрепляет их к <code>ExecutionGraph</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/DefaultExecutionGraphBuilder.java" data-lines="189-198" data-must="attachJobGraph"></div>
+<p>Здесь видно, откуда берётся число подзадач. Каждая вершина создаёт массив размером с параллелизм и заполняет его в цикле.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/ExecutionJobVertex.java" data-lines="216-216" data-must="new ExecutionVertex[parallelismInfo.getParallelism()]"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/ExecutionJobVertex.java" data-lines="236-245" data-must="createExecutionVertex"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/glossary/" target="_blank" rel="noopener">Glossary</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/flink-architecture/" target="_blank" rel="noopener">Flink Architecture</a></p>
+</div>
+
+<h2>Цепочки операторов</h2>
+<p>Цепочка (operator chain) соединяет несколько операторов в один поток, и запись идёт между ними обычным вызовом метода, без сети и сериализации. Каменщик сразу штукатурит свою стену, и материалы никто не перевозит. Документация объясняет выгоду меньшими расходами на передачу между потоками и буферизацию. Подробно о том, что происходит на разрыве цепочки, поговорим в уроке 4.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Условия склейки собраны в одном методе. Цепочка должна быть включена, операторы должны быть в одной группе slot sharing, их стратегии должны разрешать склейку, а связь должна допускать передачу без перемешивания.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamingJobGraphGenerator.java" data-lines="1733-1749" data-must="isSameSlotSharingGroup"></div>
+<p>Подходит только связь <code>ForwardPartitioner</code>, поэтому <code>keyBy</code> цепочку разрывает. Запись может уйти в другую подзадачу, значит через вызов метода её не передать.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamingJobGraphGenerator.java" data-lines="1762-1776" data-must="ForwardPartitioner"></div>
+<p>Параллелизм тоже обязан совпасть. Если ты задашь фильтру параллелизм 4 при источнике с параллелизмом 2, в задании появится лишняя сетевая передача.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamingJobGraphGenerator.java" data-lines="1833-1844" data-must="upStreamVertex.getParallelism() == downStreamVertex.getParallelism()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/" target="_blank" rel="noopener">Operators, Task Chaining and Resource Groups</a></p>
+</div>
+
+<h2>Слоты и slot sharing</h2>
+<p>Слот это единица планирования в TaskManager. Каждый слот получает равную долю управляемой памяти, а ядра между ними не делятся. Документация говорит об этом прямо, поэтому четыре слота на одном CPU дадут четыре потока, которые спорят за процессор.</p>
+<p>По умолчанию подзадачи разных вершин одного задания могут жить в одном слоте. Этот механизм называется slot sharing. Правило простое. В один разделяемый слот попадает не больше одной подзадачи от каждой вершины. Отсюда простая арифметика, которая встречается в работе постоянно. Заданию с одной группой нужно столько слотов, сколько составляет наибольший параллелизм среди его вершин.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Правило «одна подзадача вершины на слот» записано в комментарии к стратегии, которая раскладывает подзадачи по разделяемым слотам.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/scheduler/LocalInputPreferredSlotSharingStrategy.java" data-lines="93-101" data-must="no longer available"></div>
+<p>Группа перестаёт быть доступной для других подзадач той же вершины, как только одна из них туда попала. Из этого и следует формула про наибольший параллелизм. Сама формула есть и в разделе Task Slots and Resources.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/flink-architecture/" target="_blank" rel="noopener">Flink Architecture</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/" target="_blank" rel="noopener">Set Slot Sharing Group</a></p>
+</div>
+
+<p>Покрути планировщик. Поставь параллелизм 8 при четырёх слотах и посмотри на результат. Потом включи отдельные группы, и потребность в слотах вырастет втрое. Заодно цепочка разорвётся, потому что операторы из разных групп код склеивать запрещает. Порядок, в котором модель заполняет TaskManager, условный. Настоящий зависит от настройки <code>taskmanager.load-balance.mode</code>.</p>
+
+<div class="viz" id="viz-l02">
+  <p class="viz-title">Планировщик слотов для PayGuard</p>
+  <div class="viz-controls">
+    <label>TaskManager <input type="range" id="viz-l02-tm" min="1" max="4" value="1"> <span id="viz-l02-tm-value">1</span></label>
+    <label>Слотов в каждом <input type="range" id="viz-l02-slots" min="1" max="8" value="4"> <span id="viz-l02-slots-value">4</span></label>
+    <label>Параллелизм <input type="range" id="viz-l02-p" min="1" max="8" value="2"> <span id="viz-l02-p-value">2</span></label>
+  </div>
+  <div class="viz-controls">
+    <label><input type="checkbox" id="viz-l02-chain" checked> Цепочка операторов</label>
+    <label><input type="checkbox" id="viz-l02-groups"> Своя группа slot sharing у каждого оператора</label>
+  </div>
+  <div id="viz-l02-board"></div>
+  <p class="viz-note" id="viz-l02-result"></p>
+</div>
+

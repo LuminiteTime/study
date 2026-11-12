@@ -1,0 +1,35 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="клиент|client">Клиент (client)</dt><dd>Программа, которая готовит задание и отправляет его на кластер. Это JVM команды <code>flink run</code> или твоего Java-приложения. В исполнение задания не входит.</dd>
+<dt data-match="JobManager">JobManager</dt><dd>Процесс, который управляет кластером. Содержит Dispatcher, ResourceManager и по одному JobMaster на задание.</dd>
+<dt data-match="Dispatcher">Dispatcher</dt><dd>Компонент JobManager. Даёт REST-интерфейс для отправки заданий, запускает для каждого новый JobMaster и обслуживает Web UI.</dd>
+<dt data-match="ResourceManager">ResourceManager</dt><dd>Компонент JobManager, который ведёт учёт слотов кластера и раздаёт их заданиям. На Kubernetes и YARN также запрашивает новые TaskManager.</dd>
+<dt data-match="JobMaster">JobMaster</dt><dd>Компонент JobManager, отвечающий за одно задание. Держит его ExecutionGraph, просит слоты, развёртывает подзадачи, реагирует на сбои.</dd>
+<dt data-match="TaskManager">TaskManager</dt><dd>Рабочий процесс JVM. Выполняет подзадачи в отдельных потоках и обменивается данными с другими TaskManager.</dd>
+<dt data-match="слот|task slot">Слот (task slot)</dt><dd>Единица планирования ресурсов в TaskManager. Делит управляемую память поровну и не изолирует CPU. Число задаёт ключ <code>taskmanager.numberOfTaskSlots</code>.</dd>
+<dt data-match="slot sharing">Slot sharing</dt><dd>Размещение подзадач разных вершин одного задания в одном слоте. Включено по умолчанию. Задаётся через группу, по умолчанию она называется <code>default</code>.</dd>
+<dt data-match="подзадач|subtask">Подзадача (subtask)</dt><dd>Один параллельный экземпляр вершины задания. Выполняется в своём потоке на TaskManager.</dd>
+<dt data-match="параллелизм|parallelism">Параллелизм (parallelism)</dt><dd>Число подзадач вершины. Задаётся в коде, флагом <code>-p</code> или ключом <code>parallelism.default</code>.</dd>
+<dt data-match="StreamGraph">StreamGraph</dt><dd>Логический граф программы, где каждый оператор отдельный узел. Создаётся при вызове <code>env.execute</code>. Клиент во Flink 2.2 отправляет на кластер именно его.</dd>
+<dt data-match="JobGraph|JobVertex">JobGraph и JobVertex</dt><dd>Граф, в котором операторы склеены в цепочки. Каждая цепочка это одна вершина (JobVertex). Строится из StreamGraph классом <code>StreamingJobGraphGenerator</code>.</dd>
+<dt data-match="ExecutionGraph">ExecutionGraph</dt><dd>Параллельная версия JobGraph, которую держит JobMaster. На каждую вершину в нём столько элементов, сколько задано параллелизмом.</dd>
+<dt data-match="цепочк|operator chain">Цепочка операторов (operator chain)</dt><dd>Операторы, которые работают в одном потоке и передают записи вызовом метода, без сети. Разрывается при <code>keyBy</code>, разном параллелизме или разных группах slot sharing.</dd>
+<dt data-match="FORWARD|ForwardPartitioner">FORWARD</dt><dd>Способ передачи, при котором подзадача отправляет записи подзадаче следующего оператора с тем же номером. Без него операторы не склеиваются.</dd>
+<dt data-match="режим Session|режиме Session|режима Session|режимы Session">Режим Session</dt><dd>Кластер работает независимо от заданий и обслуживает несколько сразу. <code>main</code> выполняется в клиенте.</dd>
+<dt data-match="режим Application|режиме Application|режима Application|на Application">Режим Application</dt><dd>Кластер создаётся на одно приложение, а <code>main</code> выполняется в JobManager. Jar уже лежит на classpath кластера.</dd>
+<dt data-match="per-job">Режим per-job</dt><dd>Прежний режим развёртывания, удалённый во Flink 2.0. Вместо него используется Application.</dd>
+<dt data-match="standalone">Standalone</dt><dd>Способ запуска кластера без системы управления ресурсами. Процессы поднимаешь сам, как у нас в Docker Compose, и новых TaskManager кластер запросить не может.</dd>
+<dt data-match="uid">uid</dt><dd>Постоянный идентификатор оператора, заданный вручную. По нему Flink находит состояние оператора при восстановлении из savepoint.</dd>
+<dt data-match="savepoint">Savepoint</dt><dd>Снимок состояния задания, который ты создаёшь вручную, чтобы остановить задание и продолжить его с того же места. Разбирается в уроке 13.</dd>
+<dt data-match="стратеги[а-я]* перезапуска|restart strategy">Стратегия перезапуска (restart strategy)</dt><dd>Правило, по которому Flink решает, перезапускать ли задание после сбоя и с какой задержкой.</dd>
+<dt data-match="чекпоинт|checkpoint">Чекпоинт (checkpoint)</dt><dd>Согласованный снимок состояния, который Flink снимает автоматически. Подробно в уроке 11.</dd>
+<dt data-match="NoResourceAvailableException">NoResourceAvailableException</dt><dd>Исключение, которым кончается запрос слотов, если кластер не может их дать.</dd>
+<dt data-match="REST">REST-интерфейс</dt><dd>HTTP-интерфейс Dispatcher на порту 8081. Через него работают Web UI, клиент <code>flink</code> и твои скрипты.</dd>
+<dt data-match="Web UI">Web UI</dt><dd>Панель Flink в браузере. Показывает вершины, подзадачи, слоты и исключения.</dd>
+<dt data-match="jq">jq</dt><dd>Консольная утилита для разбора и преобразования JSON.</dd>
+<dt data-match="Driver">Driver (Spark)</dt><dd>Процесс Spark, который выполняет <code>main</code> и планирует работу приложения.</dd>
+<dt data-match="Executor|экзекутор">Executor (Spark)</dt><dd>Рабочий процесс Spark, который выполняет задачи. Похож на TaskManager.</dd>
+<dt data-match="Kubernetes">Kubernetes</dt><dd>Система управления контейнерами. Flink на ней может сам запрашивать новые TaskManager. Разбирается в уроке 20.</dd>
+<dt data-match="YARN">YARN</dt><dd>Менеджер ресурсов из экосистемы Hadoop, на котором тоже можно запускать Flink.</dd>
+<dt data-match="Kafka">Apache Kafka</dt><dd>Распределённый журнал сообщений. Из него наше задание читает платежи.</dd>
+</dl>

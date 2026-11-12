@@ -1,0 +1,11 @@
+<h2>Задание. Выручка по уровню риска и запуск из jar</h2>
+<p>Финансы просят новый отчёт. Каждую минуту для каждого уровня риска продавца нужны три продавца с самой большой выручкой. Уровень риска лежит в таблице <code>merchants</code> в PostgreSQL. Плюс платформа требует, чтобы SQL проходил ту же сборку и тот же релиз, что и код, поэтому скрипт должен ехать в jar.</p>
+<ol>
+  <li>Создай таблицу <code>risk_revenue</code> в <code>sql/init.sql</code> с полями <code>risk_level</code>, <code>window_start</code>, <code>top_rank</code>, <code>merchant_id</code>, <code>amount_minor</code>. Подбери первичный ключ так, чтобы повторная запись окна перезаписывала строки.</li>
+  <li>Напиши <code>src/main/resources/sql/risk_revenue.sql</code>. Обогати платёж уровнем риска через lookup join с кэшем на 10000 строк и 5 минут. Продавец без записи в справочнике получает уровень <code>UNKNOWN</code>. Посчитай выручку в минутном окне TVF и оставь топ-3 через Window Top-N.</li>
+  <li>Напиши класс <code>dev.study.payguard.job.SqlJobRunner</code>. Он получает имя скрипта аргументом <code>--script</code>, читает его из ресурсов jar и выполняет инструкции по очереди через <code>TableEnvironment</code>.</li>
+  <li>Добавь нужную зависимость в <code>build.gradle.kts</code> так, чтобы она не попала в толстый jar.</li>
+  <li>Отправь задание на SQL-кластер через <code>flink run</code>.</li>
+</ol>
+<p>Критерии готовности такие. В Web UI на порту 8082 в плане есть вершины <code>LookupJoin</code>, <code>LocalWindowAggregate</code>, <code>GlobalWindowAggregate</code> и <code>WindowRank</code>. В таблице не больше трёх строк на уровень риска и минуту. В верхней строке уровня <code>HIGH</code> стоит горячий продавец <code>m-0000</code>.</p>
+<p>Подсказки. Для lookup join нужен атрибут времени обработки, посмотри функцию <code>PROCTIME()</code> и конструкцию <code>FOR SYSTEM_TIME AS OF</code>. Window Top-N требует, чтобы <code>PARTITION BY</code> содержал и начало, и конец окна. Точка входа в толстом jar занята основным заданием, поэтому главный класс придётся указать флагом. При разборе скрипта подумай, на чём разрезать текст, чтобы инструкции и комментарии не сломали <code>executeSql</code>.</p>

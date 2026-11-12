@@ -1,0 +1,25 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Скрипт делает три запроса. Цикл идёт только по запущенным заданиям, поэтому завершённые не засоряют вывод.</p>
+<div data-code="lesson-02/scripts/cluster-status.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-02/scripts/cluster-status.sh" data-lines="3-10"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>set -euo pipefail</code> останавливает скрипт при первой ошибке.</p>
+      <p class="tl"><code>${FLINK_REST:-http://localhost:8081}</code> берёт адрес из переменной окружения, а без неё подставляет значение по умолчанию.</p>
+      <p class="tl">Первый запрос читает <code>/overview</code>. Занятые слоты вычисляются как разность <code>slots-total</code> и <code>slots-available</code>. Дефис в имени поля заставляет писать <code>.["slots-total"]</code>.</p>
+      <p class="tl">Цикл берёт идентификаторы из <code>/jobs</code>. Там статус лежит в поле <code>status</code>, и нам нужны только значения <code>RUNNING</code>.</p>
+      <p class="tl">Для каждого задания запрашиваем <code>/jobs/$job_id</code>. Здесь статус лежит уже в поле <code>state</code>, а идентификатор в поле <code>jid</code>. Запятая в <code>jq</code> выдаёт сначала строку заголовка, потом по строке на вершину.</p>
+    </div>
+  </div>
+</div>
+<p>Статус вершины в выводе нужен потому, что статус задания RUNNING ставится раньше, чем появляются слоты. Об этом мы говорили в теории.</p>
+<p>Проверь работу двумя запусками, с заданием и без него. Заодно убедись, что переменная работает, задав неверный адрес.</p>
+<pre data-lang="bash" data-title="терминал">chmod +x scripts/cluster-status.sh
+./scripts/cluster-status.sh
+FLINK_REST=http://localhost:9999 ./scripts/cluster-status.sh; echo "код выхода $?"</pre>
+<p>При работающем задании скрипт покажет один TaskManager, два занятых слота из четырёх и единственную вершину с именем из трёх операторов. Без задания останется первая строка. С неверным адресом <code>curl -s</code> вернёт ненулевой код, и <code>pipefail</code> завершит скрипт с этим кодом.</p>
+</div>

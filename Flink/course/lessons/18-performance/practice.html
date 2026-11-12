@@ -1,0 +1,119 @@
+<h2>Что будет в конце</h2>
+<p>Ты встроишь в задание учебный тормоз и включишь его флагом. На стенде увидишь, как одна медленная вершина раскрашивает весь граф, найдёшь её скриптом по REST, снимешь flame graph и сравнишь три режима чекпоинтов. Цифры в тексте получены на стенде курса при 200 платежах в секунду и параллелизме 2.</p>
+<p>Файлы задания, это класс <code>SaltedMerchantStats</code> и его тест, пока не создавай. В снапшоте <code>solutions/lesson-18</code> они уже есть, и строки 92-104 в <code>PayGuardJob</code> тоже относятся к заданию.</p>
+
+<h2>Шаг 1. Учебный тормоз</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/SlowDown.java</code>. Он изображает приёмник, который на каждую запись ходит во внешнюю систему и ждёт ответа.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/pipeline/SlowDown.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-18/src/main/java/dev/study/payguard/pipeline/SlowDown.java" data-lines="14-20"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Обычный <code>map</code>, который возвращает запись без изменений. Он нужен только ради паузы.</p>
+      <p class="tl">При нулевой задержке оператор ничего не делает, поэтому его можно оставить в графе навсегда и включать флагом.</p>
+      <p class="tl"><code>Thread.sleep</code> держит поток задачи. Для Flink это время работы оператора, и оно попадёт в busy. Процессор при этом свободен.</p>
+      <p class="tl">Запись уходит дальше, к приёмнику Kafka.</p>
+    </div>
+  </div>
+</div>
+<p>Задержку берём из аргументов. В record <code>JobConfig</code> добавь поле.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/job/JobConfig.java" data-lines="21-21"></div>
+<p>И его чтение в <code>fromArgs</code> на той же позиции. По умолчанию тормоз выключен.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/job/JobConfig.java" data-lines="41-41"></div>
+<p>Встрой оператор после <code>card-profile</code>. Вызов <code>returns</code> нужен, потому что <code>SlowDown</code> обобщённый, и без подсказки Java сотрёт тип записи. Запрет обобщённых типов из урока 3 тогда уронит задание при сборке графа.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="133-144"></div>
+<p>Между <code>card-profile</code> и <code>slow-down</code> нет смены ключа и параллелизма, поэтому Flink сцепит их в одну вершину. В интерфейсе она будет называться <code>card-profile -&gt; slow-down</code>.</p>
+
+<h2>Шаг 2. Flame graph и переключатель debloat в Compose</h2>
+<p>В <code>docker-compose.yml</code> появились две строки в общих настройках Flink.</p>
+<div data-diff="lesson-17/docker-compose.yml lesson-18/docker-compose.yml"></div>
+<p><code>rest.flamegraph.enabled</code> включает вкладку Flame Graph в Web UI и REST-ручку под ней. На проде документация советует считать её экспериментальной.</p>
+<p>Во второй строке значение берётся из переменной окружения. Запись <code>${BUFFER_DEBLOAT:-false}</code> Docker Compose раскрывает сам. Если переменная <code>BUFFER_DEBLOAT</code> не задана, подставится <code>false</code>. Так один файл обслуживает оба опыта.</p>
+
+<h2>Шаг 3. Скрипт нагрузки по вершинам</h2>
+<p>Смотреть каждую вершину в интерфейсе долго. Создай <code>scripts/vertex-load.sh</code>, он печатает одну строку на вершину.</p>
+<div data-code="lesson-18/scripts/vertex-load.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-18/scripts/vertex-load.sh" data-lines="13-18"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Берём из описания задания пары «идентификатор вершины и имя». Цикл <code>while read</code> разбирает их по одной.</p>
+      <p class="tl">Ручка <code>subtasks/metrics</code> сразу агрегирует метрику по всем подзадачам вершины и отдаёт <code>min</code>, <code>max</code>, <code>avg</code> и <code>sum</code>. Мы просим три метрики.</p>
+      <p class="tl">Ответ это массив объектов с полем <code>id</code>. Выражение jq превращает его в словарь по имени метрики, чтобы обращаться к полям по имени.</p>
+      <p class="tl">Для busy и back берём максимум по подзадачам, как это делает граф в Web UI. Для <code>numRecordsIn</code> берём минимум и максимум, их отношение показывает перекос. Запись <code>// 0</code> подставляет ноль, если метрики у вершины нет.</p>
+      <p class="tl"><code>read -r</code> с подстановкой процесса кладёт четыре числа в переменные, а <code>printf</code> печатает строку таблицы. Шаблон <code>%-46.46s</code> выравнивает имя по левому краю и обрезает его до 46 символов.</p>
+    </div>
+  </div>
+</div>
+<p>Сделай скрипт исполняемым командой <code>chmod +x scripts/vertex-load.sh</code>. Метрика <code>numRecordsIn</code> накопительная, она растёт с запуска подзадачи. Сравнивай минимум и максимум внутри одного вызова, между вызовами они разные.</p>
+
+<h2>Шаг 4. Базовый замер</h2>
+<p>Собери jar и подними стенд в таком порядке, как в уроке 1. Потом отправь задание без тормоза и запусти генератор во втором терминале.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+scripts/submit.sh
+./gradlew loadgen --args="--rate 200"</pre>
+<p>Подожди минуту и сними замер.</p>
+<pre data-lang="bash" data-title="второй терминал">scripts/vertex-load.sh
+scripts/checkpoint-report.sh</pre>
+<p>На стенде курса busy всех вершин был меньше 30, back около нуля, чекпоинты шли 223-367 мс. Эти числа и есть норма, с которой мы будем сравнивать.</p>
+
+<h2>Шаг 5. Включи тормоз</h2>
+<p>Отмени задание и отправь его заново с задержкой 20 мс. Состояние для опыта не нужно. Смещения Kafka группа <code>payguard</code> хранит сама, поэтому новое задание продолжит с места, где остановилось старое.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '[.jobs[] | select(.status == "RUNNING")][0].id')
+docker compose exec -T jobmanager flink cancel "$JOB"
+scripts/submit.sh --slow-ms 20</pre>
+<p>Первая строка достаёт идентификатор запущенного задания из REST, так же как это делают наши скрипты. Аргумент <code>--slow-ms 20</code> скрипт <code>submit.sh</code> передаёт заданию, его прочитает <code>JobConfig</code>.</p>
+<p>Посчитай заранее. На подзадачу <code>card-profile -&gt; slow-down</code> приходится около 100 записей в секунду, а по 20 мс на запись она успевает не больше 50. Через минуту снова запусти <code>scripts/vertex-load.sh</code>. Вот что получилось у нас.</p>
+<table>
+<thead><tr><th>Вершина</th><th>busy</th><th>back</th><th>Что это значит</th></tr></thead>
+<tbody>
+<tr><td><code>card-profile -&gt; slow-down</code></td><td>1000</td><td>0 по формуле busy</td><td>Узкое место, занята вся секунда</td></tr>
+<tr><td><code>deduplicate</code></td><td>не больше 1 по формуле</td><td>999</td><td>Жертва, ждёт свободный буфер для card-profile</td></tr>
+<tr><td>Остальные вершины</td><td>1-47</td><td>не записали</td><td>Простаивают, общий предок отдаёт им меньше записей</td></tr>
+</tbody>
+</table>
+<p>Отчёт по чекпоинтам показал 25651 мс и 61137 мс вместо прежних 300 мс. Лаг Kafka в момент замера был 1340 записей и рос. Если у тебя запущены Prometheus и Grafana из урока 17, на панели лага видно то же самое.</p>
+
+<h2>Шаг 6. Спроси REST про backpressure</h2>
+<p>Вкладка Back Pressure в Web UI берёт данные из ручки <code>/backpressure</code>. Её удобно звать из скрипта.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '[.jobs[] | select(.status == "RUNNING")][0].id')
+VERTEX=$(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[] | select(.name | contains("deduplicate")) | .id')
+curl -s localhost:8081/jobs/$JOB/vertices/$VERTEX/backpressure \
+  | jq '{level: .backpressureLevel, subtasks: [.subtasks[] | {subtask, ratio, busyRatio}]}'</pre>
+<p>Вторая строка находит идентификатор вершины по части имени. Последняя оставляет из ответа уровень вершины и по каждой подзадаче долю backpressure и долю занятости. У нас ручка вернула уровень <code>high</code> и долю <code>0.999</code>. Это те же 999 мс из таблицы выше, делённые на 1000. Если запросить ту же ручку для <code>slow-down</code>, уровень будет <code>ok</code>, потому что узкое место само никого не ждёт.</p>
+
+<h2>Шаг 7. Flame graph</h2>
+<p>Открой <code>http://localhost:8081</code>, зайди в задание и кликни по вершине <code>card-profile -&gt; slow-down</code>. Справа появится вкладка Flame Graph с переключателем On-CPU, Off-CPU и Mixed. То же можно получить через REST.</p>
+<pre data-lang="bash" data-title="терминал">VERTEX=$(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[] | select(.name | contains("slow-down")) | .id')
+curl -s "localhost:8081/jobs/$JOB/vertices/$VERTEX/flamegraph?type=full" | jq '{endTimestamp, samples: .data.value}'</pre>
+<p>Параметр <code>type</code> принимает <code>full</code>, <code>on_cpu</code> и <code>off_cpu</code>. Первый запрос только запускает сбор снимков, и в ответе будет <code>endTimestamp</code> равный -3 без данных. Так <code>VertexFlameGraph.waiting()</code> помечает граф, который ещё строится. Повтори запрос через несколько секунд.</p>
+<p>У нас полный граф собрал 200 снимков. Это совпадает с умолчанием в 100 снимков, сложенных по двум подзадачам. Самая толстая стопка шла по цепочке <code>StreamTask.runMailboxLoop</code>, <code>processInput</code>, <code>emitNext</code>. Это главный цикл подзадачи из урока 1, который читает запись и проталкивает её по цепочке операторов. Выше по стопке, в вызовах операторов цепочки, ищи <code>SlowDown.map</code> и <code>Thread.sleep</code>. В режиме <code>on_cpu</code> этот кусок исчезнет, потому что спящий поток находится в состоянии <code>TIMED_WAITING</code>.</p>
+<p>В интерфейсе граф читается снизу вверх. Нижняя полоса это корень, над ней методы, которые он вызвал. Ширина полосы это доля снимков, а цвет ничего не значит. Наведи курсор на полосу, и интерфейс покажет полное имя метода с номером строки.</p>
+
+<h2>Шаг 8. Unaligned-чекпоинты под той же нагрузкой</h2>
+<p>Перезапусти задание с включёнными unaligned-чекпоинтами. Настройку можно передать прямо в <code>flink run</code>, не трогая Compose.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '[.jobs[] | select(.status == "RUNNING")][0].id')
+docker compose exec -T jobmanager flink cancel "$JOB"
+docker compose exec -T jobmanager flink run --detached \
+  -Dexecution.checkpointing.unaligned.enabled=true \
+  /jobs/payguard-1.0.0.jar --slow-ms 20</pre>
+<p>Флаг <code>-D</code> задаёт настройку только этому заданию. Он должен стоять до пути к jar, иначе CLI примет его за аргумент программы. По этой же причине мы не используем здесь <code>submit.sh</code>.</p>
+<p>Чекпоинты стали 129-293 мс, в каждом записано 705-1011 КиБ данных в полёте. Эти байты барьер обогнал и сохранил. В Web UI на вкладке Checkpoints колонка Processed (persisted) in-flight data показывает их по каждой подзадаче. Лаг при этом был 10760 и продолжал расти.</p>
+
+<h2>Шаг 9. Buffer debloating</h2>
+<p>Вернись к выровненным чекпоинтам и включи debloat через переменную из шага 2. Compose увидит изменившуюся настройку и пересоздаст контейнеры JobManager и TaskManager. Кластер без высокой доступности при этом теряет запущенное задание, поэтому его надо отправить снова.</p>
+<pre data-lang="bash" data-title="терминал">BUFFER_DEBLOAT=true docker compose up -d --wait
+scripts/submit.sh --slow-ms 20</pre>
+<p>Чекпоинты пошли за 1540-2368 мс, через барьер проходит 29-54 КиБ данных. Это примерно столько, сколько медленная подзадача разбирает за целевую секунду. Без debloat в той же очереди стояли буферы полного размера, по умолчанию 32 КиБ, и выравнивание занимало десятки секунд. Лаг дошёл до 16421 и тоже рос.</p>
+<p>Закончи опыт. Отмени задание, верни Compose к обычным настройкам командой <code>docker compose up -d --wait</code> без переменной и отправь задание без тормоза через <code>scripts/submit.sh</code>.</p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Как это выглядит в проде</strong>
+    <p>Порядок разбора всегда один. Алерт на backpressure или лаг, потом граф с busy и back от источника вниз, потом flame graph узкой вершины, потом решение по причине. Режим чекпоинтов выбирают заранее, чтобы пробка не превращалась ещё и в долгое восстановление.</p>
+  </div>
+</div>

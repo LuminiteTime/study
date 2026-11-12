@@ -1,0 +1,53 @@
+groups:
+  - name: payguard-flink
+    rules:
+      - alert: PayGuardJobRestarted
+        expr: increase(flink_jobmanager_job_numRestarts{job_name="payguard"}[5m]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Задание payguard перезапускалось за последние 5 минут"
+
+      - alert: PayGuardCheckpointStale
+        expr: time() - flink_jobmanager_job_lastCheckpointCompletedTimestamp{job_name="payguard"} / 1000 > 120
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Больше двух минут нет успешного чекпоинта: растёт объём повторной обработки и зависли транзакции Kafka"
+
+      - alert: PayGuardCheckpointsFailing
+        expr: increase(flink_jobmanager_job_numberOfFailedCheckpoints{job_name="payguard"}[10m]) > 2
+        labels:
+          severity: warning
+        annotations:
+          summary: "За 10 минут упало больше двух чекпоинтов"
+
+      - alert: PayGuardBackpressure
+        expr: max by (task_name) (flink_taskmanager_job_task_backPressuredTimeMsPerSecond{job_name="payguard"}) > 500
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.task_name }} больше половины времени ждёт следующий оператор"
+
+      # Метрики источника живут в TaskManager и пропадают вместе с ним, поэтому правило на лаг в это время молчит.
+      - alert: PayGuardSourceSilent
+        expr: absent(flink_taskmanager_job_task_operator_numRecordsOutPerSecond{job_name="payguard", operator_name="Source:_payments_raw"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "От источника payments.raw нет метрик: задание или TaskManager не работает"
+
+      - alert: PayGuardKafkaLagHigh
+        expr: |
+          sum(max by (subtask_index) (
+            flink_taskmanager_job_task_operator_KafkaSourceReader_KafkaConsumer_records_lag_max{
+              job_name="payguard", operator_name="Source:_payments_raw"}
+          )) > 5000
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Задание отстало от топика payments.raw на {{ $value }} записей"

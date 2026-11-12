@@ -1,0 +1,139 @@
+<h2>Что будет в конце</h2>
+<p>Правило velocity из урока 7 переедет в новую функцию <code>DynamicRules</code>, которая берёт порог из топика <code>rules.config</code>. Ты отправишь в топик новое правило консольным продюсером Kafka, и задание применит его без перезапуска. Проверку заблокированных стран ты напишешь в задании, поэтому в практике её код пропускаем. Файлы решения пока создавать не нужно.</p>
+<p>Новых зависимостей нет, <code>build.gradle.kts</code> не меняется. Broadcast state и <code>KeyedBroadcastProcessFunction</code> входят в те модули Flink, что уже подключены.</p>
+
+<h2>Шаг 1. Настройки правил</h2>
+<p>Создай <code>model/RuleConfig.java</code>. Настройки описывает record с двумя полями, лимитом платежей карты в минуту и списком заблокированных стран.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/model/RuleConfig.java"></div>
+<p>Слова <code>implements Serializable</code> появились после ошибки. Первая версия была без них. Тесты прошли, jar собрался, а <code>flink run</code> упал ещё до старта задания.</p>
+<pre data-lang="text" data-title="вывод flink run" data-output>RuleConfig[velocityMaxPayments=10, blockedCountries=[]] is not serializable. The object probably contains or references non serializable fields.</pre>
+<p>Причина в поле <code>defaults</code> функции <code>DynamicRules</code>. Значения по умолчанию передаются в конструктор и хранятся в поле, а функция уезжает на TaskManager через сериализацию Java вместе со всем, на что ссылаются её поля. В самом broadcast state <code>RuleConfig</code> хранится иначе, через сериализатор Flink для POJO, и <code>Serializable</code> ему не нужен. Record Flink разбирает как POJO, это было в уроке 3.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверку запускает метод, который добавляет функцию в граф. Ещё на клиенте он пропускает её через <code>clean</code> окружения.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/datastream/BroadcastConnectedStream.java" data-lines="249-271" data-must="clean(userFunction)"></div>
+<p>Метод <code>clean</code> зовёт <code>ClosureCleaner</code> с проверкой сериализуемости, и её текст совпадает с нашей ошибкой. Код проверки и причину, по которой test harness её обходит, мы разберём в уроке 16. Для практики хватит вывода. Забытый <code>Serializable</code> ловит отправка задания или тест, который строит граф, а тест функции на harness его пропускает.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/types_serialization/" target="_blank" rel="noopener">Data Types &amp; Serialization</a></p>
+</div>
+
+<p>В <code>JobConfig</code> добавь имя топика правил. Умолчание <code>rules.config</code> совпадает с топиком, который уже создаёт служба <code>kafka-init</code>.</p>
+<div data-diff="lesson-07/src/main/java/dev/study/payguard/job/JobConfig.java lesson-08/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+
+<h2>Шаг 2. Разбор, который не роняет задание</h2>
+<p>Правила пишет человек, и опечатка в JSON рано или поздно случится. Если схема бросит исключение, задание упадёт целиком. Сейчас чекпоинты выключены, и без них Flink по умолчанию задание не перезапускает. Когда в уроке 11 чекпоинты появятся, перезапуск включится сам, и задание будет раз за разом доходить до той же записи и падать снова. Создай <code>pipeline/LenientJsonSchema.java</code>. На битой записи она пишет предупреждение в лог и возвращает <code>null</code>.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/LenientJsonSchema.java"></div>
+<p><code>ObjectMapper</code> помечен <code>transient</code> и создаётся в <code>open</code>, один раз на подзадачу. В сериализованную схему он не попадает. Класс записи передаётся конструктору, поэтому схему можно взять для любого типа.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Почему хватает <code>null</code>. Источник Kafka с <code>setValueOnlyDeserializer</code> оборачивает схему и вызывает её вариант с <code>Collector</code>.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/reader/deserializer/KafkaValueOnlyDeserializationSchemaWrapper.java" data-lines="43-52" data-must="deserializationSchema.deserialize(message.value(), out)"></div>
+<p>Этот вариант по умолчанию отдаёт объект дальше, только если <code>deserialize</code> вернул что-то отличное от <code>null</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/serialization/DeserializationSchema.java" data-lines="80-86" data-must="if (deserialize != null)"></div>
+<p>Пустой результат просто не попадает в поток, и задание продолжает работать с прежними правилами.</p>
+<p>Теперь о том, что было бы без этой схемы. Стратегия перезапуска по умолчанию зависит от того, включены ли чекпоинты. Описание настройки <code>restart-strategy.type</code> говорит об этом прямо.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/RestartStrategyOptions.java" data-lines="150-157" data-must="If checkpointing is disabled, the default value is %s."></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/" target="_blank" rel="noopener">Apache Kafka Connector</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/task_failure_recovery/#restart-strategies" target="_blank" rel="noopener">Restart Strategies</a></p>
+</div>
+
+<h2>Шаг 3. Watermark для потока правил</h2>
+<p>Создай <code>pipeline/RuleWatermarks.java</code>. Это стратегия из теории, которая не даёт правилам держать время оператора.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/RuleWatermarks.java" data-lines="15-26"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>forGenerator</code> собирает стратегию из фабрики генераторов. Источник сам создаст генераторы из этой фабрики.</p>
+      <p class="tl"><code>onEvent</code> пустой. Время правила нас не интересует, по записям watermark не двигаем.</p>
+      <p class="tl"><code>onPeriodicEmit</code> вызывается периодически, по умолчанию раз в 200 мс, это настройка <code>pipeline.auto-watermark-interval</code>. Каждый раз выпускаем <code>Long.MAX_VALUE</code>, обещание, что от этого входа старых данных не будет никогда.</p>
+      <p class="tl">Стратегия типизирована <code>RuleConfig</code>, поэтому подходит прямо в <code>fromSource</code> источника правил.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 4. Функция правил</h2>
+<p>Создай <code>pipeline/DynamicRules.java</code>. Она заменяет <code>VelocityRule</code> из урока 7, поэтому удали этот класс и его тест <code>VelocityRuleTest</code>. Подсчёт переезжает почти без изменений, меняется только то, откуда берётся порог.</p>
+<p>В снапшоте файл уже содержит проверку стран из задания. Ниже он показан кусками, строки 22, 48 и 68-73 относятся к заданию, их пока не пиши. Начало файла до первой из них.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="1-21"></div>
+<p>Дальше дескриптор, поля, <code>open</code> и начало <code>processElement</code>.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="23-47"></div>
+<p>Дескриптор <code>RULES</code> объявлен публичной константой, потому что он нужен в трёх местах, в вызове <code>broadcast</code>, в функции и в тесте. Типы заданы явно через <code>Types</code>, ведь общие типы Kryo мы запретили в уроке 3. Если запросить состояние по дескриптору с другим именем, оператор бросит <code>IllegalArgumentException</code> с советом проверить опечатки.</p>
+<p>После строки 47 идёт вызов правила частоты и два новых метода.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="49-66"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Платёж проверяется правилом частоты с порогом из текущих настроек. Настройки <code>processElement</code> получил строкой выше из broadcast state через контекст только для чтения.</p>
+      <p class="tl"><code>processBroadcastElement</code> получает новое правило и кладёт его под единственным ключом <code>current</code>. Контекст здесь другой, и <code>getBroadcastState</code> возвращает изменяемый <code>BroadcastState</code>. Код не смотрит ни на часы, ни во внешние системы, поэтому во всех подзадачах сделает одно и то же.</p>
+      <p class="tl"><code>onTimer</code> остался из урока 7. Таймер срабатывает по watermark оператора и выбрасывает корзины старше минуты. Именно он замолчит, если поток правил задержит время.</p>
+      <p class="tl"><code>currentRules</code> читает <code>current</code>. Пока не пришло ни одного правила, словарь пуст, и берутся значения по умолчанию из конструктора.</p>
+    </div>
+  </div>
+</div>
+<p>Остаток файла это правило частоты из урока 7. Изменилась одна строка, порог теперь берётся из <code>rules.velocityMaxPayments()</code>.</p>
+<div data-code="lesson-08/src/main/java/dev/study/payguard/pipeline/DynamicRules.java" data-lines="74-92"></div>
+
+<h2>Шаг 5. Тест на harness</h2>
+<p>Фабрика <code>ProcessFunctionTestHarnesses.forKeyedBroadcastProcessFunction</code> принимает функцию, селектор ключа, тип ключа и дескрипторы broadcast state. Правило подаётся методом <code>processBroadcastElement</code>, платёж обычным <code>processElement</code>. Третий тест в файле снапшота относится к заданию, поэтому возьми строки до него и закрой класс фигурной скобкой.</p>
+<div data-code="lesson-08/src/test/java/dev/study/payguard/pipeline/DynamicRulesTest.java" data-lines="1-52"></div>
+<p>Первый тест проверяет значения по умолчанию, лимит 2 и алерт на третьем платеже. Второй присылает лимит 100 и убеждается, что те же три платежа алерта не дают. Это и есть смена правил без перезапуска в миниатюре, функция та же, harness тот же.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test</pre>
+<p>Помни, что забытый <code>Serializable</code> из шага 1 этот тест не заметит. Harness не отправляет функцию по сети.</p>
+
+<h2>Шаг 6. Подключи поток правил</h2>
+<p>В <code>PayGuardJob</code> появляется второй источник и оператор с двумя входами.</p>
+<div data-diff="lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-08/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<p>Источник правил читает свой топик со своей группой потребителей, к имени группы добавлен суффикс <code>-rules</code>. Значения разбирает <code>LenientJsonSchema</code>, время задаёт <code>RuleWatermarks.neverHoldBack()</code>. Вызов <code>broadcast(DynamicRules.RULES)</code> делает поток широковещательным, а <code>byCard.connect(rules)</code> соединяет его с платежами, разбитыми по карте. Значения по умолчанию берутся из параметров запуска, как раньше лимит <code>VelocityRule</code>.</p>
+<p>Источник правил начинает с <code>OffsetsInitializer.earliest()</code>. Чекпоинтов у нас пока нет, и после каждого запуска broadcast state пуст. Чтение топика с начала восстанавливает настройки, а последнее сообщение перезаписывает предыдущие. Kafka хранит порядок только внутри партиции, поэтому с четырьмя партициями «последнее» при повторном чтении может оказаться не тем, что отправили последним. Это ещё один довод за одну партицию в проде.</p>
+
+<h2>Шаг 7. Собери и запусти</h2>
+<p>Порядок прежний, сначала сборка, потом стенд.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list</pre>
+<p>Останови задание прошлого урока командой <code>flink cancel &lt;JobID&gt;</code>, затем отправь новое и запусти генератор. Без аргументов генератор пишет 100 платежей в секунду.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen</pre>
+<pre data-lang="text" data-title="вывод submit.sh" data-output>Job has been submitted with JobID 524a5209d6e80a468c3861e3474d31cf</pre>
+<p>Посмотри на вершины задания.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"Source: rules-config","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rules-dynamic","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Источник правил стал отдельной вершиной <code>Source: rules-config</code>. Вершина <code>rules-dynamic</code> тоже стоит особняком. К ней ведут ребро по ключу карты и ребро BROADCAST, а цепочка, как ты помнишь по уроку 4, рвётся на любом разбиении, кроме forward. Теперь спроси метрики и watermark вершины правил.</p>
+<pre data-lang="bash" data-title="терминал">V=$(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[] | select(.name == "rules-dynamic") | .id')
+curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=numRecordsIn,numRecordsOut,busyTimeMsPerSecond,backPressuredTimeMsPerSecond&amp;agg=min,max,sum" | jq -c .
+curl -s localhost:8081/jobs/$JOB/vertices/$V/watermarks | jq -c '[.[].value]'</pre>
+<pre data-lang="json" data-title="вывод" data-output>[{"id":"numRecordsIn","min":8530.0,"max":8656.0,"sum":17186.0},{"id":"numRecordsOut","min":20.0,"max":22.0,"sum":42.0},{"id":"busyTimeMsPerSecond","min":3.0,"max":3.0,"sum":6.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]
+["1794085908663","1794085908663"]</pre>
+<p>Это числа с нашего стенда. В <code>numRecordsIn</code> 17186 записей, это платежи, правил в топике ещё не было. У вершины <code>Source: rules-config</code> в тот же момент было 0 записей. На выход ушло 42 алерта velocity. Watermark обеих подзадач равен 1794085908663, у <code>deduplicate</code> и окон число такое же. Вход правил время не держит, хотя по нему не пришло ни одной записи.</p>
+
+<h2>Шаг 8. Поменяй правило на лету</h2>
+<p>Отправь в топик правило, которое поднимает лимит частоты до 1000 и блокирует Польшу.</p>
+<pre data-lang="bash" data-title="терминал">echo '{"velocityMaxPayments":1000,"blockedCountries":["PL"]}' | docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic rules.config</pre>
+<p><code>kafka-console-producer.sh</code> отправляет каждую строку ввода отдельным сообщением. Флаг <code>-T</code> у <code>docker compose exec</code> не выделяет терминал в контейнере, так строка из <code>echo</code> доходит до продюсера как через обычный конвейер. Флаг <code>--bootstrap-server</code> задаёт адрес брокера изнутри контейнера.</p>
+<p>Повтори команду с метриками из шага 7. В метриках вершины <code>Source: rules-config</code> появится одна запись, и задание при этом не перезапускалось. Чтобы увидеть смену порога, сравни <code>numRecordsOut</code> вершины <code>rules-dynamic</code> до и после. С лимитом 1000 новых алертов velocity быть не должно. Список стран твоя функция пока не читает. На нашем стенде в снапшоте уже была проверка стран из задания, и за 25 секунд при 100 платежах в секунду после этого сообщения пришло 539 алертов blocked-country. У тебя они появятся, когда сделаешь задание.</p>
+<p>Теперь проверь, что опечатка не роняет задание.</p>
+<pre data-lang="bash" data-title="терминал">echo 'not-json' | docker compose exec -T kafka \
+  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic rules.config
+docker compose logs taskmanager | grep RuleConfig</pre>
+<p>В логе TaskManager появится предупреждение уровня WARN с текстом «Пропускаю запись, которую не удалось разобрать как RuleConfig» и стеком исключения Jackson. Задание остаётся в RUNNING и работает с прежним правилом.</p>
+
+<h2>Шаг 9. Как увидеть застрявшее время</h2>
+<p>Если хочешь проверить ловушку из теории своими глазами, замени в <code>PayGuardJob</code> вызов <code>RuleWatermarks.neverHoldBack()</code> на <code>WatermarkStrategy.noWatermarks()</code>, собери и перезапусти задание. Мы этот вариант на стенде не запускали, поэтому ниже то, что предсказывает код. Команда с <code>watermarks</code> из шага 7 вернёт для <code>rules-dynamic</code> число -9223372036854775808, это <code>Long.MIN_VALUE</code>, а у <code>deduplicate</code> время будет расти. Не забудь вернуть <code>neverHoldBack</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>У задачи с двумя входами на каждый вход свой измеритель watermark, а наружу показывается их минимум.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/AbstractTwoInputStreamTask.java" data-lines="49-55" data-must="new MinWatermarkGauge(input1WatermarkGauge, input2WatermarkGauge)"></div>
+<p>Измеритель входа начинает с <code>Long.MIN_VALUE</code> и меняется, только когда по входу пришёл watermark. Минимум считается обычным <code>min</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/metrics/WatermarkGauge.java" data-lines="24-36" data-must="Long.MIN_VALUE"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/metrics/MinWatermarkGauge.java" data-lines="28-40" data-must=".min()"></div>
+<p>Минимум регистрируется метрикой задачи с именем <code>currentInputWatermark</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/AbstractTwoInputStreamTask.java" data-lines="87-93" data-must="IO_CURRENT_INPUT_WATERMARK"></div>
+<p>Обработчик REST для <code>/watermarks</code> отдаёт именно эту метрику по каждой подзадаче вершины.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/rest/handler/job/metrics/JobVertexWatermarksHandler.java" data-lines="89-98" data-must="MetricNames.IO_CURRENT_INPUT_WATERMARK"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/rest_api/" target="_blank" rel="noopener">REST API</a></p>
+</div>

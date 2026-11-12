@@ -1,0 +1,79 @@
+### тесты
+RESULT tests 39 fail 0
+jar bytes 29440528
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+Job has been submitted with JobID 01b9c903592784f694c70be4862860d4
+### job 01b9c903592784f694c70be4862860d4
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"Source: rules-config","parallelism":2,"status":"RUNNING"},{"name":"Source: payment-confirmations","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rules-dynamic","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"join-confirmations -> confirmed-sink: Writer -> confirmed-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rule-unconfirmed","parallelism":2,"status":"RUNNING"},{"name":"cep-card-testing","parallelism":2,"status":"RUNNING"},{"name":"cep-impossible-travel","parallelism":2,"status":"RUNNING"},{"name":"enrich-alerts -> alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 21:14:58 : 01b9c903592784f694c70be4862860d4 : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe) :: [{"id":"numRecordsIn","min":8771.0,"max":8889.0,"sum":17660.0},{"id":"numRecordsOut","min":8771.0,"max":8889.0,"sum":17660.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+Source: rules-config :: [{"id":"numRecordsIn","min":0.0,"max":0.0,"sum":0.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+Source: payment-confirmations :: [{"id":"numRecordsIn","min":7553.0,"max":9039.0,"sum":16592.0},{"id":"numRecordsOut","min":7553.0,"max":9039.0,"sum":16592.0},{"id":"busyTimeMsPerSecond","min":1.0,"max":1.0,"sum":2.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+deduplicate :: [{"id":"numRecordsIn","min":8729.0,"max":8756.0,"sum":17485.0},{"id":"numRecordsOut","min":8572.0,"max":8605.0,"sum":17177.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer) :: [{"id":"numRecordsIn","min":6791.0,"max":10386.0,"sum":17177.0},{"id":"numRecordsOut","min":79.0,"max":85.0,"sum":164.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer :: [{"id":"numRecordsIn","min":8560.0,"max":8617.0,"sum":17177.0},{"id":"numRecordsOut","min":1535.0,"max":1600.0,"sum":3135.0},{"id":"busyTimeMsPerSecond","min":3.0,"max":3.0,"sum":6.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+rules-dynamic :: [{"id":"numRecordsIn","min":8554.0,"max":8611.0,"sum":17165.0},{"id":"numRecordsOut","min":24.0,"max":26.0,"sum":50.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+rule-amount-spike :: [{"id":"numRecordsIn","min":8549.0,"max":8609.0,"sum":17158.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":1.0,"max":2.0,"sum":3.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+join-confirmations -> confirmed-sink: Writer -> confirmed-sink: Committer :: [{"id":"numRecordsIn","min":16848.0,"max":16914.0,"sum":33762.0},{"id":"numRecordsOut","min":8094.0,"max":8112.0,"sum":16206.0},{"id":"busyTimeMsPerSecond","min":4.0,"max":4.0,"sum":8.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+rule-unconfirmed :: [{"id":"numRecordsIn","min":16826.0,"max":16905.0,"sum":33731.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+cep-card-testing :: [{"id":"numRecordsIn","min":8554.0,"max":8611.0,"sum":17165.0},{"id":"numRecordsOut","min":17.0,"max":21.0,"sum":38.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+cep-impossible-travel :: [{"id":"numRecordsIn","min":8555.0,"max":8615.0,"sum":17170.0},{"id":"numRecordsOut","min":28.0,"max":38.0,"sum":66.0},{"id":"busyTimeMsPerSecond","min":4.0,"max":4.0,"sum":8.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+enrich-alerts -> alerts-sink: Writer -> alerts-sink: Committer :: [{"id":"numRecordsIn","min":73.0,"max":81.0,"sum":154.0},{"id":"numRecordsOut","min":73.0,"max":81.0,"sum":154.0},{"id":"busyTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086179063","1794086179063"]
+### checkpoints
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}
+### exceptions
+[]
+### топики
+--- card.sessions
+{"cardId":"c-0717","sessionStartMs":1794086072601,"sessionEndMs":1794086102601,"paymentCount":1,"amountMinor":41145}
+{"cardId":"c-2906","sessionStartMs":1794086075060,"sessionEndMs":1794086105060,"paymentCount":1,"amountMinor":40873}
+{"cardId":"c-4853","sessionStartMs":1794086077613,"sessionEndMs":1794086107613,"paymentCount":1,"amountMinor":14864}
+--- fraud.alerts
+{"alertId":"velocity:4b54d966-cae3-9a4a-1f33-21b23bb6b90b","ruleId":"velocity","cardId":"c-4634","merchantId":"m-0045","paymentId":"4b54d966-cae3-9a4a-1f33-21b23bb6b90b","detail":"11 платежей за минуту","eventTimeMs":1794086108951,"merchantRisk":"MEDIUM"}
+{"alertId":"impossible-travel:0796f21d-8beb-f95b-03e3-422181aacf1c","ruleId":"impossible-travel","cardId":"c-0118","merchantId":"m-0028","paymentId":"0796f21d-8beb-f95b-03e3-422181aacf1c","detail":"платежи из разных стран за 10 минут","eventTimeMs":1794086100471,"merchantRisk":"LOW"}
+{"alertId":"impossible-travel:057820bd-dc96-372e-df7f-0ff77f242c3b","ruleId":"impossible-travel","cardId":"c-0475","merchantId":"m-0044","paymentId":"057820bd-dc96-372e-df7f-0ff77f242c3b","detail":"платежи из разных стран за 10 минут","eventTimeMs":1794086104352,"merchantRisk":"LOW"}
+--- merchant.stats
+{"merchantId":"m-0035","windowStartMs":1794086040000,"windowEndMs":1794086100000,"paymentCount":4,"amountMinor":89811}
+{"merchantId":"m-0012","windowStartMs":1794086040000,"windowEndMs":1794086100000,"paymentCount":3,"amountMinor":70116}
+{"merchantId":"m-0008","windowStartMs":1794086040000,"windowEndMs":1794086100000,"paymentCount":2,"amountMinor":62259}
+--- payments.confirmations
+{"paymentId":"69d3af4e-3435-0bdb-f3b9-02ab1e494c7d","status":"APPROVED","eventTimeMs":1794086106549}
+{"paymentId":"fd475ae3-f9fb-72dd-9b9f-5afb03ad5ad2","status":"APPROVED","eventTimeMs":1794086104676}
+{"paymentId":"19a22a47-7413-5598-3b21-65eb9e240f3d","status":"APPROVED","eventTimeMs":1794086106554}
+--- payments.confirmed
+{"paymentId":"95b208a9-ce1a-a8dd-0d0e-7b2639d4daef","merchantId":"m-0021","amountMinor":24766,"status":"APPROVED","confirmationDelayMs":1622}
+{"paymentId":"1e51e7b1-a29a-2259-c818-10c3b1f2023a","merchantId":"m-0033","amountMinor":9699,"status":"APPROVED","confirmationDelayMs":81}
+{"paymentId":"e770233f-f937-9c93-b62b-9d312eb1b623","merchantId":"m-0010","amountMinor":385,"status":"APPROVED","confirmationDelayMs":2275}
+--- payments.dlq
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794086108848}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794086109170}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794086109281}
+--- payments.late
+--- payments.raw
+{"paymentId":"d15472bb-7dd1-d0ca-5fd3-763bf56c7559","cardId":"c-1829","merchantId":"m-0017","amountMinor":43901,"currency":"EUR","country":"DE","eventTimeMs":1794086101359}
+{"paymentId":"83b36a78-5c63-338f-413d-972c6a0f9493","cardId":"c-1124","merchantId":"m-0048","amountMinor":26347,"currency":"EUR","country":"ES","eventTimeMs":1794086101360}
+{"paymentId":"4cf7e934-1165-1329-00f7-acdc09d1b107","cardId":"c-1197","merchantId":"m-0000","amountMinor":15726,"currency":"EUR","country":"ES","eventTimeMs":1794086101360}
+--- rules.config
+### postgres
+           List of relations
+ Schema |   Name    | Type  |  Owner   
+--------+-----------+-------+----------
+ public | merchants | table | payguard
+(1 row)
+
+ risk_level | count 
+------------+-------
+ MEDIUM     |    15
+ HIGH       |     5
+ LOW        |    30
+(3 rows)
+
+### лог TaskManager, ошибки

@@ -1,0 +1,29 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Правило в конце <code>monitoring/alerts.yml</code>.</p>
+<div data-code="lesson-17/monitoring/alerts.yml" data-lines="43-53"></div>
+<p>Выражение читается изнутри наружу. Ряды <code>records_lag_max</code> отбираются по заданию и оператору источника платежей. <code>max by (subtask_index)</code> оставляет по одному ряду на подзадачу и отбрасывает остальные метки, например <code>tm_id</code> и <code>task_attempt_id</code>, которые меняются после перезапуска. <code>sum</code> складывает подзадачи в одно число. Порог 5000 при 200 платежах в секунду означает примерно 25 секунд отставания. <code>for: 2m</code> не даёт алерту загораться, пока задание догоняет топик после короткого рестарта. Выражение многострочное, поэтому записано блоком YAML через <code>|</code>. В аннотации <code>{{ $value }}</code> подставляет значение выражения в момент срабатывания.</p>
+<p>Панель в <code>payguard.json</code> стоит второй в списке.</p>
+<div data-code="lesson-17/monitoring/grafana/dashboards/payguard.json" data-lines="40-67"></div>
+<p>Запрос тот же, что в правиле, без порога. Единица <code>short</code> подписывает ось числами с сокращениями вроде 11K.</p>
+<p>Как проверить.</p>
+<pre data-lang="bash" data-title="терминал">docker compose restart prometheus grafana
+curl -s localhost:9090/api/v1/rules | jq -r '.data.groups[].rules[].name'
+docker compose stop taskmanager
+sleep 100
+docker compose start taskmanager
+sleep 60
+curl -s localhost:9090/api/v1/alerts | jq -r '.data.alerts[] | "\(.labels.alertname) \(.state)"'</pre>
+<p>Первый запрос должен перечислить шесть правил. На нашем стенде через 60 секунд после возврата TaskManager лаг был 11220 записей, и <code>PayGuardKafkaLagHigh</code> стоял в pending. Пока TaskManager остановлен, это правило молчит, и это ожидаемо, за этот промежуток отвечает <code>PayGuardSourceSilent</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p><code>records-lag-max</code> это метрика клиента Kafka, максимальный лаг среди партиций, которые читает консьюмер. Подзадача у нас читает две партиции из четырёх, и сумма максимумов по подзадачам может быть меньше полного лага. Для порога «отстали сильно» этой точности хватает. У коннектора есть и точная сумма, метрика <code>pendingRecords</code>, которая складывает <code>records-lag</code> всех партиций подзадачи.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/metrics/KafkaSourceReaderMetrics.java" data-lines="216-232" data-must="pendingRecordsTotal"></div>
+<p>В Prometheus она называется <code>flink_taskmanager_job_task_operator_pendingRecords</code>. На стенде мы её не проверяли, правило в снапшоте написано на <code>records_lag_max</code>. Если перейдёшь на <code>pendingRecords</code>, запроси её сначала через API и сравни с лагом группы потребителей от <code>kafka-consumer-groups.sh</code>.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/" target="_blank" rel="noopener">Kafka connector, Monitoring</a></p>
+</div>
+
+<p>Шесть правил теперь закрывают разные отказы. Перезапуски, застрявшие и падающие чекпоинты видны по метрикам JobManager. Потерю TaskManager ловит <code>absent</code>. Перегрузку ловят backpressure и лаг. В уроке 21 ты напишешь на каждое из них runbook, где для дежурного будет записано, что проверить первым и как чинить.</p>
+</div>

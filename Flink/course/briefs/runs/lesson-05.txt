@@ -1,0 +1,35 @@
+### тесты
+RESULT tests 16 fail 0
+jar bytes 24342490
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+Job has been submitted with JobID b891c20d5e8a11946fb87cf4f96fe80c
+### job b891c20d5e8a11946fb87cf4f96fe80c
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe -> to-merchant-total)","parallelism":2,"status":"RUNNING"},{"name":"merchant-running-total -> Sink: stdout","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 21:03:34 : b891c20d5e8a11946fb87cf4f96fe80c : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe -> to-merchant-total) :: [{"id":"numRecordsIn","min":8600.0,"max":9160.0,"sum":17760.0},{"id":"numRecordsOut","min":8600.0,"max":9160.0,"sum":17760.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":3.0,"sum":5.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+merchant-running-total -> Sink: stdout :: [{"id":"numRecordsIn","min":6992.0,"max":10613.0,"sum":17605.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":4.0,"max":5.0,"sum":9.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085494920","1794085494920"]
+### checkpoints
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}
+### exceptions
+[]
+### топики
+--- fraud.alerts
+--- payments.dlq
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085416337}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085417451}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085424125}
+--- payments.raw
+{"paymentId":"acc6f360-6a62-db65-f244-b833e7452ccf","cardId":"c-3675","merchantId":"m-0019","amountMinor":18645,"currency":"EUR","country":"PL","eventTimeMs":1794085416655}
+{"paymentId":"41ca6414-6293-d2ca-175d-0f08db79f4ec","cardId":"c-0667","merchantId":"m-0000","amountMinor":600,"currency":"EUR","country":"PL","eventTimeMs":1794085416657}
+{"paymentId":"774e805c-7206-56d1-fc6f-f19db5e895ba","cardId":"c-4364","merchantId":"m-0036","amountMinor":49414,"currency":"EUR","country":"PL","eventTimeMs":1794085416657}
+--- rules.config
+### postgres
+### лог TaskManager, ошибки

@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Flink в проде</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap&subset=cyrillic" rel="stylesheet">
+  <style>
+{styles}
+  </style>
+</head>
+<body>
+<div class="progress-bar" id="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+<div class="app">
+  <aside class="sidebar" id="sidebar" aria-label="Содержание курса">
+    <a class="sidebar-back" href="https://study.luminais.tech/">← Все курсы</a>
+    <a class="brand" href="#home">Flink в проде</a>
+    <div class="sidebar-progress"><div class="sidebar-progress-fill" id="course-progress"></div></div>
+    <p class="sidebar-progress-label" id="course-progress-label"></p>
+    <nav id="lesson-nav"></nav>
+  </aside>
+  <button class="menu-toggle" id="menu-toggle" aria-label="Открыть содержание" aria-expanded="false">☰</button>
+  <main id="main">
+{content}
+  </main>
+</div>
+{scripts}
+</body>
+</html>

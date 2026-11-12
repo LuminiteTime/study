@@ -1,0 +1,19 @@
+# Python-инструменты курса: сборка и линтеры. Лимиты те же, что для JS: маленькие функции, мало ветвлений.
+line-length = 140
+src = ["tools"]
+
+[lint]
+select = ["E", "F", "W", "I", "B", "C90", "PLR", "N", "UP", "SIM", "RUF"]
+ignore = ["PLR2004", "RUF001", "RUF002", "RUF003"]
+
+[lint.isort]
+known-first-party = ["course_files", "code_blocks", "glossary"]
+
+[lint.mccabe]
+max-complexity = 8
+
+[lint.pylint]
+max-args = 4
+max-branches = 8
+max-statements = 25
+max-returns = 4

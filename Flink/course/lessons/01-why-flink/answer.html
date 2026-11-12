@@ -1,0 +1,20 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>В новом файле настройки сгруппированы вложенным YAML, как в родном <code>config.yaml</code>. Из памяти оставлен один ключ <code>process.size</code>, остальные области Flink вычислит сам. Ключи <code>bind-host</code> и <code>rest.bind-address</code> обязательны, потому что без них процесс слушает только <code>localhost</code> и TaskManager из соседнего контейнера до него не достучится.</p>
+<div data-code="lesson-01/conf/config.yaml"></div>
+<p>Запуск из корня проекта. Псевдоним <code>jobmanager</code> нужен, чтобы TaskManager нашёл его по адресу из конфига.</p>
+<pre data-lang="bash" data-title="терминал">docker network create l1net
+docker run -d --name l1jm --network l1net --network-alias jobmanager -p 18081:8081 \
+  -v "$PWD/conf/config.yaml:/opt/flink/conf/config.yaml:ro" flink:2.2.1-java17 jobmanager
+docker run -d --name l1tm --network l1net \
+  -v "$PWD/conf/config.yaml:/opt/flink/conf/config.yaml:ro" flink:2.2.1-java17 taskmanager
+
+curl -s localhost:18081/overview | jq -c '{tm: .taskmanagers, slots: .["slots-total"], version: .["flink-version"]}'
+curl -s localhost:18081/jobmanager/config \
+  | jq -c '[.[] | select(.key | test("state.backend.type|numberOfTaskSlots|checkpointing.dir|parallelism.default"))]'</pre>
+<pre data-lang="text" data-title="вывод" data-output>{"tm":1,"slots":4,"version":"2.2.1"}
+[{"key":"parallelism.default","value":"2"},{"key":"taskmanager.numberOfTaskSlots","value":"4"},{"key":"execution.checkpointing.dir","value":"file:///tmp/flink-checkpoints"},{"key":"state.backend.type","value":"hashmap"}]</pre>
+<p>В логе JobManager появится строка <code>config-parser-utils.sh: line 42: /opt/flink/conf/config.yaml: Read-only file system</code>. Скрипт запуска пытается дописать файл, а смонтирован он только для чтения. На работу это не влияет, но переменная <code>FLINK_PROPERTIES</code> при таком монтировании не применится.</p>
+<p>Убери за собой командами <code>docker rm -f l1jm l1tm</code> и <code>docker network rm l1net</code>. В проекте мы продолжим использовать <code>FLINK_PROPERTIES</code>, потому что все настройки видны в одном файле Compose.</p>
+</div>

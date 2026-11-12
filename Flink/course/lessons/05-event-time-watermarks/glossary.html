@@ -1,0 +1,25 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="время события|времени события|event time">Время события (event time)</dt><dd>Момент, когда событие случилось, записанный в самой записи. У платежа это поле eventTimeMs. Результат по нему воспроизводим при любом повторном прогоне.</dd>
+<dt data-match="время обработки|времени обработки|processing time">Время обработки (processing time)</dt><dd>Показания часов машины, на которой оператор видит запись. Ждать ничего не нужно, но результат зависит от скорости и перезапусков.</dd>
+<dt data-match="watermark">Watermark</dt><dd>Служебный элемент потока с меткой T. Обещает операторам, что событий с меткой T и раньше больше не будет, и двигает их время события.</dd>
+<dt data-match="допуск беспорядка|допуск|out-of-orderness">Допуск беспорядка (out-of-orderness)</dt><dd>Насколько запись может отстать от самой свежей. В forBoundedOutOfOrderness watermark равен максимуму меток минус допуск минус 1 мс.</dd>
+<dt data-match="поздн">Позднее событие (late event)</dt><dd>Запись, чья метка времени не больше текущего watermark оператора. Watermark сам её не удаляет, решение принимает оператор, например окно.</dd>
+<dt data-match="метка времени|метку времени|метки времени|метка Kafka|метку Kafka|timestamp">Метка времени (timestamp)</dt><dd>Число миллисекунд, привязанное к записи во Flink. У записи Kafka есть своя метка, по умолчанию её ставит продюсер в момент отправки.</dd>
+<dt data-match="TimestampAssigner">TimestampAssigner</dt><dd>Функция стратегии watermark, которая достаёт метку времени из записи. Получает запись и метку, пришедшую от источника.</dd>
+<dt data-match="генератор watermark|WatermarkGenerator">Генератор watermark (WatermarkGenerator)</dt><dd>Объект, который видит метки записей и периодически выпускает watermark. Источник создаёт по генератору на каждый сплит.</dd>
+<dt data-match="WatermarkStrategy|стратеги">Стратегия watermark (WatermarkStrategy)</dt><dd>Описание того, как задание понимает время. Создаёт TimestampAssigner и генератор watermark, передаётся в fromSource.</dd>
+<dt data-match="idle|простаивающ|простоя|простой входа">Простой (idleness)</dt><dd>Состояние входа, по которому дольше таймаута нет записей. Простаивающий вход не участвует в минимуме watermark. Включается через withIdleness.</dd>
+<dt data-match="сплит|split">Сплит (split)</dt><dd>Кусок работы источника, который читает одна подзадача. У источника Kafka один сплит равен одной партиции топика.</dd>
+<dt data-match="схема десериализации|DeserializationSchema">Схема десериализации (DeserializationSchema)</dt><dd>Класс, превращающий байты записи источника в объект Java. Работает внутри источника, до того как запись получит метку времени.</dd>
+<dt data-match="StatusWatermarkValve|клапан">StatusWatermarkValve</dt><dd>Клапан на входе задачи. Помнит watermark каждого входного канала и пропускает дальше минимум, только когда он вырос.</dd>
+<dt data-match="партици|partition">Партиция (partition)</dt><dd>Часть топика Kafka со своим порядком записей. Единица параллельного чтения и, во Flink, единица подсчёта watermark в источнике.</dd>
+<dt data-match="Kafka">Apache Kafka</dt><dd>Распределённый журнал сообщений. Записи лежат в топиках, разбитых на партиции, у каждой записи есть метка времени.</dd>
+<dt data-match="withWatermark|micro-batch">withWatermark в Spark</dt><dd>Способ задать watermark в Spark Structured Streaming. Берёт наибольшее время события по всему запросу минус порог и применяет его с начала следующего micro-batch.</dd>
+<dt data-match="счётчик|counter">Счётчик (Counter)</dt><dd>Метрика Flink, которая только растёт. В пробе считает поздние события.</dd>
+<dt data-match="гистограмм|histogram">Гистограмма (Histogram)</dt><dd>Метрика Flink, которая хранит распределение значений. В REST видна как набор чисел с суффиксами _min, _max, _p99 и другими.</dd>
+<dt data-match="тестовый стенд|тестовом стенде|тестового стенда|тестовому стенду|harness">Тестовый стенд (harness)</dt><dd>Обёртка из тестового jar Flink, которая запускает один оператор в JVM теста и позволяет подавать ему записи и watermark.</dd>
+<dt data-match="REST">REST-интерфейс</dt><dd>HTTP-интерфейс JobManager на порту 8081. Ресурс /jobs/.../vertices/.../watermarks отдаёт watermark подзадач вершины.</dd>
+<dt data-match="Web UI">Web UI</dt><dd>Панель Flink в браузере. Показывает Low Watermark на вершинах графа и вкладку Watermarks по подзадачам.</dd>
+<dt data-match="окн">Окно (window)</dt><dd>Оператор, который собирает записи за отрезок времени и выдаёт результат, когда watermark проходит конец отрезка. Тема урока 6.</dd>
+</dl>

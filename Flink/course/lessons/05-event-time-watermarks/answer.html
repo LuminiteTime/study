@@ -1,0 +1,33 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Проба это <code>ProcessFunction</code> без ключа. Метрики регистрируются в <code>open</code>, когда группа метрик подзадачи уже существует. Для гистограммы взят <code>DescriptiveStatisticsHistogram</code> с окном 10 000 значений, он считает перцентили по последним значениям и не тянет внешних библиотек.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/pipeline/LatenessProbe.java"></div>
+<p>Сравнение <code>&lt;=</code> совпадает с определением позднего события. Watermark T обещает, что событий с меткой T и раньше больше не будет. Запись уходит дальше в любом случае, проба только смотрит.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Почему <code>currentWatermark()</code> работает без ключа. Оператор <code>ProcessOperator</code> сам запоминает каждый пришедший watermark и отдаёт его через контекст. Регистрация таймера здесь бросила бы <code>UnsupportedOperationException</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/ProcessOperator.java" data-lines="68-72" data-must="this.currentWatermark = mark.getTimestamp()"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/ProcessOperator.java" data-lines="109-122" data-must="return currentWatermark;"></div>
+<p>Поле начинается с <code>Long.MIN_VALUE</code>, поэтому до первого watermark поздних событий не бывает.</p>
+</div>
+<p>В задании проба стоит между развилкой и подсчётом сумм.</p>
+<div data-code="lesson-05/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="41-55"></div>
+<p>Тест подаёт событие, затем watermark 10 000, затем событие с меткой 4 000, оно позднее. На выходе должны быть оба.</p>
+<div data-code="lesson-05/src/test/java/dev/study/payguard/pipeline/LatenessProbeTest.java"></div>
+<p>В нашем прогоне прошло 16 тестов, падений не было. После отправки задания граф выглядит так. Проба вошла в цепочку источника, перед <code>to-merchant-total</code>.</p>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe -> to-merchant-total)","parallelism":2,"status":"RUNNING"},{"name":"merchant-running-total -> Sink: stdout","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Метрики пробы ищи у первой вершины. Сначала выведи имена, в которых есть её метрики, потом запроси нужные со сложением и максимумом по подзадачам.</p>
+<pre data-lang="bash" data-title="терминал">V=$(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[0].id')
+curl -s localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics | jq -r '.[].id' | grep lateness-probe
+curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=lateness-probe.lateEvents,lateness-probe.behindWatermarkMs_p99&amp;agg=sum,max" | jq -c .</pre>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Имя метрики оператора в REST складывается из имени оператора и имени метрики через точку.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/rest/handler/legacy/metrics/MetricStore.java" data-lines="347-365" data-must="operatorInfo.operatorName + &quot;.&quot; + name"></div>
+<p>Гистограмма в REST раскладывается на набор чисел с суффиксами. Для выбора допуска смотри на <code>_p99</code> и <code>_max</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/rest/handler/legacy/metrics/MetricStore.java" data-lines="414-427" data-must="name + &quot;_p99&quot;"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/metrics/#histogram" target="_blank" rel="noopener">Metrics, Histogram</a></p>
+</div>
+<p>Вывода этих команд у нас нет, числа на твоём стенде свои. Читай их так. Доля <code>lateEvents</code> от всех платежей показывает, сколько данных потеряет окно с таким допуском. Сумма <code>behindWatermarkMs_p99</code> и текущего допуска даёт допуск, при котором поздними останется около 1 % из тех, что опаздывают сейчас. По коду генератора ожидай около 3 % поздних и отставание от watermark до 20 секунд.</p>
+</div>

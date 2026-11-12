@@ -1,0 +1,19 @@
+{
+  "name": "flink-course",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "python3 tools/build.py",
+    "lint": "python3 tools/lint_size.py && eslint && stylelint 'styles/**/*.css' && ruff check tools && python3 tools/lint_prose.py",
+    "lint:java": "python3 tools/lint_java.py",
+    "check": "npm run lint && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "d3": "7.9.0",
+    "eslint": "10.13.0",
+    "globals": "17.13.0",
+    "gsap": "3.15.1",
+    "stylelint": "17.16.0"
+  }
+}

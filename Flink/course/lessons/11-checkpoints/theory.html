@@ -1,0 +1,206 @@
+<h2>Что теряет PayGuard при падении TaskManager</h2>
+<p>К этому уроку в задании живут корзины правила частоты, флаги дедупликации, окна по продавцам, сессии карт и частичные совпадения CEP. Всё это лежит в куче TaskManager. В конце урока 7 REST показал <code>"completed":0</code>, чекпоинтов не было ни одного. Если сейчас процесс убить, задание перезапустится с пустым состоянием. Правило частоты забудет, что карта уже сделала девять платежей за минуту, и мошенник получит ещё одну попытку.</p>
+<p>Нужен снимок состояния всех подзадач и позиций чтения в Kafka, сделанный в один логический момент. Остановить поток ради снимка нельзя, PayGuard обрабатывает 200 платежей в секунду. Снимать каждую подзадачу по своему таймеру тоже нельзя. Тогда одна подзадача сохранит состояние до платежа, а соседняя после него, и при восстановлении платёж будет учтён наполовину.</p>
+
+<h2>Переучёт в сортировочном центре</h2>
+<p>Представь сортировочный центр, где посылки едут по лентам от приёмных окон к стеллажам. Каждый стеллаж ведёт свой журнал, сколько посылок к нему приехало. Директору нужен переучёт, но остановить ленты нельзя, иначе встанет доставка.</p>
+<p>Директор просит каждое приёмное окно положить на ленту красную карточку с номером переучёта. Окно записывает, сколько посылок оно уже приняло, и продолжает работу. Карточка едет по ленте вместе с посылками и никого не обгоняет. Кладовщик стеллажа, увидев карточку, переписывает свой журнал в ведомость. Если к стеллажу идут две ленты, карточка по одной из них придёт раньше. Тогда кладовщик откладывает посылки, приехавшие на этой ленте после карточки, в сторону и продолжает разбирать вторую ленту, пока карточка не придёт и по ней. Только тогда он переписывает журнал и берётся за отложенное.</p>
+<p>Во Flink карточка называется барьером чекпоинта (checkpoint barrier), директор это координатор чекпоинтов в JobManager, а откладывание посылок называется выравниванием (alignment). Документация ссылается на статью «Lightweight Asynchronous Snapshots for Distributed Dataflows», где алгоритм назван asynchronous barrier snapshotting. Он вырос из алгоритма Chandy-Lamport для распределённых снимков и приспособлен к модели исполнения Flink.</p>
+
+<h2>Путь чекпоинта по коду</h2>
+<p>Проследим один чекпоинт от таймера в JobManager до записи «завершён». Шагов семь, и каждый подтверждён кодом ниже.</p>
+<div class="step-cards">
+  <div class="step-card"><div class="step-num">1</div><div class="step-body"><strong>Координатор выбирает, кого будить</strong><p><code>CheckpointCoordinator</code> по интервалу строит план. Команду получают только источники, ждать подтверждения будут от всех подзадач.</p></div></div>
+  <div class="step-card"><div class="step-num">2</div><div class="step-body"><strong>Источник вставляет барьер</strong><p>Подзадача источника запоминает свои смещения Kafka и отправляет барьер во все выходные каналы впереди новых записей.</p></div></div>
+  <div class="step-card"><div class="step-num">3</div><div class="step-body"><strong>Барьер едет по сети вместе с данными</strong><p>Он стоит в том же буфере, что и записи, и обгонять их не умеет, пока чекпоинт выровненный.</p></div></div>
+  <div class="step-card"><div class="step-num">4</div><div class="step-body"><strong>Оператор выравнивает входы</strong><p>Канал, по которому барьер уже пришёл, блокируется. Когда барьер придёт по всем каналам, оператор снимает снимок и пропускает барьер дальше.</p></div></div>
+  <div class="step-card"><div class="step-num">5</div><div class="step-body"><strong>Синхронная и асинхронная части</strong><p>Синхронно фиксируется точка снимка, а выгрузка файлов в хранилище идёт в отдельном потоке, пока задача обрабатывает следующие записи.</p></div></div>
+  <div class="step-card"><div class="step-num">6</div><div class="step-body"><strong>Подзадача подтверждает</strong><p>Описание выгруженного состояния уходит координатору. Когда подтвердили все, чекпоинт считается завершённым.</p></div></div>
+  <div class="step-card"><div class="step-num">7</div><div class="step-body"><strong>Уведомление о завершении</strong><p>Координатор рассылает подзадачам <code>notifyCheckpointComplete</code>. Источник Kafka в этот момент коммитит смещения группы.</p></div></div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Шаг 1. План чекпоинта, когда все задачи работают. В список «кого запустить» попадают только <code>sourceTasks</code>, в список «кого ждать» попадают все задачи.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/DefaultCheckpointPlanCalculator.java" data-lines="158-173" data-must="sourceTasks.stream()"></div>
+<p>Сам вызов идёт по этому списку. В опции чекпоинта координатор кладёт режим (<code>isExactlyOnceMode</code>), признак unaligned и таймаут выравнивания, и они едут к задачам вместе с номером.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/CheckpointCoordinator.java" data-lines="848-867" data-must="execution.triggerCheckpoint(checkpointId, timestamp, checkpointOptions)"></div>
+<p>Промежуточные операторы команду от координатора не получают вовсе. Чекпоинт до них доезжает только барьером по потоку данных.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/stateful-stream-processing/" target="_blank" rel="noopener">Stateful Stream Processing</a></p>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Шаги 2 и 5 на стороне подзадачи. Метод <code>checkpointState</code> пронумеровал фазы комментариями. Посмотри на порядок. Барьер уходит дальше (шаг 2 в коде) раньше, чем снимается состояние (шаг 5 в коде).</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/SubtaskCheckpointCoordinatorImpl.java" data-lines="335-364" data-must="operatorChain.broadcastEvent(checkpointBarrier, options.isUnalignedCheckpoint())"></div>
+<p>Порядок безопасен, потому что шаги идут подряд в одном методе, и между отправкой барьера и снимком оператор не получает новых записей. Нижестоящие операторы получают барьер как можно раньше. <code>takeSnapshotSync</code> фиксирует состояние, а <code>finishAndReportAsync</code> отдаёт выгрузку асинхронному потоку. Шаг 3 в коде регистрирует таймер выравнивания, о нём ниже в разделе про unaligned-чекпоинты.</p>
+</div>
+
+<h2>Выравнивание на двух входах</h2>
+<p>У оператора <code>deduplicate</code> два входных канала, по одному от каждой подзадачи источника. Барьер по ним приходит в разное время, потому что очереди разной длины. Пройди анимацию по шагам в обоих режимах и сравни, что попадёт в снимок.</p>
+
+<div class="viz" id="viz-l11">
+  <p class="viz-title">Барьер чекпоинта на операторе с двумя входами</p>
+  <div class="viz-controls">
+    <label>Режим <select id="viz-l11-mode"><option value="aligned">exactly-once, с выравниванием</option><option value="tracker">at-least-once, без блокировки</option></select></label>
+    <button class="primary" id="viz-l11-next" type="button">Шаг</button>
+    <button id="viz-l11-reset" type="button">Сначала</button>
+  </div>
+  <svg id="viz-l11-svg" role="img" aria-label="Два источника передают записи оператору по двум каналам. Красная черта на канале это барьер. Справа список обработанных записей и снимок состояния."></svg>
+  <p class="viz-note" id="viz-l11-result"></p>
+</div>
+
+<p>В режиме exactly-once снимок содержит a1, b1, b2 и b3, ровно то, что источники отдали до барьера. В режиме at-least-once в снимок попадают a2 и a3, которые источник 1 отдал уже после того, как запомнил смещение. После восстановления он отдаст их снова, и счётчик в состоянии увеличится на них второй раз. Отсюда и названия режимов. Записи не теряются ни в одном из них, но без выравнивания часть может быть учтена дважды.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Шаг 4. <code>SingleCheckpointBarrierHandler</code> получает барьер из канала. Старый или уже обработанный барьер только снимает блокировку. Новый отмечается в наборе выровненных каналов, и обработка уходит в текущее состояние автомата.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/io/checkpointing/SingleCheckpointBarrierHandler.java" data-lines="213-235" data-must="markCheckpointAlignedAndTransformState("></div>
+<p>Состояние выровненного режима блокирует канал, на котором пришёл барьер. Когда пришли все барьеры, запускается снимок и все каналы открываются разом.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/io/checkpointing/AbstractAlignedBarrierHandlerState.java" data-lines="52-77" data-must="state.blockChannel(channelInfo);"></div>
+<p>Блокировка здесь значит, что сетевой стек перестаёт отдавать оператору буферы этого канала. Данные не выбрасываются, они ждут в очереди канала, как отложенные посылки у кладовщика.</p>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Какой обработчик барьеров получит задача, решает режим <code>execution.checkpointing.mode</code>. Для exactly-once создаётся <code>SingleCheckpointBarrierHandler</code>, для at-least-once создаётся <code>CheckpointBarrierTracker</code>. Unaligned вместе с at-least-once запрещён явно.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/io/checkpointing/InputProcessorUtil.java" data-lines="101-130" data-must="return new CheckpointBarrierTracker("></div>
+<p>Описание трекера прямо говорит, что каналы он не блокирует и поэтому даёт только «at least once».</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/io/checkpointing/CheckpointBarrierTracker.java" data-lines="47-56" data-must="does not block the input"></div>
+<p>По умолчанию режим <code>EXACTLY_ONCE</code>, мы его не меняем. Документация добавляет полезную деталь. Выравнивание нужно только операторам с несколькими входными каналами, то есть после <code>keyBy</code>, <code>union</code> или соединения потоков. Цепочка из <code>map</code> и <code>filter</code> с одним каналом даёт exactly-once даже в режиме at-least-once.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/stateful-stream-processing/" target="_blank" rel="noopener">Exactly Once vs. At Least Once</a></p>
+</div>
+
+<div class="callout callout-accent">
+  <div class="callout-icon">💡</div>
+  <div class="callout-content">
+    <strong class="callout-title">Exactly-once здесь говорит о состоянии</strong>
+    <p>Режим чекпоинта гарантирует, что каждая запись отразится в состоянии Flink ровно один раз. Записи после восстановления всё равно читаются из Kafka повторно, и приёмник может отправить их наружу дважды. Как довести гарантию до топика <code>fraud.alerts</code>, разберём в уроке 12.</p>
+  </div>
+</div>
+
+<h2>Когда выравнивание мешает</h2>
+<p>Выравнивание стоит дёшево, пока каналы текут ровно. При backpressure барьер стоит в очереди за всеми буферами канала, и чекпоинт ждёт, пока они разберутся. В уроке 18 мы замедлим одну вершину на 20 мс на запись, и выровненные чекпоинты вырастут до 25651 и 61137 мс вместо обычных 300 мс.</p>
+<p>Unaligned-чекпоинт (<code>execution.checkpointing.unaligned.enabled</code>) разрешает барьеру обогнать данные в буферах. Оператор реагирует на первый пришедший барьер, сразу отправляет его дальше и сохраняет обогнанные буферы входа и выхода как часть чекпоинта. Такой чекпоинт ближе к исходному Chandy-Lamport. Платой становится объём. В том же опыте урока 18 unaligned-чекпоинты занимали 129-293 мс и записывали 705-1011 КиБ данных в полёте. Настройка <code>execution.checkpointing.aligned-checkpoint-timeout</code> даёт компромисс. Чекпоинт начинается выровненным и переключается в unaligned, если выравнивание длится дольше таймаута. Это и есть таймер из шага 3 в коде выше. Savepoint всегда выровненный.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/checkpointing_under_backpressure/" target="_blank" rel="noopener">Checkpointing under backpressure</a></p>
+
+<h2>Подтверждение и завершение</h2>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Шаг 6 на стороне TaskManager. Когда асинхронная часть закончилась, <code>AsyncCheckpointRunnable</code> отправляет отчёт. В нём два размера. <code>BytesPersistedOfThisCheckpoint</code> это сколько записано именно этим чекпоинтом, <code>TotalBytesPersisted</code> это полный размер состояния.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/AsyncCheckpointRunnable.java" data-lines="235-246" data-must="setBytesPersistedOfThisCheckpoint"></div>
+<p>В REST эти размеры видны как <code>checkpointed_size</code> и <code>state_size</code>. На практике по их разнице видно, работает ли инкрементальность.</p>
+<p>Шаг 6 на стороне координатора. Сначала общие файлы из подтверждения регистрируются в реестре <code>SharedStateRegistry</code>, это пригодится инкрементальным чекпоинтам. Потом подтверждение отмечается в <code>PendingCheckpoint</code>, и последнее превращает его в завершённый.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/CheckpointCoordinator.java" data-lines="1244-1268" data-must="if (checkpoint.isFullyAcknowledged()) {"></div>
+<p>Шаг 7. После записи завершённого чекпоинта в хранилище координатор рассылает уведомление.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/CheckpointCoordinator.java" data-lines="1434-1444" data-must="sendAcknowledgeMessages("></div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Что делает с этим уведомлением источник Kafka. В <code>snapshotState</code> смещения кладутся в состояние чекпоинта и в очередь на коммит. В <code>notifyCheckpointComplete</code> они коммитятся в группу потребителей.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/reader/KafkaSourceReader.java" data-lines="125-152" data-must="won't"></div>
+<p>Комментарий в коде говорит прямо. Коммит нужен внешнему мониторингу, и его сбой корректность задания не ломает. При восстановлении Flink берёт смещения из чекпоинта и в группу Kafka не смотрит. Из этого следует, что лаг группы в Kafka может отставать от реального положения задания на интервал чекпоинта.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/" target="_blank" rel="noopener">Kafka, Consumer Offset Committing</a></p>
+</div>
+
+<h2>Что лежит в чекпоинте</h2>
+<p>Каталог чекпоинтов задаёт <code>execution.checkpointing.dir</code>. Внутри для каждого задания своя папка с именем jobId, а в ней три вида содержимого.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Имена фиксированы в коде хранилища.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/filesystem/AbstractFsCheckpointStorageAccess.java" data-lines="73-86" data-must="CHECKPOINT_DIR_PREFIX = "></div>
+<p>В <code>chk-N</code> лежат данные, которые принадлежат только этому чекпоинту, и файл <code>_metadata</code>. Метаданные пишет JobManager, в них состояния всех операторов по их идентификаторам со ссылками на файлы. Без <code>_metadata</code> папка бесполезна. В <code>shared</code> лежат файлы, которые несколько чекпоинтов используют совместно, это файлы инкрементальных снимков RocksDB. В <code>taskowned</code> лежит то, чем распоряжаются сами TaskManager.</p>
+</div>
+<p>После нашего прогона в <code>data/checkpoints/959e9026583b695ae1f4a2b0195cd313</code> лежали <code>chk-1</code>, <code>chk-2</code>, <code>chk-3</code>, <code>shared</code> со 178 файлами и <code>taskowned</code>. Состояние в <code>_metadata</code> привязано к идентификаторам операторов, поэтому в уроке 2 мы так настойчиво давали каждому оператору uid.</p>
+
+<h2>Где живёт состояние между чекпоинтами</h2>
+<p>State backend решает, где хранится рабочее состояние и как из него делается снимок. Во Flink 2.2 их три, ключ <code>state.backend.type</code> принимает <code>hashmap</code>, <code>rocksdb</code> и <code>forst</code>.</p>
+<table>
+<thead><tr><th>Backend</th><th>Где живёт состояние</th><th>Снимок</th><th>Когда брать</th></tr></thead>
+<tbody>
+<tr><td><code>hashmap</code></td><td>Объекты в куче JVM</td><td>Полный, каждый раз всё состояние</td><td>Состояние помещается в кучу, важна скорость доступа</td></tr>
+<tr><td><code>rocksdb</code></td><td>Встроенная RocksDB на локальном диске TaskManager, данные сериализованы</td><td>Полный или инкрементальный</td><td>Состояние больше кучи, нужны быстрые чекпоинты большого состояния</td></tr>
+<tr><td><code>forst</code></td><td>ForSt, ответвление RocksDB, хранит SST-файлы на удалённой файловой системе</td><td>Лёгкий, файлы уже лежат в удалённом хранилище</td><td>Эксперименты. Документация прямо пишет, что он экспериментальный и для прода готов не полностью</td></tr>
+</tbody>
+</table>
+<p>RocksDB хранит данные в неизменяемых SST-файлах (Sorted String Table). Новый файл появляется при сбросе памяти на диск и при слиянии (compaction), старые файлы не переписываются. На этом и держится инкрементальный чекпоинт. Достаточно выгрузить файлы, которых ещё нет в хранилище, и сослаться на уже выгруженные.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Разбор файлов локальной копии RocksDB перед выгрузкой. Если SST-файл с тем же именем уже был выгружен прошлым подтверждённым чекпоинтом, в список попадает ссылка на старый файл. Остальные файлы идут на выгрузку.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/state/rocksdb/snapshot/RocksIncrementalSnapshotStrategy.java" data-lines="413-433" data-must="previousSnapshot.getUploaded(fileName)"></div>
+<p>Ссылки на общие файлы попадают в <code>SharedStateRegistry</code> координатора, который мы видели выше. По документации история инкрементальных чекпоинтов не растёт бесконечно, слияния RocksDB со временем заменяют старые файлы, и старые чекпоинты вычищаются автоматически. Документация предупреждает о побочном эффекте. С инкрементальными чекпоинтами поле Checkpointed Data Size в Web UI показывает размер приращения. Полный размер состояния ищи в соседнем поле.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/state_backends/" target="_blank" rel="noopener">State Backends, Incremental Checkpoints</a></p>
+</div>
+
+<h2>Восстановление и стратегии перезапуска</h2>
+<p>Когда подзадача падает, планировщик спрашивает стратегию перезапуска, можно ли перезапускать и через сколько. Потом координатор берёт последний завершённый чекпоинт, раздаёт состояния операторам по uid, и источники продолжают читать с сохранённых смещений.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Восстановление в координаторе. Берётся последний завершённый чекпоинт из хранилища, факт восстановления попадает в статистику, и дальше состояния распределяются по задачам.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/CheckpointCoordinator.java" data-lines="1774-1803" data-must="completedCheckpointStore.getLatestCheckpoint()"></div>
+<p>Вызов <code>reportRestoredCheckpoint</code> увеличивает счётчик <code>restored</code> в REST <code>/jobs/&lt;id&gt;/checkpoints</code>. По нему скрипт из практики поймёт, что задание действительно поднялось из чекпоинта.</p>
+</div>
+
+<p>Стратегию мы выбираем <code>exponential-delay</code>. При частых сбоях она увеличивает паузу между попытками и тем самым бережёт Kafka и базу от лавины переподключений. При редких сбоях задание поднимается за секунду. Документация называет её стратегией по умолчанию при включённых чекпоинтах, но мы задаём её явно, чтобы настройки были видны в Compose.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Решение о перезапуске. Сбой, который пришёл, пока прошлый перезапуск ещё не начался, сливается с ним. Если после прошлого перезапуска прошло больше <code>reset-backoff-threshold</code>, счётчик попыток обнуляется.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/failover/ExponentialDelayRestartBackoffTimeStrategy.java" data-lines="111-126" data-must="setInitialBackoff();"></div>
+<p>Сама пауза. Начальная задержка умножается на множитель в степени номера попытки, к ней прибавляется случайный сдвиг jitter, результат обрезается сверху <code>max-backoff</code> и снизу начальной задержкой.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/failover/ExponentialDelayRestartBackoffTimeStrategy.java" data-lines="183-191" data-must="Math.pow(backoffMultiplier, currentRestartAttempt)"></div>
+<p>С нашими настройками паузы такие. Первая попытка ждёт от 1 до 1,1 с, потому что нижнюю границу задаёт начальная задержка. Дальше около 2, 4, 8, 16 и 32 с с разбросом 10 %, а начиная с седьмой попытки 60 с. Десять минут без сбоев возвращают паузу к одной секунде. Ограничение числа попыток <code>attempts-before-reset-backoff</code> по умолчанию равно <code>Integer.MAX_VALUE</code>, то есть задание пытается подняться бесконечно.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/task_failure_recovery/" target="_blank" rel="noopener">Task Failure Recovery</a></p>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming согласованная точка получается сама собой из устройства micro-batch. Перед запуском порции драйвер пишет в <code>checkpointLocation</code> журнал смещений, после неё журнал коммитов, а хранилище состояния сохраняет новую версию на каждую порцию. Барьеры там не нужны, потому что все задачи порции заканчиваются до начала следующей.</p>
+<p>У Flink операторы работают непрерывно, и естественной границы нет. Её создаёт барьер, который едет вместе с данными. Чекпоинт снимается раз в интервал, обычно десятки секунд, и между чекпоинтами записи идут без задержки. Каталог чекпоинтов Flink по смыслу похож на <code>checkpointLocation</code>, но привязан к jobId. Новое задание с ним само не свяжется, для этого есть запуск из savepoint или чекпоинта, о нём урок 13.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Чекпоинт без uid не переживёт изменение кода</strong>
+    <p>В <code>_metadata</code> состояние привязано к идентификатору оператора. Если uid не задан, Flink выводит его из структуры графа, и любая новая вершина выше по графу его поменяет. Перезапуск после сбоя этого не заметит, граф тот же. Обновление кода с восстановлением из чекпоинта потеряет состояние или откажется стартовать.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l11">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Барьер стоит в очереди канала за всеми буферами. При backpressure очередь разбирается медленно, и выравнивание растягивается. Unaligned-чекпоинт позволяет барьеру обогнать буферы и сохранить их вместе со снимком."
+       data-explanation-wrong="Подумай, где стоит барьер, когда нижняя вершина не успевает. Он едет в том же буфере, что и записи, и ждёт своей очереди.">
+    <h3 class="quiz-question">Вершину обогащения замедлил внешний сервис, Web UI показывает backpressure, и чекпоинты стали идти по минуте вместо 300 мс. Состояние при этом не выросло. Что поможет чекпоинтам?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Включить инкрементальные чекпоинты RocksDB, чтобы писать меньше</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Включить unaligned-чекпоинты или таймаут выравнивания</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Уменьшить интервал чекпоинтов с 30 до 5 секунд</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Источник Kafka коммитит смещения только для мониторинга. При восстановлении он берёт смещения из чекпоинта, поэтому записи после чекпоинта 41 будут прочитаны заново и ничего не потеряется."
+       data-explanation-wrong="Вспомни комментарий в KafkaSourceReader. Откуда источник берёт смещения при восстановлении, из группы Kafka или из чекпоинта?">
+    <h3 class="quiz-question">Чекпоинт 41 завершился, и сразу после этого TaskManager упал. Коммит смещений в Kafka за чекпоинт 41 не успел пройти. Что будет после восстановления?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Задание прочитает с последнего закоммиченного смещения, то есть от чекпоинта 40, и состояние учтёт часть записей дважды</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Чекпоинт 41 будет признан неудачным, задание поднимется из чекпоинта 40</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Задание поднимется из чекпоинта 41 со смещениями, сохранёнными в нём, коммит в группу ни на что не влияет</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Первые чекпоинты RocksDB выгружают всё. Дальше в shared копятся SST-файлы, а каждый чекпоинт добавляет только новые. Поле checkpointed_size показывает приращение, state_size показывает полный размер."
+       data-explanation-wrong="Вспомни, какие два размера отправляет AsyncCheckpointRunnable и что из них показывает Checkpointed Data Size при инкрементальном режиме.">
+    <h3 class="quiz-question">Коллега видит в Web UI, что каждый чекпоинт пишет около 4,8 МиБ, и делает вывод, что состояние задания весит 4,8 МиБ. Что ты ему ответишь?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>С инкрементальными чекпоинтами это размер приращения. Полное состояние смотри в state_size, у нас оно росло до 12 МиБ</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Он прав, RocksDB сжимает всё состояние в каждый чекпоинт</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Это размер файла _metadata, состояние лежит в RocksDB и в чекпоинт не попадает</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

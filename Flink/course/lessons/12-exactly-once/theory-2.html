@@ -1,0 +1,165 @@
+<h2>Падение посреди транзакции</h2>
+<p>Схема показывает одну партицию <code>fraud.alerts</code> и одну подзадачу Writer. Транзакция 12 успела зафиксироваться. Транзакцию 13 убил <code>SIGKILL</code>, её записи b1 и b2 уже лежат в логе. Задание стартует из чекпоинта 12, перечитывает платежи и пишет b1 и b2 заново в транзакцию с тем же именем и новой эпохой.</p>
+
+<svg viewBox="0 0 800 320" role="img" aria-label="Временная шкала. Транзакция 12 зафиксирована, транзакция 13 прервана падением TaskManager, после восстановления записи b1 и b2 пишутся повторно. Потребитель read_committed видит пять записей без повторов, read_uncommitted видит семь записей с двумя повторами." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <g font-family="var(--font-body)" font-size="12" fill="var(--color-text)">
+    <line x1="150" y1="40" x2="790" y2="40" stroke="var(--color-text-secondary)" stroke-width="1.5"/>
+    <g stroke-width="1.2" stroke-dasharray="4 4" fill="none">
+      <path d="M170 40V265" stroke="var(--color-text-secondary)"/>
+      <path d="M350 40V265" stroke="var(--color-text-secondary)"/>
+      <path d="M690 40V265" stroke="var(--color-text-secondary)"/>
+      <path d="M460 40V265" stroke="var(--color-error)"/>
+      <path d="M530 40V265" stroke="var(--color-info)"/>
+    </g>
+    <g text-anchor="middle" font-size="11">
+      <text x="170" y="28">чекпоинт 11</text>
+      <text x="350" y="28">чекпоинт 12</text>
+      <text x="460" y="16" fill="var(--color-error)" font-weight="700">SIGKILL</text>
+      <text x="530" y="28" fill="var(--color-info)">старт из 12</text>
+      <text x="690" y="28">чекпоинт 13</text>
+    </g>
+    <g font-size="13" font-weight="600">
+      <text x="10" y="80">Транзакции Writer</text>
+      <text x="10" y="138">Лог партиции</text>
+      <text x="10" y="193">read_committed</text>
+      <text x="10" y="253">read_uncommitted</text>
+    </g>
+    <rect x="172" y="60" width="176" height="30" rx="5" fill="var(--color-accent-light)" stroke="var(--color-accent)"/>
+    <text x="260" y="80" text-anchor="middle">…-0-12, зафиксирована</text>
+    <rect x="352" y="60" width="106" height="30" rx="5" fill="var(--color-error-light)" stroke="var(--color-error)" stroke-dasharray="5 3"/>
+    <text x="405" y="80" text-anchor="middle">…-0-13, прервана</text>
+    <rect x="532" y="60" width="156" height="30" rx="5" fill="var(--color-accent-light)" stroke="var(--color-accent)"/>
+    <text x="610" y="80" text-anchor="middle">…-0-13, новая эпоха</text>
+    <g font-size="11" text-anchor="middle">
+      <rect x="185" y="120" width="34" height="26" rx="4" fill="var(--color-success-light)" stroke="var(--color-success)"/><text x="202" y="137">a1</text>
+      <rect x="230" y="120" width="34" height="26" rx="4" fill="var(--color-success-light)" stroke="var(--color-success)"/><text x="247" y="137">a2</text>
+      <rect x="275" y="120" width="34" height="26" rx="4" fill="var(--color-success-light)" stroke="var(--color-success)"/><text x="292" y="137">a3</text>
+      <rect x="370" y="120" width="34" height="26" rx="4" fill="var(--color-error-light)" stroke="var(--color-error)"/><text x="387" y="137">b1</text>
+      <rect x="412" y="120" width="34" height="26" rx="4" fill="var(--color-error-light)" stroke="var(--color-error)"/><text x="429" y="137">b2</text>
+      <path d="M370 146L446 120" stroke="var(--color-error)" stroke-width="1.5"/>
+      <rect x="560" y="120" width="34" height="26" rx="4" fill="var(--color-success-light)" stroke="var(--color-success)"/><text x="577" y="137">b1</text>
+      <rect x="605" y="120" width="34" height="26" rx="4" fill="var(--color-success-light)" stroke="var(--color-success)"/><text x="622" y="137">b2</text>
+
+      <rect x="356" y="175" width="28" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="370" y="192">a1</text>
+      <rect x="388" y="175" width="28" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="402" y="192">a2</text>
+      <rect x="420" y="175" width="28" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="434" y="192">a3</text>
+      <rect x="698" y="175" width="28" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="712" y="192">b1</text>
+      <rect x="730" y="175" width="28" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="744" y="192">b2</text>
+
+      <rect x="185" y="235" width="34" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="202" y="252">a1</text>
+      <rect x="230" y="235" width="34" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="247" y="252">a2</text>
+      <rect x="275" y="235" width="34" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="292" y="252">a3</text>
+      <rect x="370" y="235" width="34" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="387" y="252">b1</text>
+      <rect x="412" y="235" width="34" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="429" y="252">b2</text>
+      <rect x="560" y="235" width="34" height="26" rx="4" fill="var(--color-error-light)" stroke="var(--color-error)"/><text x="577" y="252">b1</text>
+      <rect x="605" y="235" width="34" height="26" rx="4" fill="var(--color-error-light)" stroke="var(--color-error)"/><text x="622" y="252">b2</text>
+    </g>
+    <g font-size="11" fill="var(--color-text-secondary)">
+      <text x="356" y="216">a1-a3 видны после фиксации 12</text>
+      <text x="560" y="216">b1, b2 после фиксации 13</text>
+      <text x="560" y="280">повтор b1 и b2</text>
+      <text x="10" y="306">Итог. read_committed получил пять записей без повторов, read_uncommitted семь, из них две копии.</text>
+    </g>
+  </g>
+</svg>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Что делает Writer при старте. Сначала он прерывает «зависшие» транзакции прошлого запуска, потом открывает транзакцию под номер чекпоинта, следующего за восстановленным. Для старта из чекпоинта 12 это снова номер 13.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/ExactlyOnceKafkaWriter.java" data-lines="190-205" data-must="abortLingeringTransactions("></div>
+<p>Прерывание устроено через ту же регистрацию продюсера. Комментарий в коде говорит, что получение продюсера уже вызывает <code>initTransactions</code>, а он отменяет транзакцию.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/ExactlyOnceKafkaWriter.java" data-lines="334-347" data-must="which cancels the"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#kafka-sink" target="_blank" rel="noopener">Kafka Sink</a></p>
+</div>
+
+<h2>transaction.timeout.ms и длина простоя</h2>
+<p>Подготовленная транзакция живёт на брокере, пока её не зафиксируют или не прервут. Брокер ждёт не бесконечно. Через <code>transaction.timeout.ms</code> после первой записи он прерывает транзакцию сам. Если Committer придёт фиксировать её позже, фиксировать будет нечего.</p>
+<p>Опасный сценарий выглядит так. Чекпоинт 12 завершён, но TaskManager упал до вызова <code>commitTransaction</code>. Кластер простоял ночь. Утром задание стартует из чекпоинта 12, Committer находит в состоянии committable транзакции 12 и пытается её зафиксировать. Брокер давно её прервал. Платежи до барьера 12 повторно не прочитаются, ведь источник продолжит со смещений чекпоинта 12. Алерты из этой транзакции потеряны.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Описание <code>KafkaSink</code> требует, чтобы таймаут транзакции был намного больше суммы самого долгого чекпоинта и самого долгого восстановления.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaSink.java" data-lines="62-71" data-must="maximum checkpoint"></div>
+<p>Значение по умолчанию у приёмника один час. Конструктор строителя кладёт его в настройки продюсера.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaSinkBuilder.java" data-lines="65-65" data-must="Duration.ofHours(1)"></div>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaSinkBuilder.java" data-lines="80-89" data-must="DEFAULT_KAFKA_TRANSACTION_TIMEOUT.toMillis()"></div>
+<p>Что Committer делает с прерванной транзакцией. <code>ProducerFencedException</code> и <code>InvalidTxnStateException</code> он считает известными причинами и вызывает <code>signalFailedWithKnownReason</code>.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/KafkaCommitter.java" data-lines="101-122" data-must="request.signalFailedWithKnownReason(e);"></div>
+<p>Описание интерфейса объясняет, что это значит. Известная причина только пишется в лог, committable выбрасывается, задание работает дальше. Неизвестная причина роняет задание.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/connector/sink2/Committer.java" data-lines="66-80" data-must="discards the comittable and"></div>
+<p>Потеря получается тихой. Задание в статусе <code>RUNNING</code>, и только строка уровня WARN или ERROR в логе Committer говорит, что данные, скорее всего, пропали. Такие строки в логах надо искать специально.</p>
+<p class="doc-links">Документация: <a href="https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_transaction.timeout.ms" target="_blank" rel="noopener">Kafka, transaction.timeout.ms</a>, <a href="https://kafka.apache.org/43/configuration/broker-configs/#brokerconfigs_transaction.max.timeout.ms" target="_blank" rel="noopener">Kafka, transaction.max.timeout.ms</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Час от Flink против 15 минут брокера</strong>
+    <p>Брокер ограничивает таймаут сверху настройкой <code>transaction.max.timeout.ms</code>, по умолчанию 900000 мс, это 15 минут. Документация Kafka предупреждает, что продюсер с таймаутом больше этого предела получит <code>InvalidTxnTimeoutException</code>. Значение приёмника по умолчанию, один час, в этот предел не влезает. Либо задай таймаут не больше 15 минут, как в нашем проекте, либо подними предел на брокере, если простой дольше 15 минут для тебя реален.</p>
+  </div>
+</div>
+
+<h2>Цена в задержке</h2>
+<p>Транзакция фиксируется только после завершения чекпоинта. Алерт, созданный сразу после барьера, ждёт целый интервал, у нас 15 секунд, плюс время самого чекпоинта. Описание <code>KafkaSink</code> прямо говорит, что запись фактически откладывается до чекпоинта и интервал надо подбирать с учётом этого.</p>
+<p>Интервал нельзя уменьшать бесконечно. Каждый чекпоинт выгружает изменения RocksDB, и у нас он длится около трёхсот миллисекунд. При интервале в секунду снимки шли бы почти без перерыва, а брокер копил бы имена транзакций, по одному на чекпоинт и подзадачу. Есть и вторая сторона задержки. Пока транзакция открыта, потребители <code>read_committed</code> не читают дальше LSO, поэтому после падения они стоят, пока восстановленный Writer не прервёт старую транзакцию или её не прервёт брокер по таймауту.</p>
+
+<h2>Идемпотентность как альтернатива</h2>
+<p>Есть второй путь к тому же результату. Приёмник пишет в режиме at-least-once, повторы случаются, но запись построена так, что повтор ничего не меняет. Для этого нужен детерминированный ключ, одинаковый при каждой повторной обработке. У нас он уже есть. Идентификатор алерта собран из правила и платежа, поэтому повторный алерт получает тот же <code>alertId</code>.</p>
+<div data-code="lesson-12/src/main/java/dev/study/payguard/model/FraudAlert.java" data-lines="17-27"></div>
+<p>В PostgreSQL ту же идею даёт <code>INSERT ... ON CONFLICT DO UPDATE</code>. Строка с тем же первичным ключом перезаписывается, и повторный итог окна оставляет таблицу в том же состоянии. Документация JDBC-коннектора Flink так и пишет. Сам приёмник даёт at-least-once, а exactly-once получается через upsert или идемпотентные запросы. Страница описывает старый вызов <code>JdbcSink.sink</code>, в проекте мы возьмём новый строитель. У него, кроме <code>buildAtLeastOnce</code>, есть <code>buildExactlyOnce</code>, который принимает <code>XADataSource</code>, то есть требует от базы поддержки XA-транзакций.</p>
+<table>
+<thead><tr><th>Подход</th><th>Когда подходит</th><th>Что требует</th></tr></thead>
+<tbody>
+<tr><td>Транзакции Kafka</td><td>Топик читают чужие сервисы, ключа для дедупликации у них нет</td><td>Потребители с <code>read_committed</code>, задержку в интервал чекпоинта, правильный таймаут</td></tr>
+<tr><td>Upsert по ключу</td><td>Приёмник это таблица с первичным ключом</td><td>Детерминированный ключ и одинаковое значение при повторе</td></tr>
+<tr><td>At-least-once и дедупликация у потребителя</td><td>Нужна минимальная задержка</td><td>Детерминированный идентификатор записи и хранилище уже виденных идентификаторов у потребителя</td></tr>
+</tbody>
+</table>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/jdbc/" target="_blank" rel="noopener">JDBC Connector</a>, <a href="https://www.postgresql.org/docs/17/sql-insert.html#SQL-ON-CONFLICT" target="_blank" rel="noopener">PostgreSQL, ON CONFLICT</a></p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Побочные эффекты внутри операторов не защищены</strong>
+    <p>Гарантия покрывает состояние Flink и транзакционный приёмник. Если оператор сам отправляет SMS или вызывает платёжный API, после восстановления он сделает это снова для всех перечитанных платежей. Такие действия выноси за приёмник или делай идемпотентными на стороне сервиса, например по тому же <code>alertId</code>.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l12">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. По умолчанию потребитель Kafka читает в режиме read_uncommitted и получает записи прерванных транзакций. Транзакции на стороне Flink не помогут, пока потребитель не включит read_committed."
+       data-explanation-wrong="Подумай, кто решает, видны ли записи прерванных транзакций. Транзакцию открывает и прерывает приёмник, а выбор, читать её или нет, делает потребитель настройкой isolation.level.">
+    <h3 class="quiz-question">Приёмник алертов работает в EXACTLY_ONCE. После перезапуска Flink команда колл-центра жалуется на повторные алерты. Их сервис использует стандартный KafkaConsumer, в настройках только адрес и группа. В чём причина?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>transaction.timeout.ms слишком мал, брокер прерывает транзакции</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Потребитель читает в режиме по умолчанию read_uncommitted и видит прерванные транзакции</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Две подзадачи Writer пишут один и тот же алерт</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Брокер прервал подготовленную транзакцию по таймауту. Committer получит ProducerFencedException или InvalidTxnStateException, запишет ошибку в лог и выбросит committable. Источник продолжит со смещений чекпоинта, и эти алерты больше не появятся."
+       data-explanation-wrong="Сравни время простоя с transaction.timeout.ms. Что брокер делает с транзакцией, которую никто не зафиксировал за 15 минут, и как Committer обрабатывает известные причины отказа?">
+    <h3 class="quiz-question">Чекпоинт 40 завершился, и TaskManager тут же упал, не успев зафиксировать транзакцию. Kafka работает, кластер Flink вернули через шесть часов. Таймаут транзакции 15 минут. Что будет с алертами транзакции 40?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Committer зафиксирует их при восстановлении, ведь committable лежит в чекпоинте</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Задание уйдёт в бесконечные перезапуски, пока транзакцию не удалят вручную</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Они потеряны. Задание продолжит работу, в логе Committer останется ошибка</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Детерминированный alertId позволяет потребителю отбросить повтор. Приёмник at-least-once отдаёт запись сразу, без ожидания чекпоинта, поэтому задержка не зависит от интервала."
+       data-explanation-wrong="Сравни, где в каждом варианте прячется ожидание. Транзакции Kafka держат запись до чекпоинта, а read_uncommitted пропускает прерванные записи, то есть повторы.">
+    <h3 class="quiz-question">Команда блокировки карт хочет видеть алерт не позже чем через секунду и без повторов. Интервал чекпоинта 15 секунд, уменьшать его нельзя. Что предложишь?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Писать в AT_LEAST_ONCE и отбрасывать повторы у потребителя по alertId</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Оставить EXACTLY_ONCE и читать с read_uncommitted</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Оставить EXACTLY_ONCE и уменьшить transaction.timeout.ms до секунды</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

@@ -1,0 +1,192 @@
+<h2>Порог, который меняют чаще релизов</h2>
+<p>Лимит правила velocity сейчас задаётся параметром запуска, по умолчанию 10 платежей карты за минуту. Аналитик антифрода видит волну атак из одной страны и хочет заблокировать её платежи прямо сейчас. Через полчаса ложных срабатываний становится много, и лимит надо поднять.</p>
+<p>Если каждая такая правка идёт через релиз, это savepoint, остановка, новая сборка и запуск. Проверка платежей в это время стоит, а дежурный инженер нужен даже ночью. Аналитик хочет менять пороги сам и сразу.</p>
+<p>Выход в том, чтобы считать настройки правил ещё одним потоком данных. Аналитик пишет сообщение в топик <code>rules.config</code>, задание читает его и применяет к следующему платежу. Для этого во Flink есть broadcast state, состояние, которое доставляется во все параллельные подзадачи оператора.</p>
+
+<h2>Циркуляр для касс</h2>
+<p>В супермаркете десять касс. Утром офис рассылает циркуляр «алкоголь продавать только по паспорту». Копию получает каждая касса, кассир держит её у себя и сверяется с ней при каждом покупателе. Звонить соседней кассе ему не нужно, всё под рукой.</p>
+<p>Править циркуляр кассир не может. Если один допишет в свою копию «кроме постоянных покупателей», кассы начнут работать по разным правилам, и никто этого не заметит. Менять текст имеет право только офис, и делает он это новым циркуляром, который снова получают все.</p>
+<p>Во Flink офис это поток правил, кассы это подзадачи оператора, копия циркуляра это broadcast state, покупатели это платежи. Каждый платёж попадает в одну подзадачу, ту, что отвечает за его карту. Каждое правило попадает во все.</p>
+
+<svg viewBox="0 0 860 270" role="img" aria-label="Платежи по ключу карты идут каждый в одну подзадачу оператора rules-dynamic. Обе подзадачи источника правил отправляют каждую запись в обе подзадачи оператора. У каждой подзадачи своё состояние карт и своя копия правил." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l08" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="35" width="200" height="54" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="110" y="58">Платежи</text><text x="110" y="77" font-size="11">keyBy(cardId)</text>
+    <rect x="10" y="150" width="200" height="40" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="110" y="175">rules-config, подзадача 0</text>
+    <rect x="10" y="205" width="200" height="40" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="110" y="230">rules-config, подзадача 1</text>
+    <rect x="470" y="15" width="300" height="100" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="620" y="40" font-weight="700">rules-dynamic, подзадача 0</text><text x="620" y="66" font-size="12">состояние карт c-1, c-3 и других своих</text><text x="620" y="90" font-size="12">копия правил, ключ current</text>
+    <rect x="470" y="150" width="300" height="100" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="620" y="175" font-weight="700">rules-dynamic, подзадача 1</text><text x="620" y="201" font-size="12">состояние карт c-2, c-4 и других своих</text><text x="620" y="225" font-size="12">копия правил, ключ current</text>
+    <text x="340" y="265" font-size="11" fill="var(--color-text-secondary)">сплошные стрелки это keyBy, пунктир это BROADCAST</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l08)">
+    <path d="M210 55L468 55"/><path d="M210 75L468 185"/>
+  </g>
+  <g stroke="var(--color-accent)" stroke-width="1.5" fill="none" stroke-dasharray="5 4" marker-end="url(#arrow-l08)">
+    <path d="M210 165L468 95"/><path d="M210 175L468 215"/><path d="M210 220L468 105"/><path d="M210 230L468 230"/>
+  </g>
+</svg>
+
+<h2>Как устроен broadcast state</h2>
+<p>Поток правил становится широковещательным после вызова <code>broadcast(descriptor)</code>. Метод ставит разбиение BROADCAST, при котором каждая запись уходит во все подзадачи следующего оператора, и запоминает дескрипторы состояния. Дескриптор <code>MapStateDescriptor</code> задаёт имя и типы ключа и значения, так что broadcast state устроен как словарь.</p>
+<p>Затем поток платежей с ключом соединяется с ним через <code>connect</code>, и в <code>process</code> передаётся <code>KeyedBroadcastProcessFunction</code>. У функции два главных метода. <code>processElement</code> вызывается для каждого платежа, <code>processBroadcastElement</code> для каждого правила.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Метод <code>broadcast</code> у <code>DataStream</code> ставит <code>BroadcastPartitioner</code> и заворачивает поток вместе с дескрипторами в <code>BroadcastStream</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/datastream/DataStream.java" data-lines="338-344" data-must="BroadcastPartitioner"></div>
+<p>Внутри оператора <code>CoBroadcastWithKeyedOperator</code> два входа разведены по двум методам. Запись первого входа идёт в <code>processElement</code> вместе с контекстом <code>rContext</code>, запись второго в <code>processBroadcastElement</code> с контекстом <code>rwContext</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/co/CoBroadcastWithKeyedOperator.java" data-lines="122-136" data-must="userFunction.processBroadcastElement(element.getValue(), rwContext, collector)"></div>
+<p>Имена контекстов означают read и read-write. Чем они отличаются, посмотрим в следующем разделе.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/broadcast_state/" target="_blank" rel="noopener">The Broadcast State Pattern</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/#broadcasting" target="_blank" rel="noopener">Broadcasting</a></p>
+</div>
+
+<h2>Почему писать можно только со стороны правил</h2>
+<p>Подзадачи Flink не переговариваются между собой. Каждая хранит свою копию broadcast state, и копии совпадают по одной причине. Все подзадачи получают одни и те же правила и делают с ними одно и то же. Поэтому код <code>processBroadcastElement</code> обязан быть детерминированным. Если он смотрит на часы машины, на случайное число или во внешнюю базу, копии разойдутся.</p>
+<p>Платёж приходит только в одну подзадачу. Если бы <code>processElement</code> мог менять broadcast state, изменение попало бы в одну копию из нескольких. Поэтому сторона платежей читает правила, но писать в них не может. Зато ей доступны состояние с ключом и таймеры. У стороны правил таймеров нет, взамен она может пройтись по состоянию всех ключей своей подзадачи методом <code>applyToKeyedState</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Описание <code>KeyedBroadcastProcessFunction</code> прямо распределяет права между двумя методами.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/functions/co/KeyedBroadcastProcessFunction.java" data-lines="41-53" data-must="has read-only access to the broadcast state"></div>
+<p>Теперь то, как сделано «только чтение». Контекст стороны платежей берёт состояние из той же карты <code>states</code>, что и контекст правил, и приводит его к интерфейсу <code>ReadOnlyBroadcastState</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/co/CoBroadcastWithKeyedOperator.java" data-lines="294-309" data-must="states.get(stateDescriptor)"></div>
+<p>Объект один и тот же, ограничение задаёт только тип. В интерфейсе для чтения нет <code>put</code> и <code>remove</code>, а его описание предупреждает, что значения отдаются без копирования.</p>
+<div data-src="flink:flink-core-api/src/main/java/org/apache/flink/api/common/state/ReadOnlyBroadcastState.java" data-lines="25-37" data-must="not create extra copies of the elements"></div>
+<p>Отсюда практическое правило. Объект, который вернул <code>get</code>, менять нельзя, даже если у него есть сеттер. Изменение в одной подзадаче останется в её копии, и ошибки при этом не будет. У нас настройки хранит record <code>RuleConfig</code>, и код правил только читает его поля.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/broadcast_state/#broadcastprocessfunction-and-keyedbroadcastprocessfunction" target="_blank" rel="noopener">BroadcastProcessFunction and KeyedBroadcastProcessFunction</a></p>
+</div>
+
+<h2>Порядок, снимки и память</h2>
+<p>Детерминированный код ещё не гарантирует одинаковых копий. Если правила читают две подзадачи источника, каждая подзадача оператора получает записи от обеих по двум разным каналам. Внутри канала порядок сохраняется. Как перемешаются два канала, у каждой подзадачи решается по-своему. Документация говорит прямо, что порядок правил в разных подзадачах может различаться и обновление не должно от него зависеть.</p>
+<p>У нас обновление устроено по принципу «последнее побеждает», ключ <code>current</code> просто перезаписывается. Если аналитик отправит два сообщения подряд и они лягут в разные партиции <code>rules.config</code>, подзадачи могут закончить на разных версиях. На учебном стенде у топика четыре партиции, и мы отправляем одно правило, поэтому это не мешает. В проде делай топик правил с одной партицией или добавь в правило номер версии и принимай только более новую.</p>
+<p>При чекпоинте свою копию сохраняет каждая подзадача, так что в снимке broadcast state лежит столько раз, каков параллелизм. Зато при восстановлении подзадачи не читают один и тот же файл. После восстановления или смены параллелизма каждая подзадача получает целую копию, и поэтому копии обязаны совпадать.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Описание интерфейса <code>BroadcastState</code> объясняет, как копии раздаются при восстановлении и почему расхождение копий даёт непредсказуемый результат.</p>
+<div data-src="flink:flink-core-api/src/main/java/org/apache/flink/api/common/state/BroadcastState.java" data-lines="26-45" data-must="the same state is given to each of the instances"></div>
+<p>Где лежат данные. Хранилище состояния операторов создаёт для broadcast state объект <code>HeapBroadcastState</code>, то есть словарь в куче JVM.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/DefaultOperatorStateBackend.java" data-lines="163-174" data-must="new HeapBroadcastState"></div>
+<p>Документация в разделе об ограничениях подтверждает, что broadcast state во время работы живёт в памяти и при RocksDB тоже, и что в чекпоинте он хранится в p экземплярах при параллелизме p.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/broadcast_state/#important-considerations" target="_blank" rel="noopener">Broadcast State, Important Considerations</a></p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Broadcast state для маленьких данных</strong>
+    <p>Пороги и списки стран весят килобайты, и копия в каждой подзадаче ничего не стоит. Справочник продавцов на миллионы строк сюда класть нельзя. Он займёт кучу каждого TaskManager столько раз, сколько у оператора подзадач на этой машине, и столько же раз попадёт в чекпоинт. Для больших справочников есть Async I/O, о нём урок 9.</p>
+  </div>
+</div>
+
+<h2>Путь одного правила</h2>
+<p>Пройди по шагам, что происходит с сообщением аналитика от консоли до проверки следующего платежа.</p>
+<div class="flow-animation" id="flow-l08" data-steps='[
+  {"highlight":"flow-l08-1","label":"Аналитик пишет в топик rules.config строку JSON с новыми порогами."},
+  {"highlight":"flow-l08-2","label":"Сообщение ложится в одну из четырёх партиций топика.","packet":true,"from":"l08-1","to":"l08-2"},
+  {"highlight":"flow-l08-3","label":"Подзадача источника, которой досталась эта партиция, читает запись. LenientJsonSchema превращает JSON в RuleConfig или пропускает битую строку.","packet":true,"from":"l08-2","to":"l08-3"},
+  {"highlight":"flow-l08-4","label":"Разбиение BROADCAST отправляет запись в подзадачу 0 оператора rules-dynamic.","packet":true,"from":"l08-3","to":"l08-4"},
+  {"highlight":"flow-l08-5","label":"Та же запись уходит в подзадачу 1. Правило получают все подзадачи без исключения.","packet":true,"from":"l08-3","to":"l08-5"},
+  {"highlight":"flow-l08-4","label":"processBroadcastElement кладёт правило под ключом current в свою копию broadcast state. Подзадача 1 делает то же самое со своей копией."},
+  {"highlight":"flow-l08-5","label":"Следующий платёж любой карты читает current через контекст только для чтения и проверяется по новым порогам. Задание не перезапускалось."}
+]'>
+  <div class="flow-actors">
+    <div class="flow-actor" id="flow-l08-1"><div class="flow-actor-icon">A</div><span>Аналитик, консольный продюсер</span></div>
+    <div class="flow-actor" id="flow-l08-2"><div class="flow-actor-icon">K</div><span>Kafka, rules.config</span></div>
+    <div class="flow-actor" id="flow-l08-3"><div class="flow-actor-icon">S</div><span>Source rules-config</span></div>
+    <div class="flow-actor" id="flow-l08-4"><div class="flow-actor-icon">0</div><span>rules-dynamic, подзадача 0</span></div>
+    <div class="flow-actor" id="flow-l08-5"><div class="flow-actor-icon">1</div><span>rules-dynamic, подзадача 1</span></div>
+  </div>
+  <div class="flow-packet"></div>
+  <div class="flow-step-label">Нажми «Следующий шаг»</div>
+  <div class="flow-controls">
+    <button class="btn flow-next-btn">Следующий шаг</button>
+    <button class="btn flow-reset-btn">Сначала</button>
+    <span class="flow-progress"></span>
+  </div>
+</div>
+
+<h2>Два входа и одно время</h2>
+<p>У оператора <code>rules-dynamic</code> два входа, и у каждого свой watermark. Правило слияния ты знаешь по уроку 5. Время оператора равно минимуму по входам, потому что обещание «старше T ничего не придёт» верно, только если его дал каждый вход. Для двух входов действует тот же минимум.</p>
+<p>Теперь представь, что поток правил подключён с <code>WatermarkStrategy.noWatermarks()</code>. Выбор кажется естественным, ведь у настроек нет времени события. Такой вход ни разу не пришлёт watermark, его время навсегда остаётся минимально возможным, и минимум по двум входам тоже. Время оператора стоит на месте, таймеры по времени события не срабатывают. В <code>DynamicRules</code> это таймеры, которые выбрасывают старые корзины счётчика, поэтому состояние растёт без предела. Алерты при этом приходят, исключений в логе нет.</p>
+<p>Выбери стратегию для входа правил и запусти пять минут времени событий. Слева видно watermark входов и оператора, справа число корзин одной карты в состоянии.</p>
+
+<div class="viz" id="viz-l08">
+  <p class="viz-title">Два входа одного оператора</p>
+  <div class="viz-controls">
+    <label><input type="radio" name="viz-l08-mode" value="none" checked> Правила с noWatermarks</label>
+    <label><input type="radio" name="viz-l08-mode" value="max"> Правила с neverHoldBack</label>
+    <button class="primary" id="viz-l08-run" type="button">Пустить время</button>
+  </div>
+  <svg id="viz-l08-svg" role="img" aria-label="Два входа оператора с их watermark, watermark оператора как минимум из двух и столбики числа корзин в состоянии по времени."></svg>
+  <p class="viz-note" id="viz-l08-note" aria-live="polite">Выбери стратегию для входа правил и нажми кнопку.</p>
+</div>
+<p>Модель повторяет <code>DynamicRules</code>. Платёж приходит раз в 10 секунд, корзина равна 10 секундам, окно минуте, допуск беспорядка платежей 10 секундам, как в <code>PaymentWatermarks</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проследим watermark от сети до оператора. Выход сетевого входа знает свой номер и вызывает у оператора <code>processWatermark1</code> или <code>processWatermark2</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/io/StreamTwoInputProcessorFactory.java" data-lines="260-276" data-must="operator.processWatermark2(watermark)"></div>
+<p>В <code>AbstractStreamOperator</code> оба метода сводятся к одному. Номер входа становится индексом в <code>combinedWatermark</code>, который в конструкторе оператора создан на два входа вызовом <code>forInputsCount(2)</code>. Оператор получает новый watermark, только если общий вырос.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/AbstractStreamOperator.java" data-lines="689-701" data-must="combinedWatermark.updateWatermark(index, mark.getTimestamp())"></div>
+<p>Общий watermark считает <code>CombinedWatermarkStatus</code>, тот же класс, что сливает партиции в источнике. Его минимум по активным входам мы разбирали в уроке 5. Сейчас нас интересует начальное значение каждого входа.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/eventtime/CombinedWatermarkStatus.java" data-lines="109-118" data-must="private long watermark = Long.MIN_VALUE;"></div>
+<p>Вход, который ни разу не прислал watermark, держит <code>Long.MIN_VALUE</code>, и минимум выше него не поднимется. Именно такой вход даёт <code>noWatermarks</code>, его генератор ничего не выпускает.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/eventtime/WatermarkStrategy.java" data-lines="243-249" data-must="NoWatermarksGenerator"></div>
+<p>Из минимума вход выпадает, только когда объявлен простаивающим. Генератор <code>NoWatermarksGenerator</code> пуст в обоих методах, так что и признака простоя от него не будет.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/time/#watermarks-in-parallel-streams" target="_blank" rel="noopener">Watermarks in Parallel Streams</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/event-time/generating_watermarks/#writing-watermarkgenerators" target="_blank" rel="noopener">Writing WatermarkGenerators</a></p>
+</div>
+
+<p>Исправление в нашем проекте называется <code>RuleWatermarks.neverHoldBack()</code>. Его генератор периодически выпускает watermark <code>Long.MAX_VALUE</code>. Вход правил обещает, что старых данных от него не будет никогда, и минимум всегда равен времени платежей. Самим правилам это ничем не грозит, окон и таймеров на их стороне нет.</p>
+<p>Можно было бы объявить вход простаивающим через <code>withIdleness</code> из урока 5. Но простаивающим вход считается только после таймаута, и всё это время оператор бы ждал. Генератору с <code>Long.MAX_VALUE</code> таймаут не нужен.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Время стоит, а ошибок нет</strong>
+    <p>Застрявший watermark двухвходового оператора задание не роняет. Записи идут, счётчики входа растут, молчат только окна и таймеры по времени события. В такой ситуации первым делом смотри watermark каждой вершины в Web UI или через REST. Поломка там, где у вершины время стоит, а у вершин перед ней идёт.</p>
+  </div>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark похожую задачу решают broadcast variable. Её создаёт драйвер, на каждый экзекутор она доставляется один раз и дальше только читается. Чтобы поменять значение, создают новую переменную. В Structured Streaming это обычно делают внутри <code>foreachBatch</code> или перезапуском запроса.</p>
+<p>Broadcast state во Flink живёт внутри задания. Новое значение приходит записью из потока, сохраняется в чекпоинте вместе с остальным состоянием и восстанавливается после падения. Цена этого в двух обязательствах. Код обновления должен быть детерминированным, и поток правил участвует во времени оператора.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l08">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Внутри одного канала порядок сохраняется, а смешение каналов от двух подзадач источника у каждой подзадачи оператора своё. Последним записанным правилом у них оказались разные сообщения. Помогает топик правил с одной партицией или номер версии в правиле."
+       data-explanation-wrong="Код put с ключом current одинаков во всех подзадачах и от часов не зависит. Подумай, в каком порядке разные подзадачи получили два сообщения.">
+    <h3 class="quiz-question">Аналитик отправил подряд два сообщения, лимит 50 и сразу за ним лимит 20. Через минуту часть карт проверяется по лимиту 50, часть по лимиту 20. В топике правил четыре партиции, у источника правил параллелизм 2. Что произошло?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>processBroadcastElement ведёт себя недетерминированно</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Сообщения легли в разные партиции и пришли в подзадачи оператора в разном порядке</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Broadcast state одной из подзадач не попал в чекпоинт</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Вход без watermark держит Long.MIN_VALUE, минимум по двум входам не растёт, и таймеры очистки корзин не срабатывают."
+       data-explanation-wrong="У предыдущей вершины время идёт, а у rules-dynamic стоит. Значит, время держит второй вход этого оператора.">
+    <h3 class="quiz-question">После выкладки состояние вершины rules-dynamic растёт каждую минуту. Алерты приходят, исключений нет. В Web UI watermark у deduplicate растёт, у rules-dynamic стоит. Что проверить первым?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Стратегию watermark у источника правил</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Срок хранения состояния в дедупликации</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Параллелизм приёмника алертов</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Каждая подзадача увеличит только свою копию. При восстановлении и смене параллелизма подзадачи получают копии друг друга, и числа перепутаются. Такому счётчику место в состоянии с ключом или в метрике."
+       data-explanation-wrong="Приведение типа и правда сработает, объект один. Подумай, сколько подзадач увидит один платёж и что будет с копиями при смене параллелизма.">
+    <h3 class="quiz-question">Коллега хочет считать срабатывания каждого правила. Он предлагает в processElement привести ReadOnlyBroadcastState к BroadcastState и увеличивать счётчик. Код компилируется и работает. Чем это плохо?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Ничем, объект в памяти тот же самый</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Счётчик пропадёт при первом же чекпоинте</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Платёж видит одна подзадача, копии разойдутся, и после восстановления числа станут непредсказуемыми</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

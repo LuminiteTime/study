@@ -1,0 +1,31 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Меняем одно поле и следим за ресурсом.</p>
+<pre data-lang="bash" data-title="терминал">kubectl patch flinkdep payguard --type merge -p '{"spec":{"job":{"parallelism":3}}}'
+kubectl get flinkdep payguard -w</pre>
+<p><code>--type merge</code> сливает переданный JSON с текущим объектом, остальные поля spec не трогаются. По коду ресурс проходит <code>UPGRADING</code>, <code>DEPLOYED</code> и <code>STABLE</code>, промежуточные значения в выводе <code>-w</code> мелькают быстро. На стенде от patch до <code>RUNNING</code> и <code>STABLE</code> прошло 52 с.</p>
+<pre data-lang="bash" data-title="терминал">kubectl get flinkstatesnapshots</pre>
+<p>Появился ресурс <code>payguard-savepoint-upgrade-1794126582605</code> в состоянии <code>COMPLETED</code> с путём <code>file:/flink-data/savepoints/savepoint-34e016-c18e5dd0fdb1</code>. Первые шесть знаков после <code>savepoint-</code> взяты из jobId старого задания.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Имя каталога savepoint Flink собирает из префикса, начала jobId и случайного хвоста.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/filesystem/AbstractFsCheckpointStorageAccess.java" data-lines="169-176" data-must="jobId.toString().substring(0, 6)"></div>
+<p>По имени каталога всегда видно, из какого задания снят снимок, даже когда ресурсов FlinkStateSnapshot уже нет.</p>
+</div>
+
+<p>Теперь проверяем новое задание. jobId сменился, перечитываем его и заново открываем <code>port-forward</code>.</p>
+<pre data-lang="bash" data-title="терминал">kubectl port-forward svc/payguard-rest 18081:8081
+JOB=$(kubectl get flinkdep payguard -o jsonpath='{.status.jobStatus.jobId}')
+curl -s localhost:18081/jobs/$JOB/checkpoints | jq '{restored: .counts.restored, path: .latest.restored.external_path}'
+curl -s localhost:18081/jobs/$JOB | jq '[.vertices[] | {name, parallelism}]'
+curl -s localhost:18081/overview | jq '{taskmanagers, "slots-total"}'</pre>
+<p>Результаты на стенде. <code>checkpoints.restored</code> равен 1, <code>latest.restored.external_path</code> совпадает с путём из FlinkStateSnapshot. Параллелизм всех вершин 3. В <code>/overview</code> стало <code>taskmanagers</code> 2 и <code>slots-total</code> 4. Трём подзадачам каждой вершины нужно три слота, у одного TaskManager их два, и ResourceManager попросил у Kubernetes второй под. Новые поды назывались <code>payguard-taskmanager-3-1</code> и <code>payguard-taskmanager-3-2</code>. Четвёртый слот простаивает.</p>
+<p>Состояние разложилось по трём подзадачам через группы ключей, как в уроке 13. Максимальный параллелизм задания не менялся, поэтому снимок подошёл.</p>
+<p>Остаётся счётчик неудачных чекпоинтов. Сразу после апгрейда он вырос на 1. Ищем причину в логе JobManager, его Deployment называется так же, как кластер.</p>
+<pre data-lang="bash" data-title="терминал">kubectl logs deploy/payguard | grep 'Failed to trigger checkpoint'</pre>
+<pre data-lang="text" data-title="вывод" data-output>Failed to trigger checkpoint for job 3f6791727f93c0f73bd891d57caaec79 since Checkpoint triggering task deduplicate (2/3) of job ... is not being executed at the moment. Aborting checkpoint. Failure reason: Not all required tasks are currently running..</pre>
+<p>Первый чекпоинт по расписанию сработал, пока подзадачи на новом TaskManager ещё разворачивались. Чекпоинт требует, чтобы работали все подзадачи, и координатор его отменил. Следующие чекпоинты прошли <code>COMPLETED</code>, и счётчик больше не рос. Для алертов из урока 17 это значит, что одиночный неудачный чекпоинт после деплоя норма, тревогу поднимают на серию подряд.</p>
+<p>Ручной подбор параллелизма можно отдать автоскейлеру оператора. Он сам меняет параллелизм вершин по метрикам загрузки и выкатывает изменения тем же циклом апгрейда, если кластер не умеет применить их на месте. На нашем стенде автоскейлер не проверялся, это следующий шаг, описание в документации <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/managing/autoscaler/" target="_blank" rel="noopener">Autoscaler</a>.</p>
+</div>

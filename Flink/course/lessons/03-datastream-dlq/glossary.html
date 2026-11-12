@@ -1,0 +1,28 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="DataStream">DataStream</dt><dd>Основной API Flink для потоковых программ на Java. Объект описывает поток записей одного типа и план его обработки.</dd>
+<dt data-match="преобразовани|трансформаци|transformation">Преобразование (transformation)</dt><dd>Шаг в плане задания, например <code>map</code> или <code>process</code>. Из таких шагов Flink позже строит граф.</dd>
+<dt data-match="ProcessFunction">ProcessFunction</dt><dd>Самая гибкая пользовательская функция DataStream API. Получает запись и контекст, через контекст умеет писать в побочные выходы.</dd>
+<dt data-match="побочн[а-я]* выход|side output">Побочный выход (side output)</dt><dd>Дополнительный выход оператора со своим типом. Запись попадает туда по метке <code>OutputTag</code>.</dd>
+<dt data-match="OutputTag">OutputTag</dt><dd>Типизированная именованная метка побочного выхода. Создаётся как анонимный подкласс, чтобы Flink узнал параметр типа.</dd>
+<dt data-match="DLQ|dead letter queue">DLQ (dead letter queue)</dt><dd>Топик или очередь для записей, которые не удалось обработать. Хранит их для разбора и повторной отправки.</dd>
+<dt data-match="ядовит|poison pill">Ядовитая запись (poison pill)</dt><dd>Запись, на которой обработка падает при каждой попытке и из-за которой задание после перезапуска снова возвращается к той же ошибке.</dd>
+<dt data-match="стратеги[а-я]* перезапуска|restart strategy">Стратегия перезапуска (restart strategy)</dt><dd>Правило, по которому Flink перезапускает упавшее задание. Без чекпоинтов по умолчанию равна <code>none</code>, с чекпоинтами <code>exponential-delay</code>.</dd>
+<dt data-match="чекпоинт|checkpoint">Чекпоинт (checkpoint)</dt><dd>Периодический согласованный снимок задания, включая смещения Kafka. После сбоя задание продолжает с него. Подробно в уроке 11.</dd>
+<dt data-match="savepoint">Savepoint</dt><dd>Снимок задания, который запускают вручную для обновлений и переноса. Подробно в уроке 13.</dd>
+<dt data-match="смещени|offset">Смещение (offset)</dt><dd>Порядковый номер записи в партиции Kafka. По нему потребитель знает, откуда читать дальше.</dd>
+<dt data-match="TypeInformation">TypeInformation</dt><dd>Описание типа данных во Flink. Определяется на клиенте при описании плана и создаёт сериализатор.</dd>
+<dt data-match="TypeSerializer|сериализатор">Сериализатор (TypeSerializer)</dt><dd>Объект, который переводит записи в байты и обратно и умеет копировать их.</dd>
+<dt data-match="POJO">POJO</dt><dd>Обычный Java-класс, который Flink разбирает по полям. Требования это публичный класс, конструктор без аргументов и доступные поля. Record также подходит, если он публичный.</dd>
+<dt data-match="Record">Record</dt><dd>Вид неизменяемого класса в Java. Во Flink считается POJO и создаётся через канонический конструктор.</dd>
+<dt data-match="generic-тип|GenericType|GenericTypeInfo">Generic-тип</dt><dd>Тип, который Flink не смог разобрать по полям. Описывается через <code>GenericTypeInfo</code> и сериализуется через Kryo.</dd>
+<dt data-match="Kryo">Kryo</dt><dd>Универсальная библиотека сериализации для Java, запасной путь Flink для нераспознанных типов.</dd>
+<dt data-match="Encoder">Encoder</dt><dd>Механизм Spark, который описывает перевод объектов Dataset во внутренний формат. Ближайший аналог <code>TypeInformation</code>.</dd>
+<dt data-match="Jackson">Jackson</dt><dd>Популярная Java-библиотека для JSON. Главный класс <code>ObjectMapper</code> превращает текст в объекты и обратно.</dd>
+<dt data-match="tombstone">Tombstone</dt><dd>Сообщение Kafka с ключом и пустым значением. В топиках с компактированием означает удаление ключа.</dd>
+<dt data-match="harness|тестов[а-я]* стенд">Harness (тестовый стенд)</dt><dd>Обёртка из тестовых артефактов Flink. Запускает один оператор в JVM теста и даёт доступ к его выходам.</dd>
+<dt data-match="цепочк">Цепочка операторов (operator chain)</dt><dd>Несколько операторов, работающих в одном потоке и в одной подзадаче. Записи передаются между ними вызовом метода.</dd>
+<dt data-match="AT_LEAST_ONCE|at-least-once">At least once</dt><dd>Гарантия доставки, при которой запись не теряется, но при сбое может прийти повторно. Для приёмника Kafka требует чекпоинтов.</dd>
+<dt data-match="exactly-once">Exactly once</dt><dd>Гарантия, при которой каждая запись влияет на результат один раз. Разбирается в уроке 12.</dd>
+<dt data-match="backpressure|обратн[а-я]* давлени">Обратное давление (backpressure)</dt><dd>Ситуация, когда следующий оператор не успевает и сдерживает предыдущий. Подробно в уроке 4.</dd>
+</dl>

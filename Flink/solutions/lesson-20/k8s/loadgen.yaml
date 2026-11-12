@@ -1,0 +1,20 @@
+# Генератор платежей внутри кластера. Запускается из того же образа: jar содержит и задание, и генератор.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loadgen
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: loadgen }
+  template:
+    metadata:
+      labels: { app: loadgen }
+    spec:
+      containers:
+        - name: loadgen
+          image: payguard-job:1.0.0
+          imagePullPolicy: IfNotPresent
+          # Логгер не входит в jar задания, его берём из lib образа Flink.
+          command: ["java", "-cp", "/opt/flink/usrlib/payguard.jar:/opt/flink/lib/*", "dev.study.payguard.loadgen.LoadGenerator"]
+          args: ["--bootstrap", "kafka:9092", "--rate", "200", "--dup", "0.02"]

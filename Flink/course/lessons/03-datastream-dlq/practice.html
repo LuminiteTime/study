@@ -1,0 +1,134 @@
+<h2>Что будет в конце</h2>
+<p>Задание разбирает JSON в <code>PaymentEvent</code>, а непригодные записи отправляет в топик <code>payments.dlq</code> с причиной и временем. Настройки подключения приходят из аргументов командной строки. Функцию проверяют быстрые тесты без кластера. Бизнес-проверки платежа ты допишешь в задании, сегодня они будут пустой заглушкой.</p>
+
+<h2>Шаг 1. Зависимости</h2>
+<p>Открой <code>build.gradle.kts</code>. Появляются две группы зависимостей.</p>
+<div data-diff="lesson-02/build.gradle.kts lesson-03/build.gradle.kts"></div>
+<p><code>flink-json</code> содержит <code>JsonSerializationSchema</code>, которой мы пишем в DLQ. Он идёт через <code>flinkProvided</code>, потому что файл <code>flink-json</code> лежит в папке <code>lib/</code> дистрибутива Flink и в твой jar не нужен. Это видно по файлу сборки дистрибутива <code>flink-dist/src/main/assemblies/bin.xml</code>.</p>
+<p>Строки с <code>:tests</code> подключают специальные артефакты с классами из тестового кода Flink. Классификатор <code>tests</code> означает отдельный jar рядом с основным. В них лежат <code>OneInputStreamOperatorTestHarness</code> и <code>ProcessFunctionTestHarnesses</code>, а <code>flink-test-utils</code> добавляет остальные утилиты, например <code>PojoTestUtils</code>.</p>
+
+<h2>Шаг 2. Запись для DLQ</h2>
+<p>Создай <code>model/RejectedRecord.java</code>. Это public record, поэтому Flink получит для него <code>PojoTypeInfo</code>, и запрет на generic-типы его не затронет.</p>
+<div data-code="lesson-03/src/main/java/dev/study/payguard/model/RejectedRecord.java"></div>
+
+<h2>Шаг 3. Функция разбора</h2>
+<p>Создай <code>pipeline/ParsePaymentFunction.java</code>.</p>
+<div data-code="lesson-03/src/main/java/dev/study/payguard/pipeline/ParsePaymentFunction.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-03/src/main/java/dev/study/payguard/pipeline/ParsePaymentFunction.java" data-lines="16-43"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Метка побочного выхода. Пустые фигурные скобки создают анонимный подкласс, только так Flink узнаёт тип <code>RejectedRecord</code>. Поле публичное и статическое, потому что по нему же задание забирает поток.</p>
+      <p class="tl">Сама функция сериализуется на клиенте и едет в TaskManager. Поле <code>transient</code> в этом не участвует. Метод <code>open</code> создаёт <code>ObjectMapper</code> уже в подзадаче, свой на каждую.</p>
+      <p class="tl"><code>processElement</code> вызывается на каждую запись. Jackson собирает record из JSON через канонический конструктор, затем валидатор решает, принимать ли платёж.</p>
+      <p class="tl">Нормальный платёж идёт в основной выход через <code>out.collect</code>, с причиной отказа уходит в побочный.</p>
+      <p class="tl">Ошибка разбора перехватывается и становится обычной записью с кодом <code>bad-json</code>. Запись продолжает жизнь как данные и больше не роняет задачу.</p>
+      <p class="tl">Вспомогательный метод собирает <code>RejectedRecord</code> и пишет его через <code>context.output</code> с меткой. Время здесь берётся с часов машины, это момент отказа.</p>
+    </div>
+  </div>
+</div>
+<p>В строке с <code>PaymentValidator.rejectionReason</code> используется класс, который ты напишешь в задании, поэтому его файл с решением сейчас создавать не нужно. Чтобы код компилировался, положи рядом заглушку. Это класс <code>PaymentValidator</code> в том же пакете с одним статическим методом <code>rejectionReason(PaymentEvent)</code>, который возвращает <code>Optional.empty()</code>. С ней любой разобранный платёж считается годным.</p>
+
+<h2>Шаг 4. Конфигурация и приёмник</h2>
+<p>До сих пор адреса были зашиты в код. <code>JobConfig</code> читает их из аргументов, значит, один и тот же jar подойдёт для любого стенда.</p>
+<div data-code="lesson-03/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+<p><code>ParameterTool</code> разбирает пары вида <code>--dlq-topic имя</code>. Значения по умолчанию подходят для нашего Compose, поэтому запуск без аргументов продолжит работать. Всё, что написано после имени jar в <code>flink run</code>, попадает в <code>args</code>.</p>
+<p>Сборку приёмника вынесем в отдельный класс, она ещё пригодится для алертов.</p>
+<div data-code="lesson-03/src/main/java/dev/study/payguard/job/KafkaSinks.java"></div>
+<p><code>JsonSerializationSchema</code> превращает объект в JSON, топик задан заранее, а <code>setDeliveryGuarantee</code> включает режим повторной отправки, разобранный в теории. Ключ записи мы не задаём, распределением по партициям занимается продюсер Kafka.</p>
+
+<h2>Шаг 5. Задание</h2>
+<p>Перепиши <code>PayGuardJob</code>. Фильтр <code>drop-blank</code> из урока 2 больше не нужен, потому что пустая строка теперь получит причину <code>bad-json</code>. Также мы убрали печать плана, ты уже видел его в уроке 2.</p>
+<div data-diff="lesson-02/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-03/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-03/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="19-39"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Читаем аргументы командной строки.</p>
+      <p class="tl">Запрещаем Kryo для всего задания. Настройка передаётся при создании окружения. Позже здесь появятся и другие параметры.</p>
+      <p class="tl">Источник тот же, а вместо фильтра стоит <code>process</code>. Результат нужно сохранить в переменную типа <code>SingleOutputStreamOperator</code>, потому что метод <code>getSideOutput</code> есть именно у него.</p>
+      <p class="tl">Из той же переменной забираем поток по метке и направляем его в Kafka. Явный параметр <code>&lt;RejectedRecord&gt;</code> нужен компилятору, чтобы вывести тип обобщённого метода.</p>
+      <p class="tl">Основной поток пока печатаем в лог, правила появятся позже. У всех операторов есть <code>uid</code>, зачем это нужно, обсуждали в уроке 2.</p>
+      <p class="tl"><code>execute</code> собирает граф, здесь и сработает проверка типов, и отправляет задание на кластер.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 6. Тест без кластера</h2>
+<p>Harness (тестовый стенд) это обёртка из тестового jar Flink, которая запускает один оператор прямо в JVM теста. Он отдаёт в функцию записи и показывает все её выходы, в том числе побочные.</p>
+<div data-code="lesson-03/src/test/java/dev/study/payguard/pipeline/ParsePaymentFunctionTest.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-03/src/test/java/dev/study/payguard/pipeline/ParsePaymentFunctionTest.java" data-lines="22-44"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>forProcessFunction</code> создаёт и открывает стенд, поэтому <code>open</code> вызывать вручную не надо. Новый стенд перед каждым тестом исключает влияние тестов друг на друга.</p>
+      <p class="tl">Подаём корректный JSON. Второй аргумент <code>processElement</code> это время записи, здесь оно ни на что не влияет.</p>
+      <p class="tl">Сравниваем основной выход с ожидаемым объектом, record сам сравнивается по полям. Если в побочный выход ничего не писали, стенд возвращает для него <code>null</code>.</p>
+      <p class="tl">Подаём сломанный JSON. Основной выход пуст, а из очереди побочного выхода достаём запись и проверяем исходный текст и причину.</p>
+    </div>
+  </div>
+</div>
+<pre data-lang="bash" data-title="терминал">./gradlew test</pre>
+<p>С заглушкой валидатора пройдут шесть тестов, два из этого файла и четыре из <code>RawRecordSourceTest</code> урока 1. Отчёт лежит в <code>build/reports/tests/test/index.html</code>.</p>
+
+<h2>Шаг 7. Запусти и проверь DLQ</h2>
+<p>Собери jar и подними стенд, порядок прежний. Если стенд уже работает, <code>docker compose up</code> ничего не сломает. Новый jar появится в смонтированной папке сам.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list</pre>
+<p>Если от прошлого урока осталось задание, останови его через <code>flink cancel &lt;JobID&gt;</code>. Теперь отправь новое и запусти генератор с одним процентом битых записей. Флаг <code>--bad</code> задаёт эту долю. Источник читает с конца топика, поэтому задание запускай первым.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --bad 0.01"</pre>
+<pre data-lang="text" data-title="вывод submit.sh" data-output>Job has been submitted with JobID 013a070d18cd8a75bfd8bd29657cd664</pre>
+<p>Из второго терминала прочитай начало топика. <code>--from-beginning</code> велит читать с начала, <code>--max-messages</code> останавливает чтение после трёх записей, <code>2&gt;/dev/null</code> прячет служебный итог.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic payments.dlq --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085151733}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085158791}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085160285}</pre>
+<p>Поле <code>raw</code> хранит исходный текст записи, кавычки внутри него экранированы, потому что вся строка лежит внутри JSON. Такую битую запись подмешивает генератор, вот его константа.</p>
+<div data-code="lesson-03/src/main/java/dev/study/payguard/loadgen/RawRecordSource.java" data-lines="11-11"></div>
+<p>Посмотрим на задание глазами REST. Сохрани его идентификатор в переменную и запроси описание.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> parse-payment -> (dlq-sink: Writer -> dlq-sink: Committer, Sink: stdout)","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Вершина всего одна. Стрелки показывают цепочку операторов, а скобки обозначают развилку на два направления, это и есть основной и побочный выходы. Приёмник <code>dlq-sink</code> раскрылся в два оператора. <code>Writer</code> отправляет записи, а <code>Committer</code> нужен режиму exactly-once, в режиме <code>AT_LEAST_ONCE</code> его метод <code>prepareCommit</code> в <code>KafkaWriter</code> возвращает пустой список. Подробнее об этом поговорим в уроке 12.</p>
+<p>Теперь метрики вершины по подзадачам. Параметр <code>get</code> перечисляет нужные счётчики, а <code>agg</code> просит сложить их по подзадачам.</p>
+<pre data-lang="bash" data-title="терминал">V=$(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[0].id')
+curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=numRecordsIn,numRecordsOut,busyTimeMsPerSecond,backPressuredTimeMsPerSecond&amp;agg=min,max,sum" | jq -c .</pre>
+<pre data-lang="json" data-title="вывод" data-output>[{"id":"numRecordsIn","min":8573.0,"max":9207.0,"sum":17780.0},{"id":"numRecordsOut","min":84.0,"max":92.0,"sum":176.0},{"id":"busyTimeMsPerSecond","min":5.0,"max":6.0,"sum":11.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]</pre>
+<p>Это числа с нашего стенда, у тебя они будут другими. На вход пришло 17780 записей, и они примерно поровну разошлись по двум подзадачам. Подзадачи заняты 5-6 мс в секунду, а обратного давления нет, запас огромный.</p>
+<p>На выход вершины записано 176 записей, это около 1 %. На первый взгляд странно, ведь в <code>stdout</code> ушли почти все платежи. Причина в определении этого счётчика.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Оператор приёмника передаёт задаче свой счётчик. Комментарий объясняет смысл, это записи, отправленные во внешнюю систему.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/sink/SinkWriterOperator.java" data-lines="145-149" data-must="reuseOutputMetricsForTask"></div>
+<p>Счётчик увеличивает код самого приёмника. Приёмник Kafka делает это на каждой отправке. В коде <code>PrintSinkOutputWriter</code> ни одного счётчика нет, поэтому <code>stdout</code> в сумму не попадает, и 176 здесь означает записи в DLQ.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaWriter.java" data-lines="170-178" data-must="numRecordsOutCounter.inc()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/rest_api/" target="_blank" rel="noopener">REST API</a></p>
+</div>
+
+<p>Осталось убедиться, что битые записи не причинили заданию вреда и что чекпоинтов действительно пока нет.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:8081/jobs/$JOB/exceptions | jq -c '.exceptionHistory.entries'
+curl -s localhost:8081/jobs/$JOB/checkpoints | jq -c '{counts, recent: .history}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>[]
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}</pre>
+<p>Список исключений пуст, хотя через функцию прошли сотни битых записей. Нули во второй строке напоминают об ограничении из теории про гарантию <code>AT_LEAST_ONCE</code>.</p>
+
+<h2>Что ещё попадёт в DLQ</h2>
+<p>Мы прогнали функцию через тестовый стенд с разными входами. Все эти строки дают основной выход пустым и причину <code>bad-json</code>, задание продолжает работу.</p>
+<table>
+<thead><tr><th>Что пришло</th><th>Почему отказ</th></tr></thead>
+<tbody>
+<tr><td>Обрезанный JSON</td><td>Ошибка синтаксиса</td></tr>
+<tr><td>Пустая строка или только пробелы</td><td>Нет данных для разбора</td></tr>
+<tr><td><code>[1,2]</code> или <code>123</code></td><td>Корректный JSON другой формы</td></tr>
+<tr><td><code>"amountMinor":"abc"</code></td><td>Строку нельзя превратить в <code>long</code></td></tr>
+<tr><td>Правильный платёж с лишним полем</td><td>В Jackson по умолчанию включён <code>FAIL_ON_UNKNOWN_PROPERTIES</code></td></tr>
+</tbody>
+</table>
+<p>Последняя строка важна для продакшена. Добавит партнёр новое поле, и задание продолжит работать, но все его платежи окажутся в DLQ. Поэтому на рост этого топика нужна сигнализация. Её мы настроим в уроке 17, а решение про лишние поля принимай осознанно.</p>

@@ -1,0 +1,10 @@
+<h2>Задание. Блокировка стран</h2>
+<p>В <code>RuleConfig</code> уже есть поле <code>blockedCountries</code>, но <code>DynamicRules</code> его не читает. Допиши правило, которое срабатывает на платежи из заблокированных стран.</p>
+<ol>
+  <li>Если страна платежа есть в списке <code>blockedCountries</code> текущих настроек, функция выдаёт алерт. Идентификатор правила <code>blocked-country</code>, объяви его константой рядом с <code>VELOCITY_RULE</code>. В поле <code>detail</code> напиши, какая страна заблокирована.</li>
+  <li>Алерт выдаётся на каждый такой платёж, без ограничения «раз в минуту», как у velocity.</li>
+  <li>Сообщение без поля <code>blockedCountries</code> не должно ронять задание.</li>
+  <li>Добавь в <code>DynamicRulesTest</code> тест. Пришли правило с одной страной и проверь, что первый же платёж из неё даёт ровно один алерт с идентификатором <code>blocked-country:&lt;paymentId&gt;</code>.</li>
+</ol>
+<p>Готово, если <code>./gradlew test</code> проходит, а на стенде после правила с <code>["PL"]</code> в <code>fraud.alerts</code> появляются алерты <code>blocked-country</code>, примерно на каждый пятый платёж.</p>
+<p>Подсказки. Заготовка <code>paymentOnCard</code> из <code>testing/Payments</code> создаёт платёж из страны DE. Подумай, что Jackson положит в поле record, если в JSON такого поля нет. Помни, что настройки в <code>processElement</code> только читаются, менять список нельзя.</p>

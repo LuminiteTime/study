@@ -1,0 +1,144 @@
+<h2>Что будет в конце</h2>
+<p>В стенде появится PostgreSQL со справочником продавцов. Каждый алерт перед отправкой в <code>fraud.alerts</code> получит поле <code>merchantRisk</code> из базы через асинхронный оператор с кэшем. Генератор начнёт присылать подтверждения от банка в топик <code>payments.confirmations</code>, а задание будет соединять их с платежами и писать пары в <code>payments.confirmed</code>.</p>
+<p>Правило «подтверждение не пришло» относится к заданию. Файлы <code>UnconfirmedPaymentFunction</code> и его тест пока не создавай.</p>
+
+<h2>Шаг 1. PostgreSQL в Compose</h2>
+<p>Добавь в <code>docker-compose.yml</code> службу базы, переменные подключения и два новых топика.</p>
+<div data-diff="lesson-08/docker-compose.yml lesson-09/docker-compose.yml"></div>
+<p>Переменные <code>PAYGUARD_DB_*</code> добавлены в общий блок Flink. Их прочитает TaskManager, потому что соединение с базой открывается там, где работает подзадача. Образ PostgreSQL выполняет скрипты из <code>/docker-entrypoint-initdb.d</code>, когда каталог данных пуст. Том для данных базы мы не монтируем, поэтому после <code>docker compose down</code> справочник создаётся заново. Проверка <code>healthcheck</code> вызывает <code>pg_isready</code>, и флаг <code>--wait</code> дождётся, пока база начнёт принимать соединения.</p>
+<p>Сам скрипт создаёт таблицу и 50 продавцов. Уровень риска считается от номера продавца. Каждый десятый получает <code>HIGH</code>, каждый третий из оставшихся <code>MEDIUM</code>, остальные <code>LOW</code>.</p>
+<div data-code="lesson-09/sql/init.sql"></div>
+
+<h2>Шаг 2. Зависимости</h2>
+<div data-diff="lesson-08/build.gradle.kts lesson-09/build.gradle.kts"></div>
+<p>Драйвера PostgreSQL и пула соединений HikariCP в образе Flink нет, поэтому обе библиотеки идут через <code>implementation</code> и попадают в толстый jar. Пул нужен, чтобы восемь потоков обогащения не открывали соединение на каждый запрос.</p>
+
+<h2>Шаг 3. Модели и настройки</h2>
+<p>Алерт получает поле риска. Пока алерт не прошёл обогащение, в поле стоит <code>NOT_LOADED</code>. Значение <code>UNKNOWN</code> означает, что база не ответила или продавца в ней нет. Отдельные значения помогут отличить в топике сбой обогащения от алерта, который его не проходил.</p>
+<div data-diff="lesson-08/src/main/java/dev/study/payguard/model/FraudAlert.java lesson-09/src/main/java/dev/study/payguard/model/FraudAlert.java"></div>
+<p>Подтверждение банка и результат соединения это два новых record.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/model/PaymentConfirmation.java"></div>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/model/ConfirmedPayment.java"></div>
+<p>В настройки задания добавь имена двух топиков.</p>
+<div data-diff="lesson-08/src/main/java/dev/study/payguard/job/JobConfig.java lesson-09/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+
+<h2>Шаг 4. Справочник продавцов</h2>
+<p>Обогащение не должно знать про JDBC. Интерфейс <code>MerchantDirectory</code> позволяет тесту подставить справочник, который отвечает мгновенно, падает или зависает.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/MerchantDirectory.java"></div>
+<p>Реализация на JDBC берёт адрес и пароль из переменных окружения. Соединения пула открываются только для чтения, размер пула передаётся снаружи.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/JdbcMerchantDirectory.java"></div>
+
+<h2>Шаг 5. Асинхронное обогащение</h2>
+<p>Создай <code>pipeline/AlertEnrichment.java</code>.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/AlertEnrichment.java"></div>
+<p>Обрати внимание на конструктор. Функция пересылается на кластер в сериализованном виде, а <code>HikariDataSource</code> сериализовать нельзя. Поэтому в поле лежит <code>SerializableSupplier</code>, и сам справочник создаётся в <code>open</code>, уже в TaskManager. Все поля, которые создаются в <code>open</code>, помечены <code>transient</code>. С ошибкой <code>is not serializable</code> ты встречался в уроке 8, здесь её избегаем заранее.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/AlertEnrichment.java" data-lines="47-63"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>asyncInvoke</code> вызывается в потоке подзадачи на каждый алерт. Он должен вернуться быстро.</p>
+      <p class="tl">Сначала смотрим в кэш. Если риск продавца есть и ещё свежий, сразу завершаем запись готовым алертом. В базу не ходим.</p>
+      <p class="tl">Иначе отдаём запрос пулу из восьми потоков через <code>supplyAsync</code> и выходим из метода. Поток подзадачи свободен для следующей записи.</p>
+      <p class="tl">Когда пул получит ответ, <code>whenComplete</code> завершит запись. При ошибке базы вместо риска будет <code>UNKNOWN</code>, и счётчик <code>merchantLookupFailures</code> вырастет на единицу. Задание не упадёт.</p>
+      <p class="tl"><code>timeout</code> вызывается, если за 2 секунды ответа нет. Выдаём алерт с <code>UNKNOWN</code> вместо исключения, которое перезапустило бы задание.</p>
+    </div>
+  </div>
+</div>
+<p>Метод <code>complete</code> может вызваться дважды, если ответ базы пришёл одновременно с timeout. Оператор защищён от этого флагом <code>completed</code> в своём обработчике результата, второй вызов игнорируется.</p>
+
+<h2>Шаг 6. Подтверждения в генераторе</h2>
+<p>Генератор теперь для каждого платежа решает, пришлёт ли банк подтверждение. По умолчанию подтверждается 95 % платежей. Время подтверждения отстоит от времени платежа на случайную величину до трёх секунд.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/loadgen/ConfirmationMaker.java"></div>
+<div data-diff="lesson-08/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java lesson-09/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java"></div>
+<div data-diff="lesson-08/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java lesson-09/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java"></div>
+<p>Флаг <code>--confirm</code> задаёт долю подтверждённых платежей. С <code>--confirm 0.5</code> половина платежей останется без пары, это пригодится в задании.</p>
+
+<h2>Шаг 7. Interval join</h2>
+<p>Создай <code>pipeline/PaymentConfirmationJoin.java</code>.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/PaymentConfirmationJoin.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/PaymentConfirmationJoin.java" data-lines="17-25"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Метод принимает два потока и возвращает поток пар. Так он подключается в задании одной строкой и проверяется в тесте отдельно.</p>
+      <p class="tl">Обе стороны разбиты по <code>paymentId</code>. Interval join работает только на двух потоках с ключом, и ключи должны совпадать по типу.</p>
+      <p class="tl"><code>between(Duration.ZERO, MAX_DELAY)</code> означает, что подтверждение должно иметь время от момента платежа до пяти минут после него. Обе границы включены.</p>
+      <p class="tl"><code>ProcessJoinFunction</code> вызывается на каждую найденную пару и строит <code>ConfirmedPayment</code> с задержкой подтверждения.</p>
+      <p class="tl">Имя и uid вершины. uid понадобится, когда состояние соединения будет восстанавливаться из savepoint.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 8. Подключи всё в задании</h2>
+<p>В <code>PayGuardJob</code> появляются три константы обогащения. Размер пула соединений совпадает с числом потоков в <code>AlertEnrichment</code>, лишние соединения простаивали бы.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="45-47"></div>
+<p>Источник подтверждений и стратегия watermark для него. Подтверждения не проходят разбор с DLQ, поэтому для них подходит <code>LenientJsonSchema</code> из урока 8. Допуск беспорядка и idleness взяты из <code>PaymentWatermarks</code>, чтобы оба входа соединения понимали время одинаково.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="192-206"></div>
+<p>Соединение подключается к тому же потоку <code>payments</code> после дедупликации, что и окна. Поток подтверждений создаётся в <code>main</code>, его же возьмёт правило из задания.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="62-65"></div>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="115-121"></div>
+<p>Алерты обоих правил объединяются и проходят через асинхронный оператор перед приёмником. Объединение возвращает <code>fraudAlerts</code>, и в снапшоте оно уже содержит третий поток из задания. В практике метод вернёт только <code>dynamicAlerts.union(amountAlerts)</code>. Асинхронный оператор встаёт в <code>sinkAlerts</code> перед приёмником.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="158-169"></div>
+<p>Лямбда в конструкторе <code>AlertEnrichment</code> имеет тип <code>SerializableSupplier</code>, поэтому Java сделает её сериализуемой. Внутри она ссылается только на статическую константу, и вместе с функцией на кластер не уедет ничего лишнего. Не забудь импорты <code>AsyncDataStream</code>, <code>TimeUnit</code>, <code>Duration</code> и <code>WatermarkStrategy</code>.</p>
+
+<h2>Шаг 9. Тесты</h2>
+<p>Тест обогащения запускает настоящий асинхронный оператор на MiniCluster с тремя справочниками. Первый отвечает сразу, второй всегда бросает исключение, третий засыпает на минуту. Третий случай с timeout 200 мс проверяет, что зависшая база даёт <code>UNKNOWN</code> и задание при этом не падает.</p>
+<div data-code="lesson-09/src/test/java/dev/study/payguard/pipeline/AlertEnrichmentTest.java"></div>
+<p>Тест соединения проверяет границы интервала. Подтверждение p1 пришло через 2 секунды и соединяется. Подтверждение p2 пришло через 998 секунд, это больше пяти минут, и пары нет.</p>
+<div data-code="lesson-09/src/test/java/dev/study/payguard/pipeline/PaymentConfirmationJoinTest.java"></div>
+<pre data-lang="bash" data-title="терминал">./gradlew test</pre>
+
+<h2>Шаг 10. Собери и запусти</h2>
+<p>Сначала сборка, потом стенд. Compose создаст службу <code>postgres</code> и пересоздаст <code>kafka-init</code> с новыми топиками.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list</pre>
+<p>Останови задание прошлого урока командой <code>flink cancel &lt;JobID&gt;</code> и отправь новое. Генератор запусти во втором терминале.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --bad 0.01"</pre>
+<pre data-lang="text" data-title="вывод" data-output>Job has been submitted with JobID 4d6d6b03b004c5a5d4c28d75fe483736</pre>
+<p>Проверь справочник в базе. Ключ <code>-T</code> отключает псевдотерминал, вывод тогда удобно передавать дальше. Каждый <code>-c</code> выполняет одну команду.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T postgres psql -U payguard -d payguard \
+  -c '\dt' -c 'SELECT risk_level, count(*) FROM merchants GROUP BY risk_level'</pre>
+<pre data-lang="text" data-title="вывод" data-output>           List of relations
+ Schema |   Name    | Type  |  Owner
+--------+-----------+-------+----------
+ public | merchants | table | payguard
+(1 row)
+
+ risk_level | count
+------------+-------
+ MEDIUM     |    15
+ HIGH       |     5
+ LOW        |    30
+(3 rows)</pre>
+<p>Пять продавцов с номерами, кратными десяти, получили <code>HIGH</code>. Из оставшихся 45 номеров на три делится 15, это <code>MEDIUM</code>.</p>
+<p>Через минуту-другую посмотри на граф задания.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"Source: rules-config","parallelism":2,"status":"RUNNING"},{"name":"Source: payment-confirmations","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rules-dynamic","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"join-confirmations -> confirmed-sink: Writer -> confirmed-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rule-unconfirmed","parallelism":2,"status":"RUNNING"},{"name":"enrich-alerts -> alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Этот вывод снят со снапшота, где задание уже решено, поэтому в нём есть вершина <code>rule-unconfirmed</code>. У тебя её пока нет. Соединение <code>join-confirmations</code> сцеплено со своим приёмником, и <code>enrich-alerts</code> тоже. Перед обоими операторами стоит перераспределение, keyBy или объединение нескольких потоков, поэтому каждый начинает свою вершину.</p>
+<p>Теперь метрики двух новых вершин. Команда та же, что в уроке 6, меняется только начало имени вершины.</p>
+<pre data-lang="bash" data-title="терминал">for NAME in join-confirmations enrich-alerts; do
+  V=$(curl -s localhost:8081/jobs/$JOB | jq -r --arg n "$NAME" '.vertices[] | select(.name | startswith($n)) | .id')
+  curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=numRecordsIn,numRecordsOut,busyTimeMsPerSecond,backPressuredTimeMsPerSecond&amp;agg=min,max,sum" | jq -c .
+done</pre>
+<pre data-lang="json" data-title="вывод" data-output>[{"id":"numRecordsIn","min":16895.0,"max":16950.0,"sum":33845.0},{"id":"numRecordsOut","min":8125.0,"max":8162.0,"sum":16287.0},{"id":"busyTimeMsPerSecond","min":4.0,"max":5.0,"sum":9.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]
+[{"id":"numRecordsIn","min":25.0,"max":33.0,"sum":58.0},{"id":"numRecordsOut","min":25.0,"max":33.0,"sum":58.0},{"id":"busyTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]</pre>
+<p>Первая строка относится к соединению. На вход пришло 33845 записей, это платежи после дедупликации и подтверждения вместе. В том же прогоне <code>deduplicate</code> выдал 17214 платежей, источник подтверждений выдал 16659. На выход ушло 16287 пар, их записал приёмник <code>confirmed-sink</code>. Подтверждений больше, чем пар, на 372. Эта разница складывается из двух эффектов, которые видны в коде. Опоздавший больше чем на 10 секунд платёж отбрасывается в <code>isLate</code>, и его подтверждение остаётся без пары. Подтверждение дубликата, наоборот, даёт лишнюю пару. Подзадачи нагружены поровну, у <code>paymentId</code> нет горячего ключа.</p>
+<p>Вторая строка относится к обогащению. Через него прошло 58 алертов, ровно столько, сколько выдал <code>rules-dynamic</code>. Занятость 0 мс в секунду, асинхронный оператор почти всё время ждёт работы. Чекпоинты в стенде пока выключены, их включим в уроке 11, поэтому сохранение очереди в состоянии здесь ещё не участвует. Счётчик <code>merchantLookupFailures</code> ищи в Web UI на вкладке Metrics вершины <code>enrich-alerts</code>. Если он растёт, база отвечает с ошибками или не успевает за 2 секунды.</p>
+<p>Прочитай результат соединения и обогащённые алерты той же командой, что в уроке 6.</p>
+<pre data-lang="bash" data-title="терминал">for TOPIC in payments.confirmed fraud.alerts; do
+  docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+    --bootstrap-server localhost:9092 --topic $TOPIC --from-beginning --max-messages 3 2&gt;/dev/null
+done</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"paymentId":"32b69c01-33ad-25f0-5bdf-cf5dd3d6a016","merchantId":"m-0043","amountMinor":10662,"status":"APPROVED","confirmationDelayMs":1638}
+{"paymentId":"d68af3a1-6705-47c2-8833-b4376d099225","merchantId":"m-0040","amountMinor":37077,"status":"APPROVED","confirmationDelayMs":1107}
+{"paymentId":"77d7b4db-62cf-47ed-6969-e9e851a630d4","merchantId":"m-0044","amountMinor":38254,"status":"APPROVED","confirmationDelayMs":66}
+{"alertId":"velocity:d1fb0828-9f4e-117c-c56d-030f9826c04d","ruleId":"velocity","cardId":"c-4735","merchantId":"m-0010","paymentId":"d1fb0828-9f4e-117c-c56d-030f9826c04d","detail":"11 платежей за минуту","eventTimeMs":1794085961857,"merchantRisk":"HIGH"}
+{"alertId":"velocity:87e03309-430e-10d1-72be-3b4fffc3466e","ruleId":"velocity","cardId":"c-3878","merchantId":"m-0011","paymentId":"87e03309-430e-10d1-72be-3b4fffc3466e","detail":"11 платежей за минуту","eventTimeMs":1794085963440,"merchantRisk":"LOW"}
+{"alertId":"velocity:674bdffe-2c08-8c84-6cc0-1484c9220c12","ruleId":"velocity","cardId":"c-3876","merchantId":"m-0000","paymentId":"674bdffe-2c08-8c84-6cc0-1484c9220c12","detail":"11 платежей за минуту","eventTimeMs":1794085963986,"merchantRisk":"HIGH"}</pre>
+<p>Все задержки подтверждений меньше 3000 мс, как задано в генераторе. Риск в алертах совпадает с <code>init.sql</code>. Номера m-0010 и m-0000 делятся на десять и получили <code>HIGH</code>, номер m-0011 не делится ни на десять, ни на три и получил <code>LOW</code>. Значений <code>NOT_LOADED</code> и <code>UNKNOWN</code> в этих записях нет, база ответила на все запросы.</p>
+<p>Что будет, если остановить базу командой <code>docker compose stop postgres</code>, можно сказать по коду. Задание продолжит работать. Алерт по продавцу из кэша ещё до пяти минут получит прежний риск. Остальные алерты получат <code>UNKNOWN</code> не позже чем через 2 секунды, по ошибке из пула или по timeout, и счётчик ошибок начнёт расти. Мы этот сценарий на стенде не снимали, проверь его сам и верни базу командой <code>docker compose start postgres</code>.</p>

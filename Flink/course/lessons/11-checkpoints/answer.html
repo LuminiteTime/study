@@ -1,0 +1,13 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Скрипт повторяет начало <code>chaos-kill-tm.sh</code> и дальше делает один запрос к REST. Всю работу по форматированию берёт на себя <code>jq</code>.</p>
+<div data-code="lesson-11/scripts/checkpoint-report.sh"></div>
+<p>Флаг <code>jq -r</code> печатает строки без кавычек. Выражение выдаёт два результата через запятую. Первый это строка со счётчиками из <code>counts</code>. Второй разворачивает первые пять элементов <code>history</code> в отдельные строки. Список в <code>history</code> уже отсортирован от нового к старому, поэтому <code>.[:5]</code> даёт последние чекпоинты. Размеры приходят в байтах, делим на 1024 и округляем вниз.</p>
+<p>Поле <code>checkpointed_size</code> печатается как «записано», <code>state_size</code> как «состояние». Это те самые <code>BytesPersistedOfThisCheckpoint</code> и <code>TotalBytesPersisted</code>, которые отправляет <code>AsyncCheckpointRunnable</code>. На нашем стенде скрипт показал второй чекпоинт за 282 мс, записано 4591 КиБ при состоянии 5899 КиБ.</p>
+<p>Проверка. Запусти скрипт на работающем стенде, затем <code>scripts/chaos-kill-tm.sh</code>, затем скрипт ещё раз. Во второй раз в первой строке будет «восстановлений 1», а среди чекпоинтов появится строка со статусом <code>FAILED</code>.</p>
+<pre data-lang="bash" data-title="терминал">chmod +x scripts/checkpoint-report.sh
+scripts/checkpoint-report.sh
+scripts/chaos-kill-tm.sh
+scripts/checkpoint-report.sh</pre>
+</div>

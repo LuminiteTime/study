@@ -1,0 +1,202 @@
+<h2>Лаг растёт, а виноватым выглядит не тот оператор</h2>
+<p>Представь обычный вечер дежурства. Лаг Kafka у PayGuard растёт, чекпоинты вместо трёхсот миллисекунд идут по минуте. В Web UI одна вершина залита чёрным, это <code>deduplicate</code> с пометкой HIGH. Первое желание понятно. Поднять дедупликации параллелизм или переписать её состояние.</p>
+<p>Это ошибка, и в уроке мы воспроизведём её на стенде. Дедупликация почти ничего не делает. Она стоит, потому что ей некуда отдать записи. Тормозит оператор ниже по потоку, который пишет профиль карты в медленную внешнюю систему. Урок про то, как отличить жертву от причины, чем смотреть внутрь причины и что делать, когда причина в данных, у которых один ключ получает треть потока.</p>
+<p>Механику кредитов и буферов мы разобрали в уроке 4, выравнивание барьеров в уроке 11, сами метрики и алерты в уроке 17. Здесь мы ими пользуемся.</p>
+
+<h2>Пробка перед сужением</h2>
+<p>На трассе ремонт, из трёх полос осталась одна. Перед сужением машины стоят бампер к бамперу, хотя у каждой исправный мотор. За сужением дорога пустая, и водители там скучают. Само сужение работает на пределе, через него всё время кто-то едет.</p>
+<p>Если спросить водителя в хвосте пробки, почему он стоит, он скажет, что стоит машина впереди. Это правда, и она ничего не объясняет. Чтобы найти ремонт, надо ехать вдоль пробки вперёд до первого места, где машины движутся медленно и при этом никого перед собой не ждут.</p>
+<p>В задании Flink всё так же. Вершины выше узкого места стоят в backpressure, вершины ниже и рядом простаивают, а само узкое место занято всё время. Искать его нужно от источника вниз по потоку.</p>
+
+<h2>Три счётчика одной секунды</h2>
+<p>Каждая подзадача отчитывается тремя метриками. <code>idleTimeMsPerSecond</code> показывает, сколько миллисекунд из секунды она ждала входных данных. <code>backPressuredTimeMsPerSecond</code> показывает, сколько она ждала свободный буфер на выходе, урок 4 разбирал, откуда это ожидание берётся. <code>busyTimeMsPerSecond</code> это всё остальное время. В сумме выходит около 1000.</p>
+<p>Слово «всё остальное» здесь точное. Flink не измеряет занятость напрямую, он вычитает из секунды два ожидания. Поэтому в busy попадает любое время внутри твоей функции, включая сон, синхронный HTTP-запрос и паузу на запись в базу. Процессор при этом может быть свободен.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Метрика занятости регистрируется как вычисляемая величина. Посмотри на формулу. Таймер простоя и время backpressure складываются, а busy получается остатком до 1000.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/metrics/groups/TaskIOMetricGroup.java" data-lines="280-284" data-must="1000.0 - Math.min(busyTime, 1000.0)"></div>
+<p>Отсюда два вывода. Подзадача, которая спит в <code>Thread.sleep</code>, покажет busy 1000. Если busyTime выключен, метрика вернёт <code>NaN</code>, такое бывает у старых источников.</p>
+<p>Теперь REST-ручка <code>/backpressure</code>, которую рисует вкладка Back Pressure в Web UI. Она берёт те же миллисекунды, делит на 1000 и раскладывает по трём уровням.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/rest/handler/job/JobVertexBackPressureHandler.java" data-lines="195-215" data-must="backPressureRatio &lt;= 0.10"></div>
+<p>Значит, уровень <code>high</code> означает больше 500 мс ожидания в секунду. Когда на стенде ручка ответит <code>ratio 0.999</code>, это ровно те 999 мс из метрики, пересчитанные в долю.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/monitoring/back_pressure/" target="_blank" rel="noopener">Monitoring Back Pressure</a></p>
+</div>
+
+<p>У графа в Web UI есть особенность, о которой говорит документация. Вершина показывает максимум по подзадачам. Если одна подзадача занята на 1000, а три другие на 100, вершина всё равно будет красной. Такая картина говорит о перекосе данных, медленный код дал бы высокую занятость всем подзадачам. Перекос мы разберём в конце теории.</p>
+
+<h2>Найди узкое место сам</h2>
+<p>Ниже упрощённая модель нашего графа. Поток 200 платежей в секунду, у каждой вершины две подзадачи, значит, на подзадачу приходится 100 записей в секунду. Ползунок добавляет задержку в оператор <code>slow-down</code>, который в практике встанет после <code>card-profile</code>. Числа в модели посчитаны по той же формуле, что в <code>TaskIOMetricGroup</code>. Красная часть полосы это busy, тёмная это back, синяя это idle.</p>
+
+<div class="viz" id="viz-l18">
+  <p class="viz-title">Какая вершина тормозит задание</p>
+  <div class="viz-controls">
+    <label>Задержка slow-down на запись <input type="range" id="viz-l18-slow" min="0" max="30" step="1" value="5"> <span id="viz-l18-slow-value">5 мс</span></label>
+    <button class="primary" id="viz-l18-walk" type="button">Шаг поиска</button>
+    <button id="viz-l18-reset" type="button">Сначала</button>
+  </div>
+  <svg id="viz-l18-svg" role="img" aria-label="Граф из пяти вершин. Источник передаёт данные дедупликации, она передаёт их трём веткам. У каждой вершины полоса из занятости, ожидания выхода и простоя."></svg>
+  <p class="viz-note" id="viz-l18-result">Двигай ползунок и смотри, как меняется цвет вершин.</p>
+</div>
+
+<p>Пока задержка меньше 10 мс, подзадача успевает за свои 100 записей, и граф синий. Стоит перейти этот порог, и картина переворачивается сразу во всём графе. Узкий оператор краснеет. Источник и дедупликация становятся тёмными, хотя их работа не изменилась. Соседние ветки синеют сильнее, потому что дедупликация стала отдавать им меньше записей.</p>
+<p>Правило поиска выходит такое. Иди от источника вниз и остановись на первой вершине, у которой busy высокий, а back около нуля. Тёмные вершины перед ней ни в чём не виноваты. Если такое состояние продержится пять минут, правило <code>PayGuardBackpressure</code> из урока 17 сработает именно на дедупликации. Алерт показывает, откуда начать поиск, дальше по графу ты идёшь сам.</p>
+
+<h2>Что внутри узкого места</h2>
+<p>Метрики говорят, где тормозит. Почему тормозит, показывает flame graph. Это картинка из стеков вызовов, собранных много раз подряд. Каждый метод нарисован полосой, и её ширина пропорциональна тому, в скольких снимках стека он встретился. Широкая полоса наверху стопки означает метод, в котором поток проводит больше всего времени.</p>
+<p>Во Flink flame graph строит JobManager. Он просит TaskManager несколько раз снять стек потока подзадачи и складывает результаты. Функция выключена по умолчанию, потому что снятие стеков само стоит ресурсов.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Ключ включения и его значение по умолчанию.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/RestOptions.java" data-lines="227-233" data-must="rest.flamegraph.enabled"></div>
+<p>Тип графа выбирается по состоянию потока Java в момент снимка. On-CPU берёт потоки в состоянии <code>RUNNABLE</code>, Off-CPU берёт ждущие и заблокированные. Полный граф (в интерфейсе он называется Mixed) берёт всё.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/webmonitor/threadinfo/VertexFlameGraphFactory.java" data-lines="48-75" data-must="Thread.State.TIMED_WAITING"></div>
+<p>Поток в <code>Thread.sleep</code> или в ожидании ответа по сокету находится в <code>TIMED_WAITING</code> или <code>WAITING</code>. Значит, наш тормоз в On-CPU графе не появится вовсе, хотя busy у вершины 1000. Его покажут Off-CPU и полный граф.</p>
+<p>Снимки всех подзадач вершины складываются в один граф. Это объясняет число, которое мы увидим на стенде.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/webmonitor/threadinfo/VertexFlameGraphFactory.java" data-lines="79-86" data-must="getSamplesBySubtask"></div>
+<p>По умолчанию <code>rest.flamegraph.num-samples</code> равен 100. У вершины две подзадачи, и корень графа насчитает 200 снимков. Документация предупреждает о побочном эффекте сложения. Если одна подзадача из многих занята на 100 %, её вклад растворится, и для поиска перекоса надо открывать граф отдельной подзадачи.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/debugging/flame_graphs/" target="_blank" rel="noopener">Flame Graphs</a>, <a href="https://www.brendangregg.com/flamegraphs.html" target="_blank" rel="noopener">Brendan Gregg, Flame Graphs</a></p>
+</div>
+
+<p>Что обычно находится в широкой полосе у медленного оператора.</p>
+<ul>
+  <li>Синхронный вызов внешней системы. Полоса уходит в сокет или драйвер базы, и её видно в Off-CPU графе. Лечится асинхронным вводом-выводом из урока 9 или пакетной записью.</li>
+  <li>Сериализация. Между вершинами записи всегда превращаются в байты. Если тип ушёл в Kryo, в On-CPU графе вырастают методы <code>KryoSerializer</code>. В PayGuard такое невозможно с урока 3, где мы запретили обобщённые типы.</li>
+  <li>Доступ к состоянию. В RocksDB каждое чтение и запись проходит через сериализацию и может читать диск. Об этом урок 19.</li>
+  <li>Сборка мусора. Её нет в стеке задачи, зато её видно в метриках JVM из урока 17.</li>
+</ul>
+
+<p>У сериализации есть ещё одно место, о котором мало кто помнит. Внутри цепочки операторов записи по сети не идут, но Flink всё равно копирует каждую запись перед следующим оператором цепочки. Копию снимает тот же сериализатор типа.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>При сборке цепочки Flink выбирает выход оператора. Без повторного использования объектов (object reuse) берётся копирующий вариант.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/OperatorChain.java" data-lines="909-924" data-must="new CopyingChainingOutput&lt;&gt;("></div>
+<p>И сама копия перед передачей следующему оператору.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/CopyingChainingOutput.java" data-lines="64-75" data-must="serializer.copy(castRecord.getValue())"></div>
+<p>Настройка <code>pipeline.object-reuse</code> убирает эту копию. Описание ключа честно предупреждает, что код, который хранит ссылку на входной объект или меняет объект после отправки, начнёт ломаться. Для неизменяемых record-типов PayGuard риск маленький, но в курсе ключ не включён, и выигрыш надо мерить на своём задании.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/PipelineOptions.java" data-lines="200-206" data-must="pipeline.object-reuse"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/execution/execution_configuration/" target="_blank" rel="noopener">Execution Configuration</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/types_serialization/" target="_blank" rel="noopener">Data Types &amp; Serialization</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/state_backends/" target="_blank" rel="noopener">State Backends</a></p>
+</div>
+
+<h2>Чекпоинты в пробке</h2>
+<p>Из урока 11 ты знаешь, почему при backpressure выровненный чекпоинт медленный. Барьер стоит в очереди канала за всеми буферами, которые там скопились. Unaligned-чекпоинт разрешает барьеру обогнать эти буферы и сохраняет их вместе со снимком. Есть третий путь, его в уроке 11 не было. Можно сделать так, чтобы очередь перед барьером стала короче.</p>
+<p>Этим занимается buffer debloating. Подзадача-получатель меряет свою пропускную способность и подбирает размер сетевого буфера так, чтобы данные в полёте (in-flight data) разбирались примерно за заданное время. По умолчанию это одна секунда. Количество буферов при этом не меняется, уменьшается только их полезный размер.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Целевое время и выключатель. Механизм по умолчанию выключен.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/TaskManagerOptions.java" data-lines="480-497" data-must="taskmanager.network.memory.buffer-debloat.target"></div>
+<p>Сама формула в <code>BufferDebloater</code>. Желаемый объём данных в полёте равен пропускной способности, умноженной на целевое время. Новый размер буфера сглаживается скользящим средним и делится на число занятых буферов.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/throughput/BufferDebloater.java" data-lines="99-113" data-must="(currentThroughput * targetTotalTime) / MILLIS_IN_SECOND"></div>
+<p>Пересчёт запускает входной шлюз подзадачи. Он берёт измеренную пропускную способность и рассылает новый размер всем своим каналам, а те сообщают его отправителям.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/partition/consumer/SingleInputGate.java" data-lines="461-472" data-must="recalculateBufferSize(currentThroughput, getBuffersInUseCount())"></div>
+<p>Медленный получатель с пропускной способностью в десятки записей в секунду получит маленькие буферы. Барьеру придётся ждать в очереди меньше байтов, и выравнивание закончится быстрее.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/memory/network_mem_tuning/#the-buffer-debloating-mechanism" target="_blank" rel="noopener">The Buffer Debloating Mechanism</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/checkpointing_under_backpressure/" target="_blank" rel="noopener">Checkpointing under backpressure</a></p>
+</div>
+
+<p>Компромисс между двумя режимами из урока 11 задаёт таймаут выравнивания. Чекпоинт начинается выровненным и переключается на unaligned, если выравнивание затянулось.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Ключ работает только при включённых unaligned-чекпоинтах. Значение по умолчанию 0, то есть с включённым unaligned каждый чекпоинт сразу стартует невыровненным.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/CheckpointingOptions.java" data-lines="564-584" data-must="execution.checkpointing.aligned-checkpoint-timeout"></div>
+<p>Если поставить, например, 10 секунд, спокойные чекпоинты останутся выровненными и маленькими, а в пробке переключатся и не будут ждать минуту.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/checkpointing_under_backpressure/" target="_blank" rel="noopener">Checkpointing under backpressure</a></p>
+</div>
+
+<p>Вот что получилось на стенде при одной и той же нагрузке 200 платежей в секунду и задержке 20 мс на запись. Колонка про данные взята из статистики чекпоинта Processed (persisted) in-flight data.</p>
+<table>
+<thead><tr><th>Режим</th><th>Длительность чекпоинта</th><th>Данные в полёте</th><th>Лаг Kafka в момент замера</th></tr></thead>
+<tbody>
+<tr><td>Без тормоза, выровненный</td><td>223-367 мс</td><td>почти нет</td><td>0</td></tr>
+<tr><td>Тормоз, выровненный</td><td>25651 и 61137 мс</td><td>очередь перед барьером</td><td>1340 и растёт</td></tr>
+<tr><td>Тормоз, unaligned</td><td>129-293 мс</td><td>записано 705-1011 КиБ</td><td>10760</td></tr>
+<tr><td>Тормоз, выровненный с debloat</td><td>1540-2368 мс</td><td>до барьера проходит 29-54 КиБ</td><td>16421</td></tr>
+</tbody>
+</table>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Ни один режим не лечит перегрузку</strong>
+    <p>Посмотри на последнюю колонку. Лаг растёт при любом режиме, потому что оператор по-прежнему успевает 50 записей в секунду на подзадачу при нужных 100. Unaligned и debloat спасают чекпоинты, а с ними и время восстановления. Саму пробку убирает только работа с узким местом, то есть быстрее код, больше параллелизма или асинхронный вызов.</p>
+  </div>
+</div>
+
+<p>Как выбирать. Unaligned даёт самые короткие чекпоинты, но пишет в снимок данные в полёте, и на широком графе это сотни мегабайт. Debloat ничего лишнего не пишет и ускоряет выровненные чекпоинты в десятки раз, зато реагирует на изменение потока с задержкой и плохо работает на операторах с несколькими входами разной скорости, об этом прямо сказано в документации. Их можно включать вместе, тогда unaligned-чекпоинты станут меньше.</p>
+
+<h2>Горячий ключ</h2>
+<p>Вторая частая причина красной вершины лежит в данных. Генератор отдаёт продавцу <code>m-0000</code> 30 % платежей. Окно <code>merchant-stats-1m</code> группирует по продавцу, все записи одного ключа обрабатывает одна подзадача, и при параллелизме 4 разброс входа между подзадачами на стенде получился 11476 против 29551, в 2,6 раза. Урок 4 показал, почему больше параллелизма здесь не поможет.</p>
+<p>Лечение называется двухфазной агрегацией с солью (salting). Горячий ключ на время разбивают на части. К продавцу приписывают номер от 0 до N-1, и записи одного продавца расходятся по N разным ключам. Первая фаза считает частичный итог по каждой части. Вторая фаза группирует частичные итоги по настоящему продавцу и складывает их. Во вторую фазу приходит N записей на продавца за окно вместо тысяч платежей.</p>
+
+<svg viewBox="0 0 720 230" role="img" aria-label="Платежи продавца m-0000 расходятся по ключам с солью от 0 до 15 на четыре подзадачи первой фазы. Частичные итоги сходятся во второй фазе в один ключ m-0000." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l18" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="12" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="80" width="140" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="80" y="108" font-weight="700">m-0000</text><text x="80" y="126">30 % платежей</text>
+    <text x="300" y="20" font-weight="700">Фаза 1, ключ m-0000#соль</text>
+    <rect x="230" y="32" width="140" height="38" rx="6" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="300" y="56">#0, #4, #8, #12</text>
+    <rect x="230" y="78" width="140" height="38" rx="6" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="300" y="102">#1, #5, #9, #13</text>
+    <rect x="230" y="124" width="140" height="38" rx="6" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="300" y="148">#2, #6, #10, #14</text>
+    <rect x="230" y="170" width="140" height="38" rx="6" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="300" y="194">#3, #7, #11, #15</text>
+    <text x="300" y="225" font-size="11" fill="var(--color-text-secondary)">четыре подзадачи, раскладка условная</text>
+    <text x="490" y="100" font-size="11">16 частичных итогов</text><text x="490" y="116" font-size="11">за минуту</text>
+    <text x="630" y="60" font-weight="700">Фаза 2</text>
+    <rect x="565" y="80" width="140" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="635" y="108" font-weight="700">m-0000</text><text x="635" y="126">сумма частей</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l18)">
+    <path d="M150 115L228 51"/><path d="M150 115L228 97"/><path d="M150 115L228 143"/><path d="M150 115L228 189"/>
+    <path d="M370 51L563 105"/><path d="M370 97L563 112"/><path d="M370 143L563 118"/><path d="M370 189L563 125"/>
+  </g>
+</svg>
+
+<p>Соль подходит не для каждой агрегации. Сумма и количество складываются из частей без потерь. Среднее надо считать как сумму и количество и делить уже во второй фазе. Число уникальных значений из частей не складывается, для него Flink SQL использует отдельный приём с корзинами по значению (split distinct).</p>
+<p>В Flink SQL двухфазная агрегация уже встроена. В плане из урока 14 ты видел пару <code>LocalWindowAggregate</code> и <code>GlobalWindowAggregate</code>. Там первая фаза частично складывает записи ещё до сети, на стороне отправителя. В DataStream API такой оптимизации нет, ключ после <code>keyBy</code> закреплён за своей группой ключей, и разложить его можешь только ты сам.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/tuning/#local-global-aggregation" target="_blank" rel="noopener">Local-Global Aggregation</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/tuning/#split-distinct-aggregation" target="_blank" rel="noopener">Split Distinct Aggregation</a></p>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming медленный приёмник делает длиннее каждый micro-batch. Следующий batch стартует позже и забирает накопившиеся смещения. Чтобы batch не разрастался, его ограничивают опцией источника Kafka <code>maxOffsetsPerTrigger</code>. Чтобы найти медленное место, смотрят длительность стадий и задач в Spark UI.</p>
+<p>Во Flink конвейер непрерывный, поэтому задержка одного оператора сразу превращается в backpressure по всему графу выше него. Ограничитель скорости здесь не нужен, источник сам перестаёт читать быстрее, чем граф успевает обработать. Для перекоса в пакетном Spark есть адаптивное выполнение запросов, которое умеет делить перекошенную партицию при соединении. В DataStream Flink такой автоматики нет, и для горячего ключа ты пишешь две фазы руками.</p>
+<p class="doc-links">Документация: <a href="https://spark.apache.org/docs/latest/streaming/structured-streaming-kafka-integration.html" target="_blank" rel="noopener">Structured Streaming + Kafka</a>, <a href="https://spark.apache.org/docs/latest/sql-performance-tuning.html#optimizing-skew-join" target="_blank" rel="noopener">Spark, Optimizing Skew Join</a></p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l18">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Источник и enrich-alerts ждут выходной буфер, то есть они жертвы. Первая вершина по потоку с высоким busy и нулевым back это приёмник, его и надо разбирать."
+       data-explanation-wrong="Вспомни правило поиска. Высокий back говорит, что вершина ждёт следующую. Ищи первую вершину, которая занята сама и никого не ждёт.">
+    <h3 class="quiz-question">В графе три вершины подряд. Источник показывает back 970, enrich-alerts back 940, alerts-sink busy 990 и back 0. Куда смотреть в первую очередь?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>На источник, у него самый большой back</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>На alerts-sink, это первая вершина, которая занята сама и никого не ждёт</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>На enrich-alerts, она посередине и тормозит обоих соседей</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Busy считается остатком секунды, поэтому ожидание ответа базы внутри функции попадает в него. Поток в это время ждёт сокет и в On-CPU граф не попадает, его покажет Off-CPU."
+       data-explanation-wrong="Вспомни, как вычисляется busy и какие состояния потока берёт каждый тип flame graph.">
+    <h3 class="quiz-question">У вершины busy 1000, но в On-CPU flame graph почти пусто, а загрузка процессора TaskManager 5 %. Что вероятнее всего происходит?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Метрика busy сломана, ей нельзя верить</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Подзадача ждёт свободный выходной буфер</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Функция синхронно ждёт внешнюю систему, это видно в Off-CPU графе</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Unaligned-чекпоинт перестанет ждать очередь, но оператор всё так же не успевает, и лаг продолжит расти. Чинить надо само узкое место."
+       data-explanation-wrong="Посмотри на колонку с лагом в таблице замеров. Меняет ли режим чекпоинтов пропускную способность оператора?">
+    <h3 class="quiz-question">Коллега включил unaligned-чекпоинты, и они стали идти 200 мс вместо минуты. Он закрывает инцидент с растущим лагом. Что ты ему скажешь?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Чекпоинты вылечены, а лаг будет расти дальше, узкое место осталось</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Всё правильно, unaligned убирает backpressure</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Надо было включить debloat, он ускоряет оператор</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

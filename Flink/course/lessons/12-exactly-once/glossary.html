@@ -1,0 +1,28 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="at-least-once|AT_LEAST_ONCE">At-least-once</dt><dd>Гарантия, при которой ни одна запись не теряется, но после сбоя часть записей может прийти повторно.</dd>
+<dt data-match="exactly-once|EXACTLY_ONCE">Exactly-once</dt><dd>Гарантия, при которой каждое событие влияет на результат ровно один раз. Для состояния Flink её дают чекпоинты, для внешней системы нужен транзакционный или идемпотентный приёмник.</dd>
+<dt data-match="end-to-end">End-to-end exactly-once</dt><dd>Exactly-once от источника до внешнего приёмника. Требует воспроизводимого источника и транзакционного или идемпотентного приёмника.</dd>
+<dt data-match="двухфазн|two-phase|2PC">Двухфазная фиксация (two-phase commit)</dt><dd>Протокол из подготовки и фиксации. Во Flink подготовка идёт на барьере чекпоинта, фиксация после его завершения.</dd>
+<dt data-match="предкоммит|pre-commit">Предкоммит (pre-commit)</dt><dd>Первая фаза. Writer сбрасывает буферы, помечает транзакцию подготовленной и передаёт её описание в Committer.</dd>
+<dt data-match="SinkWriter|Writer">SinkWriter</dt><dd>Оператор приёмника, который пишет записи во внешнюю систему. В транзакционном режиме пишет так, чтобы данные ещё не были видны.</dd>
+<dt data-match="Committer">Committer</dt><dd>Оператор приёмника, который делает подготовленные данные видимыми после завершения чекпоинта. Повторная фиксация не должна ничего менять.</dd>
+<dt data-match="committable">Committable</dt><dd>Описание подготовленных данных, которое Writer передаёт Committer. У Kafka это имя транзакции, producerId и эпоха.</dd>
+<dt data-match="notifyCheckpointComplete">notifyCheckpointComplete</dt><dd>Вызов, который оператор получает после того, как JobManager объявил чекпоинт завершённым. По нему Committer фиксирует транзакции.</dd>
+<dt data-match="транзакц|transaction">Транзакция Kafka</dt><dd>Группа записей одного продюсера, которая становится видна потребителям read_committed целиком после фиксации или не становится видна вовсе.</dd>
+<dt data-match="transactional.id|transactionalId|префикс">transactional.id</dt><dd>Имя транзакционного продюсера в Kafka. Flink собирает его из префикса, номера подзадачи и номера чекпоинта.</dd>
+<dt data-match="producerId|эпох">producerId и эпоха</dt><dd>Числа, по которым брокер узнаёт продюсера. Новый продюсер с тем же transactional.id получает новую эпоху, и старый больше не может фиксировать.</dd>
+<dt data-match="fencing|ProducerFencedException">Fencing</dt><dd>Вытеснение старого продюсера новым с тем же transactional.id. Попытка старого продолжить заканчивается ProducerFencedException.</dd>
+<dt data-match="isolation.level|read_committed|read_uncommitted">isolation.level</dt><dd>Настройка потребителя Kafka. read_uncommitted, значение по умолчанию, отдаёт всё, включая прерванные транзакции. read_committed отдаёт только зафиксированные.</dd>
+<dt data-match="LSO|last stable offset">LSO (last stable offset)</dt><dd>Смещение перед первой открытой транзакцией в партиции. Потребитель read_committed не читает дальше него.</dd>
+<dt data-match="transaction.timeout.ms">transaction.timeout.ms</dt><dd>Настройка продюсера Kafka. Через это время брокер сам прерывает незафиксированную транзакцию. Приёмник Flink по умолчанию ставит час.</dd>
+<dt data-match="transaction.max.timeout.ms">transaction.max.timeout.ms</dt><dd>Настройка брокера Kafka, предел для transaction.timeout.ms. По умолчанию 15 минут.</dd>
+<dt data-match="__transaction_state">__transaction_state</dt><dd>Внутренний топик Kafka, где брокер хранит состояние транзакций. Без постоянного тома теряется при перезапуске брокера.</dd>
+<dt data-match="InvalidPidMappingException">InvalidPidMappingException</dt><dd>Ошибка Kafka, когда producerId не связан с transactional.id на брокере. У нас возникла после потери журнала транзакций.</dd>
+<dt data-match="идемпотент|idempot">Идемпотентность</dt><dd>Свойство операции, при котором повторное выполнение даёт тот же результат, что и однократное.</dd>
+<dt data-match="upsert|ON CONFLICT">Upsert</dt><dd>Вставка, которая при существующем ключе обновляет строку. В PostgreSQL пишется как INSERT ... ON CONFLICT DO UPDATE.</dd>
+<dt data-match="детерминирован">Детерминированный идентификатор</dt><dd>Идентификатор, который вычисляется из содержимого записи и совпадает при повторной обработке. У нас alertId из правила и платежа.</dd>
+<dt data-match="XA">XA-транзакция</dt><dd>Стандарт распределённых транзакций для баз данных. JDBC-приёмник Flink использует его в режиме exactly-once.</dd>
+<dt data-match="JDBC">JDBC</dt><dd>Стандартный интерфейс Java для работы с реляционными базами. Коннектор Flink для него выходит отдельно, как и коннектор Kafka.</dd>
+<dt data-match="PostgreSQL|Postgres">PostgreSQL</dt><dd>Реляционная база данных. В проекте хранит справочник продавцов и итоги по окнам.</dd>
+</dl>

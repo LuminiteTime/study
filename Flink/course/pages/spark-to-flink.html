@@ -1,0 +1,58 @@
+<section class="page" id="spark-to-flink"><div class="page-inner">
+<p class="lesson-eyebrow">Справка</p>
+<h1 class="lesson-title">Spark и Flink, словарь перевода</h1>
+<p class="lesson-lead">Если ты думаешь в терминах Spark, эта таблица подскажет ближайший аналог во Flink и отметит, где аналогия подводит. Подробности в указанных уроках.</p>
+
+<h2>Устройство кластера</h2>
+<div class="lesson-panel active" style="display:block">
+<table>
+<thead><tr><th>Spark</th><th>Flink</th><th>Где аналогия подводит</th><th>Урок</th></tr></thead>
+<tbody>
+<tr><td>Driver</td><td>JobManager и клиент</td><td>Драйвер живёт всё время работы приложения и исполняет твой код. Клиент Flink только строит граф и отправляет его, дальше работает JobManager.</td><td>2</td></tr>
+<tr><td>Executor</td><td>TaskManager</td><td>Экзекутор обычно привязан к одному приложению. TaskManager в режиме session обслуживает несколько заданий.</td><td>2</td></tr>
+<tr><td>Core и task slot</td><td>Слот (task slot)</td><td>Слот делит память TaskManager, а процессорные ядра между слотами не делятся жёстко. Несколько операторов обычно живут в одном слоте.</td><td>2</td></tr>
+<tr><td>DAG из stages</td><td>JobGraph и ExecutionGraph</td><td>Стадий с границами на shuffle нет. Операторы склеиваются в цепочки и работают одновременно.</td><td>2, 4</td></tr>
+<tr><td>Task</td><td>Подзадача (subtask)</td><td>Task в Spark запускается на порцию данных и завершается. Подзадача потокового задания живёт, пока живёт задание.</td><td>2</td></tr>
+<tr><td>spark-submit</td><td><code>flink run</code></td><td>Понятие близкое. В проде запуск чаще идёт через оператор Kubernetes.</td><td>2, 20</td></tr>
+</tbody>
+</table>
+
+<h2>Обработка данных</h2>
+<table>
+<thead><tr><th>Spark</th><th>Flink</th><th>Где аналогия подводит</th><th>Урок</th></tr></thead>
+<tbody>
+<tr><td>Micro-batch в Structured Streaming</td><td>Обработка по одной записи</td><td>Записи идут через операторы сразу, порциями собираются только сетевые буферы. Задержка определяется буферами и логикой окна.</td><td>1</td></tr>
+<tr><td>DataFrame и Dataset</td><td>DataStream и Table</td><td>DataStream описывает поток событий, операции со временем и состоянием там основные.</td><td>3, 14</td></tr>
+<tr><td><code>repartition</code>, shuffle</td><td><code>keyBy</code>, <code>rebalance</code></td><td>Данные идут по сети непрерывно, без файлов shuffle на диске. Медленный получатель притормаживает отправителя.</td><td>4</td></tr>
+<tr><td><code>spark.sql.shuffle.partitions</code></td><td>Parallelism и max parallelism</td><td>Ключи распределяются по key groups, их число фиксируется при первом запуске с состоянием.</td><td>4, 13</td></tr>
+<tr><td>Dynamic allocation</td><td>Adaptive Scheduler и Autoscaler</td><td>Смена параллелизма требует перезапуска задания с восстановлением состояния.</td><td>20</td></tr>
+<tr><td>Broadcast variable</td><td>Broadcast state</td><td>Broadcast state меняется на лету, новые значения приходят отдельным потоком.</td><td>8</td></tr>
+<tr><td><code>foreachBatch</code></td><td>Sink</td><td>Записи уходят постоянно, а граница транзакции определяется чекпоинтом.</td><td>12</td></tr>
+</tbody>
+</table>
+
+<h2>Время и состояние</h2>
+<table>
+<thead><tr><th>Spark</th><th>Flink</th><th>Где аналогия подводит</th><th>Урок</th></tr></thead>
+<tbody>
+<tr><td><code>withWatermark</code></td><td><code>WatermarkStrategy</code></td><td>Watermark во Flink идёт внутри потока, его считает каждая партиция источника. Оператор с несколькими входами берёт минимум из них.</td><td>5</td></tr>
+<tr><td>Trigger по времени</td><td>Срабатывание окна по watermark</td><td>Результат выходит, когда watermark прошёл конец окна, без расписания запусков.</td><td>5, 6</td></tr>
+<tr><td><code>mapGroupsWithState</code></td><td><code>KeyedProcessFunction</code></td><td>Таймеры здесь на каждый ключ, и срабатывают сразу по времени события или по часам машины.</td><td>7</td></tr>
+<tr><td>State Store на RocksDB</td><td>State backend</td><td>Состояние лежит рядом с подзадачей и не требует обращения к внешней системе при обработке записи.</td><td>7, 11, 19</td></tr>
+<tr><td>Checkpoint location</td><td>Чекпоинт</td><td>Spark пишет состояние в конце микробатча. Flink снимает согласованный срез на лету с помощью барьеров.</td><td>11</td></tr>
+<tr><td>Запись в checkpoint при смене кода</td><td>Savepoint</td><td>Savepoint запускается вручную и переносим. Совместимость держится на <code>uid</code> операторов и сериализаторах.</td><td>13</td></tr>
+</tbody>
+</table>
+
+<h2>Эксплуатация</h2>
+<table>
+<thead><tr><th>Spark</th><th>Flink</th><th>Где аналогия подводит</th><th>Урок</th></tr></thead>
+<tbody>
+<tr><td>Spark UI</td><td>Web UI и REST</td><td>Здесь ты смотришь на живой процесс. Главные показатели занятость, ожидание следующего оператора и watermark.</td><td>2, 18</td></tr>
+<tr><td>Executor OOM</td><td>Модель памяти TaskManager</td><td>Память разбита на области с разными пределами, а RocksDB живёт вне кучи JVM.</td><td>19</td></tr>
+<tr><td>Data skew в join</td><td>Перекос по ключу</td><td>Лекарство похожее (соль), но перекошенная подзадача тормозит весь граф через backpressure.</td><td>4, 18</td></tr>
+<tr><td>Spark on Kubernetes</td><td>Flink Kubernetes Operator</td><td>Оператор сам делает savepoint при обновлении и перезапускает задание из него.</td><td>20</td></tr>
+</tbody>
+</table>
+</div>
+</div></section>

@@ -1,0 +1,211 @@
+<h2>Релиз в пятницу вечером</h2>
+<p>В уроке 13 ты менял параллелизм руками. Сначала <code>flink stop</code> со снимком, потом копируешь путь savepoint из вывода, потом запускаешь задание с флагами <code>-s</code> и <code>-p</code>. Каждый шаг можно перепутать, и всё это время кто-то сидит у терминала.</p>
+<p>В Kubernetes к этому добавляются две беды. Поды переезжают без спроса. Узел уходит на обслуживание, контейнер превышает лимит памяти, и Kubernetes пересоздаёт его в другом месте, не вызывая твоих скриптов. Кроме того, любая ручная процедура со временем расходится с тем, что реально запущено, и через месяц никто не помнит, с какими флагами стартовало задание.</p>
+<p>Flink Kubernetes Operator решает обе задачи. Ты описываешь желаемое задание в YAML, оператор сам останавливает старую версию со снимком, поднимает новую и следит, чтобы кластер совпадал с описанием. В этом уроке PayGuard переезжает в minikube, и мы проверим три вещи. Задание должно пережить гибель JobManager, рестарт Kafka и смену параллелизма без потери состояния.</p>
+
+<h2>Список на холодильнике</h2>
+<p>На дверце холодильника висит лист «должно быть всегда». Два литра молока, десяток яиц, хлеб. Каждый вечер кто-то из семьи открывает холодильник, сверяет полки со списком и докупает разницу. Ему не нужно помнить, что он покупал вчера. Достаточно сравнить лист и полки.</p>
+<p>Если на листе исправить «десяток яиц» на «полтора десятка», вечером докупят пять, и чеки за прошлую неделю никто перечитывать не будет. Рядом висит магнитная доска, на ней проверяющий пишет, что нашёл на полках и чем кончился поход в магазин. Остальные члены семьи смотрят на доску и не открывают холодильник.</p>
+<p>Лист это <code>spec</code> ресурса FlinkDeployment. Проверяющий это оператор, полки это кластер Flink, доска это <code>status</code>. Вечерний обход называется reconcile. Он запускается при каждом изменении ресурса и ещё раз в минуту на всякий случай. Самое интересное начинается, когда на полке стоит кастрюля супа. Холодильник меньшего размера просто так не поменяешь, суп надо куда-то переложить. Как перекладывать состояние задания при замене кластера, решает режим апгрейда.</p>
+
+<h2>Почему в проде Application</h2>
+<p>В уроке 2 мы сравнили режимы Session и Application. В Session кластер живёт сам по себе, задания делят его TaskManager, а jar загружает клиент. В Application кластер создаётся под одно задание, <code>main</code> выполняется в JobManager, и jar уже лежит в образе.</p>
+<p>В Kubernetes разница становится решающей. Образ в режиме Application содержит и версию Flink, и твой код. Откатить релиз значит вернуть предыдущий тег образа. Упавший TaskManager задевает только своё задание. Апгрейд превращается в пересоздание небольшого кластера целиком, и именно так оператор его выполняет. Для этого достаточно образа из двух строк, его мы соберём в практике.</p>
+<p>Session у оператора тоже есть. Ресурс FlinkDeployment без блока <code>job</code> поднимает пустой кластер, а задания в него отправляются ресурсами FlinkSessionJob. Так удобно держать много мелких заданий или песочницу для SQL. Для PayGuard с его состоянием и exactly-once изоляция важнее экономии ресурсов.</p>
+<p>У FlinkDeployment есть ещё поле <code>mode</code> со значениями <code>native</code> и <code>standalone</code>. В native поды TaskManager просит у Kubernetes сам ResourceManager JobManager. В standalone их создаёт оператор отдельным Deployment. Мы поле не задаём, значит работаем в native.</p>
+
+<h2>FlinkDeployment и цикл reconcile</h2>
+<p>Kubernetes умеет хранить собственные типы объектов. Тип описывается ресурсом CRD (custom resource definition), и после этого <code>kubectl</code> работает с ним так же, как с подами. Оператор при установке регистрирует несколько таких типов, нам важны FlinkDeployment и FlinkStateSnapshot. Сам оператор это обычное приложение в поде, которое подписано на изменения этих ресурсов.</p>
+<p>Каждый проход reconcile состоит из трёх фаз. Observe опрашивает JobManager через REST и API Kubernetes и записывает в <code>status</code>, что реально работает. Validate проверяет spec теми же правилами, что и webhook при <code>kubectl apply</code>. Reconcile сравнивает новую spec с той, которую оператор применил последней, она хранится в <code>status.reconciliationStatus.lastReconciledSpec</code>. От разницы зависит действие. Совпадают спецификации, ничего не происходит. Изменилось поле, влияющее на задание, запускается цикл апгрейда.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Как оператор решает, что смена параллелизма требует апгрейда. У поля <code>parallelism</code> в <code>JobSpec</code> стоит аннотация с типом изменения <code>SCALE</code>, но только для режима <code>STANDALONE</code>.</p>
+<div data-src="operator:flink-kubernetes-operator-api/src/main/java/org/apache/flink/kubernetes/operator/api/spec/JobSpec.java" data-lines="47-60" data-must="DiffType.SCALE, mode = KubernetesDeploymentMode.STANDALONE"></div>
+<p>Построитель разницы проверяет, относится ли аннотация к текущему режиму. Если нет, тип изменения становится <code>UPGRADE</code>.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/diff/ReflectiveDiffBuilder.java" data-lines="113-124" data-must="modeApplies ? annotation.value() : UPGRADE"></div>
+<p>Режим по умолчанию native, поле <code>mode</code> у нас пустое.</p>
+<div data-src="operator:flink-kubernetes-operator-api/src/main/java/org/apache/flink/kubernetes/operator/api/spec/KubernetesDeploymentMode.java" data-lines="40-46" data-must="KubernetesDeploymentMode.NATIVE"></div>
+<p>Значит, в нашем стенде patch параллелизма всегда означает остановку задания и запуск нового кластера. Как именно останавливать, решает режим апгрейда, к нему мы сейчас придём.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/concepts/architecture/" target="_blank" rel="noopener">Architecture</a>, <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/custom-resource/overview/" target="_blank" rel="noopener">Custom Resource Overview</a></p>
+</div>
+
+<h2>lifecycleState, ответ оператора</h2>
+<p>Чтобы понять, где сейчас ресурс, не нужно читать весь <code>status</code>. Оператор сводит его в одно поле <code>status.lifecycleState</code>, и <code>kubectl get flinkdep</code> показывает его отдельной колонкой. В нашем стенде встретятся четыре значения.</p>
+<table>
+<thead><tr><th>Значение</th><th>Что оно значит</th></tr></thead>
+<tbody>
+<tr><td><code>CREATED</code></td><td>Ресурс создан, оператор его ещё ни разу не применял</td></tr>
+<tr><td><code>UPGRADING</code></td><td>Идёт апгрейд, старое задание останавливается или новое разворачивается</td></tr>
+<tr><td><code>DEPLOYED</code></td><td>Новая spec развёрнута, но ещё не признана стабильной и может быть откачена</td></tr>
+<tr><td><code>STABLE</code></td><td>Задание работает, spec признана стабильной</td></tr>
+</tbody>
+</table>
+<p>Ещё бывают <code>SUSPENDED</code>, <code>FAILED</code>, <code>ROLLING_BACK</code> и <code>ROLLED_BACK</code>. Откат включается настройкой <code>kubernetes.operator.deployment.rollback.enabled</code>, по умолчанию он выключен, и в уроке мы его не трогаем.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Поле вычисляется при каждом чтении статуса, сеттера у него нет. Сначала смотрится состояние цикла апгрейда.</p>
+<div data-src="operator:flink-kubernetes-operator-api/src/main/java/org/apache/flink/kubernetes/operator/api/status/CommonStatus.java" data-lines="77-90" data-must="return ResourceLifecycleState.UPGRADING;"></div>
+<p>В конце метода выбор между <code>STABLE</code> и <code>DEPLOYED</code>. Стабильность значит, что последняя применённая spec совпадает с последней стабильной.</p>
+<div data-src="operator:flink-kubernetes-operator-api/src/main/java/org/apache/flink/kubernetes/operator/api/status/CommonStatus.java" data-lines="119-125" data-must="ResourceLifecycleState.STABLE"></div>
+<p>Когда spec становится стабильной, решает <code>checkAndUpdateStableSpec</code>. Комментарий в коде говорит прямо. Работающее задание сейчас всегда помечается стабильным.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/ReconciliationUtils.java" data-lines="505-516" data-must="Running jobs are currently always marked stable"></div>
+<p>Отсюда практический вывод. <code>STABLE</code> означает, что задание дошло до <code>RUNNING</code>. О том, что чекпоинты идут и лаг не растёт, это поле ничего не говорит, за этим следят метрики из урока 17.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/custom-resource/status-and-lifecycle/" target="_blank" rel="noopener">Status and Lifecycle</a></p>
+</div>
+
+<h2>Три режима апгрейда</h2>
+<p>Поле <code>spec.job.upgradeMode</code> отвечает на вопрос про суп из холодильника. Оно задаёт, как остановить старое задание и откуда новое возьмёт состояние.</p>
+<table>
+<thead><tr><th></th><th>stateless</th><th>last-state</th><th>savepoint</th></tr></thead>
+<tbody>
+<tr><td>Остановка</td><td>Отмена задания, кластер удаляется вместе с HA-метаданными</td><td>Кластер удаляется, HA-метаданные остаются</td><td>stop-with-savepoint</td></tr>
+<tr><td>Откуда состояние</td><td>Пустое</td><td>Последний чекпоинт из HA-метаданных</td><td>Savepoint, снятый при остановке</td></tr>
+<tr><td>jobId</td><td>Новый</td><td>Прежний</td><td>Новый</td></tr>
+<tr><td>Что требуется</td><td>Ничего</td><td>Чекпоинты и HA</td><td>Каталог savepoint и задание в RUNNING</td></tr>
+<tr><td>Ресурс FlinkStateSnapshot</td><td>Нет</td><td>Нет</td><td>Да</td></tr>
+</tbody>
+</table>
+<p>Режим savepoint самый аккуратный. Снимок делается в момент остановки, задание не перечитывает ни одной записи, и снимок остаётся точкой для отката. Его слабость в том, что savepoint снимается только с работающего задания. Режим last-state быстрее и работает даже с падающим заданием, но после рестарта Flink повторит записи, пришедшие после последнего чекпоинта. Для exactly-once приёмников из урока 12 это безопасно, остальные увидят повторы. Режим stateless годится только для заданий без состояния.</p>
+<p>Попробуй сам. Выбери режим и состояние задания, затем примени patch с параллелизмом 3. Шаги повторяют ветки кода оператора при настройках по умолчанию.</p>
+
+<div class="viz" id="viz-l20">
+  <p class="viz-title">Что оператор делает после patch parallelism</p>
+  <div class="viz-controls">
+    <label>upgradeMode <select id="viz-l20-mode"><option value="savepoint" selected>savepoint</option><option value="last-state">last-state</option><option value="stateless">stateless</option></select></label>
+    <label>Задание <select id="viz-l20-health"><option value="RUNNING" selected>RUNNING</option><option value="RESTARTING">RESTARTING</option></select></label>
+    <button class="primary" id="viz-l20-run" type="button">Применить patch</button>
+    <button id="viz-l20-reset" type="button">Сначала</button>
+  </div>
+  <svg id="viz-l20-svg" role="img" aria-label="Верхний ряд показывает lifecycleState ресурса, средний подсвечивает участника текущего шага, нижний показывает jobId, число TaskManager и источник состояния."></svg>
+  <ol class="viz-log" id="viz-l20-steps"></ol>
+  <p class="viz-note" id="viz-l20-result"></p>
+</div>
+
+<p>Сравни savepoint с заданием в RUNNING и в RESTARTING. Во втором случае оператор не ждёт, пока задание поправится, он молча переходит на last-state. Это поведение по умолчанию, и о нём полезно знать до того, как оно случится в проде.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Выбор способа апгрейда живёт в <code>AbstractJobReconciler.getJobUpgrade</code>. Режим stateless готов всегда.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/deployment/AbstractJobReconciler.java" data-lines="218-223" data-must="JobUpgrade.stateless"></div>
+<p>Режим savepoint требует работающего задания. Иначе, если сменилась версия Flink или включён флаг <code>last-state-fallback.enabled</code>, режим подменяется на last-state.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/deployment/AbstractJobReconciler.java" data-lines="247-264" data-must="OPERATOR_JOB_UPGRADE_LAST_STATE_FALLBACK_ENABLED"></div>
+<p>Флаг по умолчанию включён.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/config/KubernetesOperatorConfigOptions.java" data-lines="560-566" data-must="defaultValue(true)"></div>
+<p>Если базовая логика не нашла способа, наследник для кластеров Application проверяет HA-метаданные. Когда они есть, апгрейд идёт через last-state даже для задания, которое не в RUNNING.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/deployment/ApplicationReconciler.java" data-lines="109-123" data-must="JobUpgrade.lastStateUsingHaMeta()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/managing/job-management/" target="_blank" rel="noopener">Job Management</a></p>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Что значит «остановить» в каждом режиме. Перечисление <code>SuspendMode</code> отвечает на два вопроса. Удалять ли кластер, и удалять ли HA-метаданные. Сохраняет их только <code>LAST_STATE</code>.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/service/SuspendMode.java" data-lines="24-37" data-must="return this != LAST_STATE;"></div>
+<p>Сама остановка. Для <code>SAVEPOINT</code> вызывается <code>savepointJobOrError</code>, внутри него <code>stopWithSavepoint</code> клиента REST. Для <code>STATELESS</code> задание просто отменяется. Ветки для <code>LAST_STATE</code> в <code>switch</code> нет, задание не трогают, кластер удаляют вместе с ним, и HA-метаданные остаются на месте.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/service/AbstractFlinkService.java" data-lines="333-360" data-must="savepointJobOrError(clusterClient, status, conf)"></div>
+<p>Поэтому last-state не тратит время на снимок. Новый JobManager находит последний чекпоинт по тем же ConfigMap, которые читал бы после обычного падения.</p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">По умолчанию состояние выбрасывается</strong>
+    <p>Если не указать <code>upgradeMode</code>, оператор возьмёт <code>stateless</code>. Это видно в <code>JobSpec</code>, строка <code>private UpgradeMode upgradeMode = UpgradeMode.STATELESS</code>. Любая правка spec, даже лимита CPU, тогда запустит задание с пустым состоянием. Дедупликация забудет идентификаторы, профили карт обнулятся. В манифесте PayGuard режим задан явно.</p>
+  </div>
+</div>
+
+<h2>FlinkStateSnapshot, снимок как ресурс</h2>
+<p>В режиме savepoint оператор оформляет снятый при апгрейде снимок отдельным ресурсом FlinkStateSnapshot. У ресурса есть своё поле состояния с ходом <code>TRIGGER_PENDING</code>, <code>IN_PROGRESS</code>, <code>COMPLETED</code> или <code>FAILED</code> и путь к файлам. Так история снимков видна командой <code>kubectl get flinkstatesnapshots</code>, без похода в REST JobManager.</p>
+<p>Снимок можно заказать и вручную. Для этого создают свой ресурс FlinkStateSnapshot со ссылкой <code>jobReference</code> на FlinkDeployment и блоком <code>savepoint</code>. У ручных снимков поле <code>disposeOnDelete</code> по умолчанию включено, и удаление ресурса сотрёт файлы savepoint. Снимки апгрейда по умолчанию при удалении ресурса не стираются.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>После остановки со снимком оператор создаёт ресурс и записывает путь в статус задания. Путь из <code>upgradeSavepointPath</code> потом передаётся новому кластеру.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/deployment/AbstractJobReconciler.java" data-lines="445-454" data-must="createUpgradeSnapshotResource"></div>
+<p>Имя ресурса собирается из имени FlinkDeployment, типа снимка, причины и времени в миллисекундах. На стенде получилось <code>payguard-savepoint-upgrade-1794126582605</code>.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/utils/FlinkStateSnapshotUtils.java" data-lines="188-198" data-must="triggerType.name().toLowerCase()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/managing/snapshot-management/" target="_blank" rel="noopener">Snapshot Management</a></p>
+</div>
+
+<h2>HA на Kubernetes</h2>
+<p>Режим last-state и восстановление после гибели JobManager держатся на сервисах высокой доступности, HA. Без них новый JobManager не знает, какие чекпоинты делал предыдущий, и продолжить с последнего из них не может. С настройкой <code>high-availability.type: kubernetes</code> Flink хранит эти сведения в ConfigMap, обычных объектах Kubernetes для небольших конфигурационных данных.</p>
+<p>Устроено это в два слоя. В ConfigMap лежат только указатели, а сами метаданные, то есть граф задания и описания завершённых чекпоинтов, Flink пишет файлами в <code>high-availability.storageDir</code>. ConfigMap ограничен мегабайтом, а метаданные бывают больше. Тот же ConfigMap кластера служит замком для выбора лидера. Если JobManager несколько, лидером становится тот, кто успел записать в него свой идентификатор.</p>
+<p>У нашего задания после запуска оказалось пять ConfigMap. Два из них относятся к HA, это <code>payguard-cluster-config-map</code> и <code>payguard-&lt;jobId&gt;-config-map</code>. В <code>flink-config-payguard</code> лежит конфигурация Flink для подов, в <code>pod-template-payguard</code> шаблон пода TaskManager, в <code>autoscaler-payguard</code> оператор хранит данные автоскейлера.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Выбор лидера в <code>KubernetesLeaderElectionHaServices</code> настраивается на ConfigMap кластера.</p>
+<div data-src="flink:flink-kubernetes/src/main/java/org/apache/flink/kubernetes/highavailability/KubernetesLeaderElectionHaServices.java" data-lines="116-131" data-must="getClusterConfigMap(clusterId), lockIdentity, configuration);"></div>
+<p>Хранилище чекпоинтов берёт отдельный ConfigMap на каждое задание, его имя собрано из идентификатора кластера и jobId. Имя ConfigMap кластера получается тем же способом.</p>
+<div data-src="flink:flink-kubernetes/src/main/java/org/apache/flink/kubernetes/highavailability/KubernetesLeaderElectionHaServices.java" data-lines="143-165" data-must="&quot;cluster-config-map&quot;"></div>
+<p>Почему в ConfigMap только указатель, объясняет комментарий к <code>KubernetesStateHandleStore</code>.</p>
+<div data-src="flink:flink-kubernetes/src/main/java/org/apache/flink/kubernetes/highavailability/KubernetesStateHandleStore.java" data-lines="62-69" data-must="keep the amount of data"></div>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/HighAvailabilityOptions.java" data-lines="74-82" data-must="high-availability.storageDir"></div>
+<p>Из этого следует требование к тому. Каталог <code>storageDir</code> должен пережить под JobManager, иначе указатели в ConfigMap будут вести в пустоту.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/ha/kubernetes_ha/" target="_blank" rel="noopener">Kubernetes HA Services</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/ha/overview/" target="_blank" rel="noopener">High Availability</a></p>
+</div>
+
+<p>Остаётся вопрос, почему после рестарта пода JobManager задание продолжает работу с тем же jobId. Ведь хранилище чекпоинтов ищет ConfigMap по jobId. Ответ в операторе. Перед развёртыванием он сам выбирает jobId и записывает его во внутренний ключ конфигурации <code>$internal.pipeline.job-id</code>. Новый под JobManager стартует с той же конфигурацией, запускает задание с тем же jobId и находит его ConfigMap.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Метод <code>setJobIdIfNecessary</code> в <code>ApplicationReconciler</code> выдаёт новый jobId при каждом развёртывании, кроме last-state. Это объясняет строку jobId в таблице режимов.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/reconciler/deployment/ApplicationReconciler.java" data-lines="237-248" data-must="Rotate job id when not last-state deployment"></div>
+<p>Рестарт пода Kubernetes делает сам, без развёртывания через оператор, поэтому jobId не меняется. Апгрейд в режиме savepoint идёт через развёртывание, и jobId новый. Новый идентификатор нужен, чтобы чекпоинты новой версии не попали в каталог старой. Ссылки на задачи FLINK-19358 и FLINK-29109 в комментарии ведут к истории этой проблемы.</p>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>Spark на Kubernetes запускается через <code>spark-submit</code> или spark-operator с ресурсом SparkApplication. Драйвер живёт в отдельном поде и сам создаёт поды экзекуторов. Состояние стримингового запроса Spark хранит в каталоге <code>checkpointLocation</code>, и новая версия кода продолжает работу, если запустить её с тем же каталогом.</p>
+<p>Во Flink роль драйвера выполняет JobManager. Оператор Flink при апгрейде сам снимает savepoint, пересоздаёт кластер, подставляет путь к снимку и ведёт историю снимков ресурсами. После падения JobManager задание восстанавливается из HA-метаданных без участия оператора.</p>
+
+<h2>Состояние за пределами Flink</h2>
+<p>Savepoint хранит состояние Flink, но exactly-once из урока 12 держится ещё и на журнале транзакций Kafka. В снимке лежат подготовленные транзакции приёмника, и после восстановления Flink их фиксирует. Брокер должен помнить, что такие транзакции были.</p>
+<p>В первой версии стенда у Kafka не было тома. Во время апгрейда minikube упёрся в память, под Kafka перезапустился и поднялся с пустым диском. Брокер потерял топики и внутренний топик <code>__transaction_state</code>. Задание восстановилось из savepoint и не смогло зафиксировать транзакцию, о которой брокер уже не знал. Дальше пошли бесконечные рестарты. Полный разбор этого инцидента ждёт тебя в уроке 21, здесь из него один вывод. У каждой системы, на которую опирается exactly-once, данные должны лежать на постоянном томе.</p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Под без тома теряет всё при каждом рестарте</strong>
+    <p>Файловая система контейнера живёт столько же, сколько контейнер. Всё, что должно пережить рестарт, кладут на PersistentVolumeClaim. Для Flink это чекпоинты, savepoint и HA, для Kafka её журналы. В проде Kafka и PostgreSQL обычно управляемые сервисы, и об их дисках заботится провайдер.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l20">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Поле upgradeMode по умолчанию stateless. Новый кластер стартует без состояния, позиция в Kafka берётся из смещений группы, а дедупликация и профили начинаются с нуля."
+       data-explanation-wrong="Посмотри на значение поля upgradeMode в JobSpec, если его не задали. Оператор не угадывает, что у задания есть состояние.">
+    <h3 class="quiz-question">Коллега завёл FlinkDeployment для задания с дедупликацией и забыл поле upgradeMode. Через неделю он поднял лимит CPU у TaskManager. Что стало с состоянием?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Ничего, оператор всегда снимает savepoint перед апгрейдом</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Оно потеряно, потому что режим по умолчанию stateless</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Ничего, изменение CPU не вызывает апгрейд</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Savepoint снять нельзя, флаг last-state-fallback.enabled включён по умолчанию, HA-метаданные есть. Оператор восстановит задание из последнего чекпоинта, и записи после него пройдут повторно."
+       data-explanation-wrong="Вспомни ветку для SAVEPOINT в getJobUpgrade и проверку HA-метаданных в ApplicationReconciler. Ждать RUNNING оператор будет, только если fallback выключен.">
+    <h3 class="quiz-question">Задание в режиме savepoint с включённым HA уходит в RESTARTING из-за ошибки в коде. Ты выкатываешь образ с исправлением. Что сделает оператор при настройках по умолчанию?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Будет ждать, пока задание вернётся в RUNNING, чтобы снять savepoint</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Запустит новую версию с пустым состоянием</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Перейдёт на last-state и восстановит задание из последнего чекпоинта</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. В снимке лежат подготовленные транзакции, а брокер без тома забыл и их, и producerId. Savepoint Flink цел, сломано состояние Kafka, и лечится это постоянным томом у брокера."
+       data-explanation-wrong="Savepoint на месте и прочитан успешно. Подумай, какая ещё система хранит часть exactly-once и что с ней стало после рестарта без тома.">
+    <h3 class="quiz-question">После апгрейда задание восстановилось из savepoint и сразу ушло в бесконечные рестарты с InvalidPidMappingException при коммите в Kafka. Незадолго до этого перезапускался под Kafka без тома. Где причина?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Брокер потерял журнал транзакций, и подготовленную транзакцию из снимка зафиксировать нельзя</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Savepoint повреждён, его надо снять заново</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Новый параллелизм не совпадает с числом партиций топика</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

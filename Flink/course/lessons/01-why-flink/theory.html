@@ -1,0 +1,131 @@
+<h2>Задача, ради которой всё затевается</h2>
+<p>Мошенник получил данные карты и проверяет их серией мелких платежей. Если система заметит серию через пять минут, деньги уже ушли. Если через секунду, банк успевает отклонить следующий платёж. Весь курс мы строим такую систему и называем её PayGuard.</p>
+<p>У этой задачи три свойства, которые определяют выбор инструмента. Данные не заканчиваются, поэтому нельзя дождаться конца файла и посчитать результат. Решение зависит от истории карты за последние минуты, поэтому система обязана помнить прошлое. Ошибка стоит денег в обе стороны, поэтому потерянный или задвоенный платёж недопустим даже при падении сервера.</p>
+<p>Apache Flink создан под такие условия. Это движок обработки потоков с состоянием, то есть программа на нём получает события по одному и держит между ними данные, которые переживают падения.</p>
+
+<h2>Шаттл и траволатор</h2>
+<p>Представь аэропорт. До выхода на посадку можно добраться автобусом-шаттлом, который отправляется каждые пять минут и забирает всех, кто успел подойти. А можно встать на траволатор, и он повезёт тебя в ту же секунду, как ты на него шагнул.</p>
+<p>Spark Structured Streaming в обычном режиме работает как шаттл. Он копит записи, запускает маленькую пакетную задачу (micro-batch) и выдаёт результат всей порции разом. Flink работает как траволатор. Его операторы запущены постоянно, и запись идёт через них сразу после появления в источнике.</p>
+<p>Сдвинь ползунок и посмотри, как интервал шаттла влияет на задержку. Модель упрощённая, в ней нет времени на саму обработку, зато видна причина разницы.</p>
+
+<div class="viz" id="viz-l01">
+  <p class="viz-title">Гонка двух моделей</p>
+  <div class="viz-controls">
+    <label>Интервал micro-batch <input type="range" id="viz-l01-interval" min="1" max="10" value="5"> <span id="viz-l01-value">5 с</span></label>
+    <button class="primary" id="viz-l01-run" type="button">Запустить поток</button>
+  </div>
+  <svg id="viz-l01-svg" role="img" aria-label="Две дорожки, по которым идут события. На верхней они ждут отправки порцией, на нижней идут сразу."></svg>
+  <p class="viz-note" id="viz-l01-result">Нажми кнопку, и 40 событий за 10 секунд модельного времени поедут по обеим дорожкам.</p>
+</div>
+
+<p>Из этой разницы не следует, что Flink всегда быстрее по записям в секунду. На больших объёмах пакетная обработка очень эффективна, и Spark силён именно там. У Flink задержку определяют логика задания и сетевые буферы, у micro-batch ещё и интервал запуска.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотрим, что такое запущенная подзадача Flink. Метод <code>processInput</code> вызывается в цикле на протяжении всей её жизни. Он просит следующую запись у обработчика входа и смотрит на статус. Понятия «порция» или «граница пакета» здесь нет.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/StreamTask.java" data-lines="645-655" data-must="inputProcessor.processInput"></div>
+<p>Статус <code>MORE_AVAILABLE</code> значит, что можно сразу брать следующую запись. Цикл завершится, только если задание остановят или закончатся данные.</p>
+<p>Совсем без порций тоже не обходится, потому что поштучная отправка по сети была бы слишком дорогой. Записи складываются в сетевой буфер, и он уходит либо заполненным, либо по таймауту. Настройка <code>execution.buffer-timeout.interval</code> ограничивает это ожидание.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/ExecutionOptions.java" data-lines="107-122" data-must="execution.buffer-timeout.interval"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/overview/" target="_blank" rel="noopener">Concepts overview</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/flink-architecture/" target="_blank" rel="noopener">Flink Architecture</a></p>
+</div>
+
+<h2>Четыре вещи, которые Flink берёт на себя</h2>
+<p>Написать цикл чтения из Kafka можно и на обычной Java. Flink ценен тем, что решает трудные части за тебя, и курс построен вокруг них.</p>
+<ul>
+  <li>Время события. Платёж мог прийти с опозданием из-за сети, а считать его надо в той минуте, когда он случился. Об этом уроки 5 и 6.</li>
+  <li>Состояние. Счётчик платежей карты живёт внутри задания, может занимать терабайты и читается без обращения к внешней базе. Об этом уроки 7 и 19.</li>
+  <li>Восстановление без потерь. Flink регулярно снимает согласованный снимок всего задания и после падения продолжает с него. Об этом уроки 11 и 12.</li>
+  <li>Изменение на ходу. Задание можно остановить со снимком, обновить код, сменить параллелизм и продолжить с того же места. Об этом урок 13.</li>
+</ul>
+
+<h2>Когда Flink не нужен</h2>
+<p>Ночной отчёт по таблице в озере данных Spark посчитает проще и дешевле. Переход не окупится и тогда, когда задержка в минуту никому не мешает и команда уже знает Spark. Простое преобразование топика без состояния часто проще сделать на Kafka Connect или маленьком консьюмере. Flink оправдан там, где одновременно нужны низкая задержка, состояние и корректность при сбоях.</p>
+
+<h2>Что мы построим</h2>
+<p>PayGuard читает платежи из Kafka, чистит их и проверяет правилами, а алерты отправляет обратно в Kafka. Цепочка будет расти от урока к уроку. Сегодня работает только левая часть схемы, источник и печать в лог.</p>
+
+<svg viewBox="0 0 860 170" role="img" aria-label="Схема PayGuard. Генератор пишет платежи в Kafka, задание Flink читает их, чистит, применяет правила и пишет алерты в Kafka и итоги в PostgreSQL." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l01" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="60" width="120" height="50" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="70" y="90">Генератор</text>
+    <rect x="170" y="60" width="120" height="50" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="230" y="82">Kafka</text><text x="230" y="100" font-size="11">payments.raw</text>
+    <rect x="330" y="20" width="310" height="130" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="485" y="42" font-weight="700">Задание Flink</text>
+    <rect x="345" y="62" width="85" height="46" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="387" y="89">Очистка</text>
+    <rect x="442" y="62" width="85" height="46" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="484" y="89">Правила</text>
+    <rect x="539" y="62" width="88" height="46" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="583" y="89">Обогащение</text>
+    <text x="485" y="132" font-size="11">состояние по каждой карте, снимки на диск</text>
+    <rect x="690" y="25" width="150" height="50" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="765" y="47">Kafka</text><text x="765" y="64" font-size="11">fraud.alerts</text>
+    <rect x="690" y="95" width="150" height="50" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="765" y="117">PostgreSQL</text><text x="765" y="134" font-size="11">итоги, продавцы</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l01)">
+    <path d="M130 85H168"/><path d="M290 85H343"/><path d="M430 85H440"/><path d="M527 85H537"/><path d="M640 65L688 50"/><path d="M640 105L688 120"/>
+  </g>
+</svg>
+
+<h2>Почему твой конфиг молчит</h2>
+<p>В папке проекта лежит твой <code>Makefile</code> с образом <code>flink:latest</code> и файлом <code>flink-conf.yaml</code>. Если выполнить <code>make start</code>, контейнеры поднимутся, в логе JobManager не будет ошибок, и при этом REST-интерфейс покажет <code>"taskmanagers":0</code>. Процесс TaskManager исполняет задания, и кластер без него не умеет ничего. Причин две. Первая в том, что <code>flink:latest</code> на момент проверки это Flink 2.3.0, а вторая в самом файле.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Flink 2.x читает настройки из файла с другим именем. Константа задаёт его жёстко.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/GlobalConfiguration.java" data-lines="43-43" data-must="config.yaml"></div>
+<p>При загрузке берётся только этот файл, старое имя в коде больше не встречается.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/GlobalConfiguration.java" data-lines="137-147" data-must="FLINK_CONF_FILENAME"></div>
+<p>В образе рядом лежит родной <code>config.yaml</code>, поэтому исключения не возникает. Твой файл просто никто не открывает. Адрес JobManager остаётся значением из образа, TaskManager подключается не туда, и ни один из процессов не считает это фатальной ошибкой.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/config/" target="_blank" rel="noopener">Configuration</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/resource-providers/standalone/docker/" target="_blank" rel="noopener">Docker Setup</a></p>
+</div>
+
+<p>Если перенести те же настройки в правильный файл, всплывут другие проблемы. Таблица показывает, что произойдёт с каждой строкой.</p>
+<table>
+<thead><tr><th>Строка в твоём файле</th><th>Что с ней не так</th><th>Как правильно во Flink 2.2</th></tr></thead>
+<tbody>
+<tr><td><code>state.backend: filesystem</code></td><td>Ключ устарел, и значения <code>filesystem</code> больше нет</td><td><code>state.backend.type: hashmap</code></td></tr>
+<tr><td><code>state.checkpoints.dir</code></td><td>Ключ переименован</td><td><code>execution.checkpointing.dir</code></td></tr>
+<tr><td><code>state.savepoints.dir</code></td><td>Ключ переименован</td><td><code>execution.checkpointing.savepoint-dir</code></td></tr>
+<tr><td><code>taskmanager.number.ofTaskSlots</code></td><td>Опечатка, такого ключа нет, и слотов будет один вместо четырёх</td><td><code>taskmanager.numberOfTaskSlots</code></td></tr>
+<tr><td><code>rootLogger.level</code></td><td>Это настройка Log4j, ей место в <code>log4j.properties</code></td><td>Убрать из файла</td></tr>
+<tr><td>Четыре настройки памяти разом</td><td>Они противоречат друг другу, сеть получает 0 байт</td><td>Оставить только <code>taskmanager.memory.process.size</code></td></tr>
+</tbody>
+</table>
+<p>Последняя строка проверена запуском. С твоими значениями памяти TaskManager падает при старте и пишет, что вычисленный размер сетевой памяти равен нулю.</p>
+<pre data-lang="text" data-title="лог TaskManager" data-output>org.apache.flink.configuration.IllegalConfigurationException: TaskManager memory configuration failed:
+If Total Flink, Task Heap and (or) Managed Memory sizes are explicitly configured then the Network Memory size
+is the rest of the Total Flink memory after subtracting ...
+Caused by: Derived Network Memory size (0 bytes) is not in configured Network Memory range [64.000mb (67108864 bytes), ...]</pre>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Тег latest опасен для Flink</strong>
+    <p>Коннекторы выходят отдельно от движка и собираются под конкретную версию. Образ с тегом <code>latest</code> однажды обновится до версии, под которую твоего коннектора ещё нет. В курсе версия закреплена везде, от образа до зависимостей Gradle.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l01">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Банку нужна реакция за секунды, решение зависит от истории карты, а потеря записи стоит денег. Именно этот набор оправдывает Flink."
+       data-explanation-wrong="Посмотри на требования к задержке и к истории. Отчёт раз в сутки и преобразование без состояния Flink не требуют.">
+    <h3 class="quiz-question">Какую из задач разумнее всего решать на Flink?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Раз в сутки считать выручку по таблице в озере данных</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Отклонять платёж, если по карте за минуту прошло больше 10 операций</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Перекладывать записи из одного топика в другой, меняя формат даты</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Файл с именем flink-conf.yaml Flink 2.x не читает, поэтому настройка не применилась. Ошибки нет, потому что рядом лежит родной config.yaml."
+       data-explanation-wrong="Вспомни константу FLINK_CONF_FILENAME. Какое имя файла открывает Flink 2.x?">
+    <h3 class="quiz-question">Коллега смонтировал рабочий flink-conf.yaml с 16 слотами в образ Flink 2.2. Задание запускается, но в интерфейсе один слот. Почему?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Слоты выдаются постепенно, надо подождать</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>В контейнере меньше 16 ядер</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Flink 2.x читает config.yaml, поэтому файл с настройкой не был открыт</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

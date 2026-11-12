@@ -1,0 +1,174 @@
+<h2>Атака, которую не видно в одном платеже</h2>
+<p>Мошенник купил в даркнете пачку номеров карт и не знает, какие из них живые. Он проверяет каждую карту серией платежей на пару евро. Если они прошли, следом идёт крупная покупка. Такую схему называют card testing. Каждый платёж по отдельности выглядит невинно, а правило частоты из урока 8 не сработает, потому что платежей всего шесть.</p>
+<p>Подозрителен порядок. Несколько мелких платежей подряд и сразу крупный, причём по одной карте и за несколько минут. Вторая схема ещё проще. Карту скопировали, и два платежа подряд пришли из разных стран, хотя за десять минут между ними никто не успел бы перелететь границу. Её называют impossible travel.</p>
+<p>Правила такого вида описывают порядок событий, и для них во Flink есть отдельная библиотека FlinkCEP. CEP расшифровывается как complex event processing, обработка сложных событий. Ты описываешь шаблон последовательности, а библиотека ищет его в потоке каждой карты и вызывает твою функцию на каждое совпадение.</p>
+
+<h2>Кодовый замок в подъезде</h2>
+<p>Представь домофон с кодом 1-2-3. Замок помнит, сколько верных цифр уже нажато. Нажал 1, он ждёт 2. Нажал 7, и у строгого замка набор сбрасывается. Если между нажатиями прошло больше минуты, набор тоже сбрасывается. Код совпал, дверь открылась.</p>
+<p>Шаблон CEP устроен так же. Набранная часть кода называется частичным совпадением, сброс по времени задаёт <code>within</code>, а правила, что делать с лишней цифрой, называются смежностью. Есть строгий замок, который сбрасывается на любой лишней цифре. Есть терпеливый, который пропускает цифры не из кода. Третий вариант уже не похож на замок. Он помнит все способы, которыми из нажатых цифр можно сложить код, и открывает дверь на каждый такой способ.</p>
+<p>У настоящего замка набор один. У CEP частичных совпадений по ключу может быть много одновременно, потому что каждое новое событие может начать ещё одну попытку. Каждая попытка лежит в состоянии оператора, пока не закончится совпадением или сбросом.</p>
+
+<h2>Шаблон из шагов</h2>
+<p>Шаблон собирается цепочкой вызовов. <code>Pattern.begin("probes")</code> открывает первый шаг с именем. <code>where</code> задаёт условие, которому должно удовлетворять событие шага. Квантификатор <code>timesOrMore(3)</code> разрешает шагу принять три события и больше. <code>next("cash-out")</code> добавляет следующий шаг, а <code>within</code> ограничивает время от первого события до последнего. Так выглядит шаблон проверки карты в PayGuard.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="30-39"></div>
+<p>Условия бывают двух видов. <code>SimpleCondition</code> смотрит только на текущее событие. <code>IterativeCondition</code> получает ещё и контекст, через который видны события, уже принятые в предыдущие шаги этого же совпадения. Условие «страна отличается от страны прошлого платежа» без контекста не написать, и оно станет твоим заданием.</p>
+
+<h2>Три вида смежности</h2>
+<p>Между шагами шаблона ставится одна из трёх связок. <code>next</code> требует строгой смежности, следующее событие ключа обязано подойти. <code>followedBy</code> даёт ослабленную смежность, неподходящие события пропускаются до первого подходящего. <code>followedByAny</code> даёт недетерминированную ослабленную смежность, при которой пропускать можно и подходящие события, и совпадений становится больше.</p>
+<p>Документация разбирает пример. Шаблон «a, потом b» на последовательности a, c, b1, b2 даёт разные ответы. Строгая смежность совпадений не находит, потому что c сразу после a сбрасывает попытку. Ослабленная находит {a b1}. Недетерминированная находит {a b1} и {a b2}.</p>
+<p>Внутри шага с квантификатором действует своя смежность, между событиями самого шага. По умолчанию она ослабленная. <code>consecutive()</code> делает её строгой, <code>allowCombinations()</code> недетерминированной. В PayGuard мелкие платежи должны идти подряд, поэтому стоит <code>consecutive()</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверим, что связки отличаются только стратегией потребления событий. <code>followedBy</code> создаёт следующий шаг со стратегией <code>SKIP_TILL_NEXT</code>. Рядом в том же файле <code>next</code> передаёт <code>STRICT</code>, а <code>followedByAny</code> передаёт <code>SKIP_TILL_ANY</code>.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/pattern/Pattern.java" data-lines="305-315" data-must="ConsumingStrategy.SKIP_TILL_NEXT"></div>
+<p>Смежность внутри шага хранит квантификатор в отдельном поле. Его начальное значение и есть то «по умолчанию ослабленная», о котором говорит документация.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/pattern/Quantifier.java" data-lines="43-50" data-must="innerConsumingStrategy = ConsumingStrategy.SKIP_TILL_NEXT"></div>
+<p>Компилятор шаблона превращает стратегию в условие ребра IGNORE, по которому автомат пропускает событие и остаётся в том же состоянии. У <code>STRICT</code> такого ребра нет совсем, поэтому любое неподходящее событие обрывает попытку. У <code>SKIP_TILL_NEXT</code> ребро срабатывает на событиях, которые не проходят условие шага. У <code>SKIP_TILL_ANY</code> условие ребра всегда истинно, и автомат может пропустить даже подходящее событие.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/nfa/compiler/NFACompiler.java" data-lines="963-992" data-must="case SKIP_TILL_NEXT"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/#combining-patterns" target="_blank" rel="noopener">Combining Patterns</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/#contiguity-within-looping-patterns" target="_blank" rel="noopener">Contiguity within looping patterns</a></p>
+</div>
+
+<p>Попробуй сам. Модель перебирает все совпадения шаблона «три мелких платежа и больше, потом крупный» так, как это делает CEP без стратегии пропуска. М означает мелкий платёж, О обычный, К крупный.</p>
+
+<div class="viz" id="viz-l10">
+  <p class="viz-title">Смежность и число совпадений</p>
+  <div class="viz-controls">
+    <label>Между мелкими <select id="viz-l10-inner"><option value="strict" selected>consecutive()</option><option value="relaxed">по умолчанию</option><option value="any">allowCombinations()</option></select></label>
+    <label>Перед крупным <select id="viz-l10-between"><option value="strict" selected>next</option><option value="relaxed">followedBy</option><option value="any">followedByAny</option></select></label>
+  </div>
+  <div class="viz-controls">
+    <button type="button" data-l10-add="S">+ мелкий</button>
+    <button type="button" data-l10-add="N">+ обычный</button>
+    <button type="button" data-l10-add="L">+ крупный</button>
+    <button type="button" id="viz-l10-clear">Очистить</button>
+    <button type="button" class="primary" data-l10-preset="attack">Атака генератора</button>
+    <button type="button" data-l10-preset="gap">Разрыв в серии</button>
+    <button type="button" data-l10-preset="middle">Обычный перед крупным</button>
+  </div>
+  <svg id="viz-l10-svg" role="img" aria-label="Ряд платежей одной карты и под ним строки найденных совпадений, в каждой подсвечены платежи, вошедшие в совпадение."></svg>
+  <p class="viz-note" id="viz-l10-note" aria-live="polite">Выбери смежность и последовательность платежей.</p>
+</div>
+<p>Атака генератора состоит из пяти мелких платежей и одного крупного. Даже со строгой смежностью шаблон находит три совпадения, они начинаются с первого, второго и третьего мелкого платежа. Включи ослабленную смежность внутри серии на примере с разрывом, и совпадений станет больше, потому что обычный платёж теперь пропускается. Поэтому в PayGuard у шаблона стоит стратегия пропуска после совпадения, о ней чуть ниже.</p>
+
+<h2>Шаблон становится автоматом</h2>
+<p>При запуске задания <code>NFACompiler</code> переводит шаблон в недетерминированный конечный автомат, NFA (nondeterministic finite automaton). Состояния автомата соответствуют шагам шаблона, а у каждого состояния есть рёбра трёх видов. TAKE принимает событие в шаг. IGNORE пропускает событие. PROCEED переходит к следующему шагу, не тратя событие. Недетерминированным автомат называют потому, что из одного состояния на одно событие могут сработать несколько рёбер сразу, и попытка раздваивается.</p>
+
+<svg viewBox="0 0 760 210" role="img" aria-label="Упрощённый автомат шаблона card testing. Состояние probes принимает мелкие платежи и петлёй принимает следующие, переходит в cash-out на крупном платеже, оттуда в конечное состояние. Любой другой платёж обрывает попытку." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l10" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="20" y="70" width="120" height="56" rx="28" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="80" y="95">начало</text><text x="80" y="113" font-size="11">ждёт мелкий</text>
+    <rect x="220" y="70" width="150" height="56" rx="28" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="295" y="95">probes</text><text x="295" y="113" font-size="11">принято 1, 2, 3 и больше</text>
+    <rect x="450" y="70" width="130" height="56" rx="28" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="515" y="95">cash-out</text><text x="515" y="113" font-size="11">ждёт крупный</text>
+    <rect x="640" y="70" width="100" height="56" rx="28" fill="var(--color-success-light)" stroke="var(--color-success)"/><text x="690" y="102">совпадение</text>
+    <text x="180" y="62" font-size="11">TAKE мелкий</text>
+    <text x="295" y="22" font-size="11">TAKE мелкий, петля</text>
+    <text x="410" y="62" font-size="11">с трёх мелких</text>
+    <text x="610" y="62" font-size="11">TAKE крупный</text>
+    <rect x="200" y="160" width="390" height="36" rx="8" fill="var(--color-error-light)" stroke="var(--color-error)"/><text x="395" y="183">любой другой платёж, ребра IGNORE нет, попытка обрывается</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l10)">
+    <path d="M140 98H218"/><path d="M370 98H448"/><path d="M580 98H638"/>
+    <path d="M265 70C255 30 335 30 325 70"/>
+    <path d="M295 126L330 158" stroke-dasharray="4 3"/><path d="M515 126L470 158" stroke-dasharray="4 3"/>
+  </g>
+</svg>
+<p>Схема упрощённая. Компилятор разворачивает <code>timesOrMore(3)</code> в цепочку из трёх обязательных копий шага и петлю за ними, а начальное состояние никогда не обрывается, поэтому каждый мелкий платёж начинает новую попытку.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотрим, как автомат обрабатывает событие. Метод <code>doProcess</code> проходит по всем частичным совпадениям ключа и для каждого вычисляет новые состояния. Если состояний получилось больше одного, попытка раздвоилась. Дошедшие до конца становятся кандидатами в совпадения, остальные сохраняются до следующего события.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/nfa/NFA.java" data-lines="363-392" data-must="computeNextStates(sharedBufferAccessor, computationState, event, timerService)"></div>
+<p>Число частичных совпадений по ключу ничем не ограничено, кроме самого шаблона и времени. Поэтому <code>followedByAny</code> и <code>allowCombinations</code> на длинной серии событий умножают работу и состояние.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/" target="_blank" rel="noopener">FlinkCEP</a></p>
+</div>
+
+<h2>Стратегия пропуска после совпадения</h2>
+<p>Когда совпадение найдено, оставшиеся попытки, которые делят с ним события, по умолчанию продолжают жить. Это стратегия <code>NO_SKIP</code>, и она дала бы три алерта на одну атаку. Стратегия <code>skipPastLastEvent()</code> выбрасывает все попытки, начатые до конца найденного совпадения. На атаке генератора остаётся одно совпадение, самое длинное, потому что оно начинается раньше остальных. Стратегию передают первым шагом в <code>Pattern.begin</code>.</p>
+
+<h2>Время и порядок событий</h2>
+<p>Шаблон описывает порядок, а события из Kafka приходят с беспорядком. Если обработать их в порядке прихода, опоздавший мелкий платёж встанет после крупного, и совпадение потеряется. Поэтому оператор CEP по умолчанию работает во времени события и сначала складывает события в буфер.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>В <code>CepOperator.processElement</code> событие с меткой больше текущего watermark попадает в буфер. Событие с меткой не больше watermark считается опоздавшим. Если побочный выход для опоздавших не задан, оно молча выбрасывается, и растёт только счётчик <code>numLateRecordsDropped</code>.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/operator/CepOperator.java" data-lines="248-270" data-must="numLateRecordsDropped.inc()"></div>
+<p>Буфер разбирается по таймеру, когда приходит watermark. События с метками не больше watermark отдаются автомату по возрастанию времени, затем автомат сдвигает своё время до watermark и отбрасывает попытки, которые вышли за <code>within</code>.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/operator/CepOperator.java" data-lines="303-326" data-must="advanceTime(nfaState, timerService.currentWatermark())"></div>
+<p>Проверка <code>within</code> сравнивает разницу между текущим временем и временем первого события попытки с размером окна. Начальное состояние под проверку не попадает.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/nfa/NFA.java" data-lines="342-348" data-must="timestamp - startTimestamp >= windowTime"></div>
+<p>Отсюда два практических следствия. Алерт CEP появляется не раньше, чем watermark пройдёт метку последнего события совпадения. В PayGuard допуск беспорядка 10 секунд, значит задержка алерта не меньше 10 секунд времени события. Платёж, опоздавший сильнее допуска, в шаблон не попадёт вовсе.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/#handling-lateness-in-event-time" target="_blank" rel="noopener">Handling Lateness in Event Time</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/#after-match-skip-strategy" target="_blank" rel="noopener">After Match Skip Strategy</a></p>
+</div>
+
+<h2>Что лежит в состоянии</h2>
+<p>Оператор CEP держит по каждому ключу три вещи. Это состояние автомата со списком частичных совпадений, буфер событий, ждущих watermark, и общий буфер событий, на которые ссылаются попытки.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Все три структуры создаются как keyed state, значит попадают в чекпоинт и переезжают вместе с ключом при смене параллелизма. Общий буфер <code>SharedBuffer</code> хранит каждое событие один раз, а попытки ссылаются на него, поэтому десять попыток с общим началом не копируют события десять раз.</p>
+<div data-src="flink:flink-libraries/flink-cep/src/main/java/org/apache/flink/cep/operator/CepOperator.java" data-lines="183-201" data-must="EVENT_QUEUE_STATE_NAME"></div>
+<p>Документация прямо советует ставить <code>within()</code> или <code>until()</code> у шагов с <code>oneOrMore</code>, иначе состоянию нечем очищаться.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/#individual-patterns" target="_blank" rel="noopener">Individual Patterns</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Шаблон без within растёт вечно</strong>
+    <p>Попытка, которая так и не дождалась последнего шага, без ограничения по времени остаётся в состоянии навсегда. У карты, которая один раз сделала мелкий платёж, попытка card testing висела бы годами. Ставь <code>within</code> на каждый шаблон и выбирай его по бизнес-смыслу. Для проверки карты это пять минут, для перелёта десять.</p>
+  </div>
+</div>
+
+<h2>CEP или своя функция</h2>
+<p>Ту же проверку карты можно написать на <code>KeyedProcessFunction</code> из урока 7. Счётчик мелких платежей в <code>ValueState</code>, сброс на обычном платеже, таймер на пять минут. Для одного правила кода немного, и ты точно знаешь, сколько состояния занято. CEP выигрывает, когда шаблонов много, у них разные смежности и квантификаторы, и аналитики хотят читать правило как описание последовательности.</p>
+<table>
+<thead><tr><th>Вопрос</th><th>KeyedProcessFunction</th><th>CEP</th></tr></thead>
+<tbody>
+<tr><td>Порядок событий во времени</td><td>Сортировку и буфер пишешь сам</td><td>Буфер до watermark встроен</td></tr>
+<tr><td>Объём состояния</td><td>Ровно то, что объявил</td><td>Зависит от смежности и числа попыток</td></tr>
+<tr><td>Несколько вариантов совпадения</td><td>Каждую ветку кодируешь руками</td><td>Автомат ведёт ветки сам</td></tr>
+<tr><td>Таймаут неполного совпадения</td><td>Таймер и очистка руками</td><td><code>within</code> и обработчик таймаутов</td></tr>
+</tbody>
+</table>
+<p>В Spark Structured Streaming библиотеки шаблонов нет. Похожую логику там пишут в <code>flatMapGroupsWithState</code> или <code>transformWithState</code>, то есть так же вручную, как на <code>KeyedProcessFunction</code>. Во Flink SQL шаблоны описывает оператор <code>MATCH_RECOGNIZE</code> из стандарта SQL, и документация говорит, что внутри он использует ту же библиотеку CEP.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/match_recognize/" target="_blank" rel="noopener">Pattern Recognition</a></p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l10">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. followedBy пропускает события, которые не подходят следующему шагу, и берёт первое подходящее. Одна атака даёт одно совпадение."
+       data-explanation-wrong="Между шагами идут другие события пользователя, значит строгая смежность не годится. А followedByAny даст по совпадению на каждый вывод денег после смены пароля.">
+    <h3 class="quiz-question">Нужно ловить цепочку «вход с нового устройства, смена пароля, вывод денег». Между ними пользователь смотрит баланс и выписки. Какая связка между шагами подходит?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>next, чтобы шаги шли строго подряд</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>followedBy, чтобы посторонние события пропускались</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>followedByAny, чтобы точно ничего не пропустить</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Без within попытки, не дошедшие до конца, никогда не истекают. С allowCombinations их ещё и становится больше с каждым подходящим событием."
+       data-explanation-wrong="Вспомни проверку isStateTimedOut. Если окна нет, то есть windowTime равен нулю, попытка по времени не истекает никогда.">
+    <h3 class="quiz-question">Коллега выкатил шаблон с oneOrMore().allowCombinations() и без within. Через сутки чекпоинт CEP-оператора вырос в десятки раз. Что случилось?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Частичные совпадения копятся и не истекают, и комбинаций становится всё больше</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>CEP хранит все события потока целиком, независимо от шаблона</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Чекпоинт CEP всегда полный и не бывает инкрементальным</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. CEP держит события в буфере, пока watermark их не пройдёт. Новых платежей нет, watermark стоит, и последнее совпадение ждёт."
+       data-explanation-wrong="Посмотри на onEventTime в CepOperator. Буфер разбирается только до текущего watermark, а watermark двигают новые события.">
+    <h3 class="quiz-question">На стенде генератор прислал одну атаку card testing и остановился. Алерта в топике нет уже минуту. Почему?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Атака не попала в окно within</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>CEP выдаёт совпадения раз в минуту пачкой</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Watermark не дошёл до метки крупного платежа, события ещё в буфере</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

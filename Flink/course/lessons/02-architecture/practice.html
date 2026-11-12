@@ -1,0 +1,119 @@
+<h2>Что будет в конце</h2>
+<p>В задании появится оператор посередине, у всех операторов будут постоянные идентификаторы, скрипт отправки избавит от длинной команды, и ты увидишь цепочку в выводе CLI и REST. Новых зависимостей нет. Файл <code>scripts/cluster-status.sh</code> из снапшота относится к заданию этого урока, пока его создавать не нужно.</p>
+
+<h2>Шаг 1. Дай операторам имена и uid</h2>
+<p>Открой <code>src/main/java/dev/study/payguard/job/PayGuardJob.java</code> и внеси такие правки.</p>
+<div data-diff="lesson-01/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-02/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-02/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="26-36"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Источник получает имя <code>payments-raw</code> третьим аргументом и такой же <code>uid</code>. Имя видит человек в интерфейсе. По <code>uid</code> Flink находит состояние оператора при восстановлении.</p>
+      <p class="tl">Фильтр выбрасывает пустые строки. Настоящей очисткой мы займёмся в уроке 3. Сейчас он нужен, чтобы посередине появился оператор и стала видна цепочка.</p>
+      <p class="tl"><code>name</code> и <code>uid</code> относятся к предыдущему вызову, поэтому стоят сразу за фильтром.</p>
+      <p class="tl">Приёмник <code>print</code> тоже получает имя и <code>uid</code>. Состояния у него нет, зато правило «у каждого оператора есть uid» проще проверять.</p>
+      <p class="tl"><code>getExecutionPlan</code> возвращает план в JSON, и мы печатаем его в стандартный вывод. Это выполняется в <code>main</code>, поэтому строка появится в терминале клиента.</p>
+      <p class="tl"><code>execute</code> отправляет задание, как и раньше.</p>
+    </div>
+  </div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Зачем ставить <code>uid</code> сейчас, если состояния ещё нет. Посмотри, как Flink выбирает идентификатор оператора. Без <code>uid</code> хеш строится из положения узла в графе, а с <code>uid</code> только из этой строки.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraphHasherV2.java" data-lines="182-210" data-must="getTransformationUID"></div>
+<p>Автоматический хеш зависит от структуры программы, поэтому добавленный фильтр может поменять идентификаторы соседей, и состояние из savepoint им больше не подойдёт. Документация настойчиво советует задавать <code>uid</code> вручную. Восстановление из savepoint мы разберём в уроке 13, и к тому времени <code>uid</code> уже должны стоять во всех версиях задания.</p>
+<p>И почему печать плана не ломает запуск. Метод вызывает <code>getStreamGraph(false)</code>, то есть не очищает список преобразований, и последующий <code>execute</code> их видит.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/environment/StreamExecutionEnvironment.java" data-lines="2096-2105" data-must="getStreamGraph(false).getStreamingPlanAsJSON()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/savepoints/" target="_blank" rel="noopener">Savepoints, Assigning Operator IDs</a></p>
+</div>
+
+<h2>Шаг 2. Скрипт отправки</h2>
+<p>Создай <code>scripts/submit.sh</code>.</p>
+<div data-code="lesson-02/scripts/submit.sh"></div>
+<p>Строка <code>set -euo pipefail</code> останавливает скрипт при первой ошибке и при обращении к неопределённой переменной. Флаг <code>-T</code> у <code>docker compose exec</code> отключает псевдотерминал, без него скрипт падал бы в CI, где терминала нет. Флаг <code>--detached</code> завершает клиента сразу после отправки. Конструкция <code>"$@"</code> передаёт аргументы скрипта после пути к jar, поэтому они попадают в <code>main</code> твоего задания. Флаги самого <code>flink run</code>, например <code>-p</code>, таким способом не передать, их пиши в отдельной команде.</p>
+<pre data-lang="bash" data-title="терминал">chmod +x scripts/submit.sh</pre>
+<p>Команда <code>chmod +x</code> разрешает запускать файл как программу.</p>
+
+<h2>Шаг 3. Собери и отправь</h2>
+<p>Если стенд остался работать с урока 1, сначала выполни <code>docker compose down</code>, чтобы старое задание не занимало слоты. Порядок прежний, сначала сборка, потом Compose.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+curl -s localhost:8081/overview | jq -c .
+./scripts/submit.sh</pre>
+<p>В прогоне jar занял 24327017 байт. Ответ <code>/overview</code> подтверждает, что свободны все четыре слота. Поля те же, что в уроке 1.</p>
+<pre data-lang="json" data-title="вывод" data-output>{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}</pre>
+<p>Теперь вывод самой отправки. Обрати внимание на его источник. Этот JSON напечатал твой <code>System.out.println</code>, то есть код из <code>main</code> выполнился в клиенте, и результат пришёл в твой терминал.</p>
+<pre data-lang="text" data-title="вывод" data-output>{
+  "nodes" : [ {
+    "id" : 1,
+    "type" : "Source: payments-raw",
+    "pact" : "Data Source",
+    "contents" : "Source: payments-raw",
+    "parallelism" : 2
+  }, {
+    "id" : 2,
+    "type" : "drop-blank",
+    "pact" : "Operator",
+    "contents" : "drop-blank",
+    "parallelism" : 2,
+    "predecessors" : [ {
+      "id" : 1,
+      "ship_strategy" : "FORWARD",
+      "side" : "second"
+    } ]
+  }, {
+    "id" : 3,
+    "type" : "Sink: stdout",
+    "pact" : "Data Sink",
+    "contents" : "Sink: stdout",
+    "parallelism" : 2,
+    "predecessors" : [ {
+      "id" : 2,
+      "ship_strategy" : "FORWARD",
+      "side" : "second"
+    } ]
+  } ]
+}
+Job has been submitted with JobID 8fe3d0eda0de9f053bb73d644c2fd485</pre>
+<p>Это StreamGraph, три узла с нашими именами. Поле <code>ship_strategy</code> показывает способ передачи между операторами. Значение <code>FORWARD</code> здесь значит, что подзадача передаёт записи подзадаче с тем же номером, и именно оно разрешает склейку. Значение <code>parallelism</code> равно 2, потому что в Compose задано <code>parallelism.default: 2</code>. Последняя строка содержит идентификатор задания, он пригодится в следующих командах.</p>
+
+<h2>Шаг 4. Посмотри на то, что реально работает</h2>
+<p>Спроси у REST, какие вершины запущены. Подставь свой идентификатор. Фильтр <code>jq</code> оставляет только нужные поля, а флаг <code>-c</code> печатает результат в одну строку.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:8081/jobs/8fe3d0eda0de9f053bb73d644c2fd485 \
+  | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> drop-blank -> Sink: stdout","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Три узла превратились в одну вершину с именем через стрелки. Это JobGraph, и склейку ты видишь своими глазами. Две подзадачи заняли два слота, значит в <code>/overview</code> теперь должно быть 2 в поле <code>slots-available</code>. При параллелизме 4 в нашем стенде заняты все четыре слота, это проверено на запуске из урока 13.</p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Как сравнивать цепочку и план</strong>
+    <p>Вывод <code>getExecutionPlan</code> показывает логику до склейки, поэтому там всегда отдельные операторы. Настоящие вершины видны в ответе REST и на графе в Web UI. Если в плане <code>FORWARD</code>, а вершины разные, ищи различия в параллелизме или группе slot sharing.</p>
+  </div>
+</div>
+
+<h2>Шаг 5. CLI</h2>
+<p>Список заданий кластера выдаёт команда <code>flink list</code>.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T jobmanager flink list</pre>
+<pre data-lang="text" data-title="вывод" data-output>Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 20:56:54 : 8fe3d0eda0de9f053bb73d644c2fd485 : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.</pre>
+<p>В строке стоят время запуска, идентификатор, имя из <code>env.execute</code> и статус. Остановить задание без сохранения состояния можно так.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T jobmanager flink cancel 8fe3d0eda0de9f053bb73d644c2fd485</pre>
+<p>Команда <code>cancel</code> переводит задание в отменённое состояние, и все его вычисления прекращаются. После этого <code>curl -s localhost:8081/jobs | jq -c .</code> покажет задание со статусом <code>CANCELED</code>, а все четыре слота снова будут свободны. Для остановки с сохранением состояния есть <code>flink stop</code>, его мы разберём в уроке 13. Запусти задание снова командой <code>./scripts/submit.sh</code>, идентификатор будет новым.</p>
+
+<h2>Шаг 6. Web UI</h2>
+<p>Открой <code>http://localhost:8081</code>. На странице запущенных заданий нажми <code>payguard</code> и найди на графе блок с надписью <code>Source: payments-raw -&gt; drop-blank -&gt; Sink: stdout</code>. Это та же одна вершина, что в REST. Нажми на неё и открой список подзадач, там их две, и у каждой указан TaskManager. На странице Task Managers видно число всех и свободных слотов. На странице задания есть вкладки Exceptions и Checkpoints. В нашем прогоне список исключений был пуст и чекпоинтов ноль, мы их ещё не включали.</p>
+<p>Чтобы записи шли, запусти генератор из урока 1. Он отправит в поток битые записи, и они пока пройдут через фильтр дальше в <code>print</code>, потому что пустыми не являются.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew loadgen --args="--rate 5 --dup 0.02 --bad 0.01"</pre>
+
+<h2>Шаг 7. Проверь на себе нехватку слотов</h2>
+<p>Этот опыт покажет, как выглядит авария из начала урока. Флаг <code>-p</code> задаёт параллелизм заданию при отправке и стоит перед путём к jar.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T jobmanager flink cancel &lt;id текущего задания&gt;
+docker compose exec -T jobmanager flink run --detached -p 8 /jobs/payguard-1.0.0.jar</pre>
+<p>В этом случае подзадач восемь, а слотов четыре. Вывод такого запуска мы не снимали, поэтому смотри на него сам и сверяй с теорией. Статус задания должен стать RUNNING, затем в логе JobManager появится <code>NoResourceAvailableException</code>. Если кластер только что поднят, ждать придётся до пяти минут. Логи можно читать командой <code>docker compose logs jobmanager</code>. Для продолжения курса верни обычный запуск через <code>./scripts/submit.sh</code>.</p>

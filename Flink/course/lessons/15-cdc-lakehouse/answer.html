@@ -1,0 +1,20 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<div data-code="lesson-15/sql/paimon_report.sql"></div>
+<p>Строка с <code>execution.runtime-mode</code> делает запрос конечным, он читает один снимок таблицы и завершается. Значение <code>tableau</code> у <code>sql-client.execution.result-mode</code> печатает результат таблицей в терминале.</p>
+<p>Каталог приходится объявлять заново, потому что клиент запускается новым процессом с новой сессией. Сами данные и описание таблицы лежат в <code>warehouse</code>, и создавать таблицу второй раз не нужно. Сортировка по <code>alerts</code> разрешена именно в пакетном режиме. В потоковом основной порядок обязан идти по атрибуту времени.</p>
+<pre data-lang="bash" data-title="терминал">docker compose --profile sql exec -T sql-jobmanager sql-client.sh -f /sql/paimon_report.sql</pre>
+<p>В нашем прогоне отчёт вернул 9 строк. Вот несколько из них.</p>
+<table>
+<thead><tr><th>rule_id</th><th>merchant_risk</th><th>alerts</th></tr></thead>
+<tbody>
+<tr><td>impossible-travel</td><td>LOW</td><td>15</td></tr>
+<tr><td>velocity</td><td>LOW</td><td>15</td></tr>
+<tr><td>impossible-travel</td><td>HIGH</td><td>14</td></tr>
+<tr><td>card-testing</td><td>LOW</td><td>13</td></tr>
+</tbody>
+</table>
+<p>Как проверить, что отчёт согласован с источником. Запусти его дважды с паузой в пару интервалов чекпоинта, числа должны только расти. Чтобы увидеть старую версию, добавь к таблице подсказку <code>/*+ OPTIONS('scan.snapshot-id' = '1') */</code>. Запрос прочитает самый первый снимок и вернёт меньшие числа, если он ещё не удалён сроком хранения.</p>
+<p class="doc-links">Документация: <a href="https://paimon.apache.org/docs/2.1/flink/quick-start/" target="_blank" rel="noopener">Paimon, Quick Start</a>, <a href="https://paimon.apache.org/docs/2.1/flink/sql-query/" target="_blank" rel="noopener">SQL Query</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/orderby/" target="_blank" rel="noopener">ORDER BY</a></p>
+</div>

@@ -1,0 +1,45 @@
+### тесты
+RESULT tests 18 fail 0
+jar bytes 24351512
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+Job has been submitted with JobID b68c80af7285f783d7da2f3e41306bf2
+### job b68c80af7285f783d7da2f3e41306bf2
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 21:05:47 : b68c80af7285f783d7da2f3e41306bf2 : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe) :: [{"id":"numRecordsIn","min":8100.0,"max":9700.0,"sum":17800.0},{"id":"numRecordsOut","min":8100.0,"max":9700.0,"sum":17800.0},{"id":"busyTimeMsPerSecond","min":3.0,"max":3.0,"sum":6.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer) :: [{"id":"numRecordsIn","min":7012.0,"max":10592.0,"sum":17604.0},{"id":"numRecordsOut","min":89.0,"max":93.0,"sum":182.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085630855","1794085630855"]
+card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer :: [{"id":"numRecordsIn","min":8734.0,"max":8870.0,"sum":17604.0},{"id":"numRecordsOut","min":1617.0,"max":1631.0,"sum":3248.0},{"id":"busyTimeMsPerSecond","min":5.0,"max":5.0,"sum":10.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085630855","1794085630855"]
+### checkpoints
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}
+### exceptions
+[]
+### топики
+--- card.sessions
+{"cardId":"c-3710","sessionStartMs":1794085556146,"sessionEndMs":1794085590732,"paymentCount":2,"amountMinor":29438}
+{"cardId":"c-2015","sessionStartMs":1794085560732,"sessionEndMs":1794085590732,"paymentCount":1,"amountMinor":41989}
+{"cardId":"c-1722","sessionStartMs":1794085560732,"sessionEndMs":1794085590732,"paymentCount":1,"amountMinor":4280}
+--- fraud.alerts
+--- merchant.stats
+{"merchantId":"m-0000","windowStartMs":1794085500000,"windowEndMs":1794085560000,"paymentCount":632,"amountMinor":16098738}
+{"merchantId":"m-0008","windowStartMs":1794085500000,"windowEndMs":1794085560000,"paymentCount":29,"amountMinor":850031}
+{"merchantId":"m-0009","windowStartMs":1794085500000,"windowEndMs":1794085560000,"paymentCount":27,"amountMinor":650680}
+--- payments.dlq
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085549637}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085550203}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085550859}
+--- payments.late
+--- payments.raw
+{"paymentId":"a0aaae61-56fb-db04-9af5-f0910b6aa55e","cardId":"c-4461","merchantId":"m-0000","amountMinor":24036,"currency":"EUR","country":"DE","eventTimeMs":1794085549065}
+{"paymentId":"044d7e11-d07f-b5e9-92c3-043846b13915","cardId":"c-3426","merchantId":"m-0038","amountMinor":41632,"currency":"EUR","country":"NL","eventTimeMs":1794085549065}
+{"paymentId":"158e9b7c-2bdc-21c4-ac61-73fb32a56ee9","cardId":"c-2005","merchantId":"m-0023","amountMinor":43123,"currency":"EUR","country":"FR","eventTimeMs":1794085549066}
+--- rules.config
+### postgres
+### лог TaskManager, ошибки

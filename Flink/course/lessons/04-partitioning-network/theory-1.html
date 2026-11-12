@@ -1,0 +1,151 @@
+<h2>Треть платежей у одного продавца</h2>
+<p>PayGuard должен держать по каждому продавцу накопительный итог. Для этого все платежи одного продавца обязаны приходить в одну и ту же параллельную копию оператора, иначе итог разъедется по нескольким местам. В Spark ту же задачу решает shuffle по ключу перед агрегацией.</p>
+<p>В генераторе есть подвох, и он взят из жизни. У любого маркетплейса или платёжного агрегатора найдётся крупный продавец, через которого идёт заметная доля оборота. У нас это <code>m-0000</code>, на него приходится 30 % платежей.</p>
+<div data-code="lesson-04/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java" data-lines="12-14"></div>
+<p>Если все платежи <code>m-0000</code> обязаны попасть в одну подзадачу, эта подзадача получит минимум треть нагрузки, сколько бы их ни было. В уроке разберём, как Flink выбирает подзадачу для ключа, как записи физически едут по сети и почему одна перегруженная подзадача замедляет соседей.</p>
+
+<h2>Гардероб в театре</h2>
+<p>Представь гардероб на 128 крючков и несколько гардеробщиков. Номер крючка для пальто выбирают по фамилии зрителя по жёсткому правилу, поэтому одно и то же пальто всегда висит на одном крючке. Каждый гардеробщик отвечает за непрерывный ряд крючков. Двое делят ряд пополам, четверо берут по 32 крючка.</p>
+<p>Если в зал пришёл ещё один гардеробщик, пальто никто не перевешивает. Меняются только границы рядов, и часть крючков переходит к новому человеку целиком, вместе с пальто. Число крючков при этом поменять нельзя, они прибиты к стене.</p>
+<p>Во Flink крючки называются группами ключей (key group), гардеробщики это подзадачи оператора после <code>keyBy</code>, а пальто это состояние ключа. Если пришёл автобус туристов с одной фамилией, всё ляжет на один крючок, и разгребать очередь будет один гардеробщик. Это перекос ключей.</p>
+
+<h2>keyBy и группы ключей</h2>
+<p>Метод <code>keyBy</code> объявляет, что дальше поток разбит по ключу. Сам он ничего не считает, он ставит на ребро графа стратегию распределения (partitioner) <code>KeyGroupStreamPartitioner</code>. Для каждой записи она делает два шага.</p>
+<ol>
+  <li>Номер группы ключей. <code>keyGroup = murmurHash(key.hashCode()) % maxParallelism</code>. Здесь <code>key.hashCode()</code> это обычный Java-хеш ключа, а <code>murmurHash</code> перемешивает его биты, чтобы похожие строки не легли в соседние группы. <code>maxParallelism</code> задаёт число групп, по умолчанию 128.</li>
+  <li>Номер подзадачи. <code>subtask = keyGroup * parallelism / maxParallelism</code> в целых числах. Группы нарезаются непрерывными диапазонами, при параллелизме 4 подзадача 0 получает группы 0-31, подзадача 1 группы 32-63 и так далее.</li>
+</ol>
+<p>Посчитаем вручную для нашего горячего продавца. Числа проверены вызовом <code>KeyGroupRangeAssignment</code> из <code>flink-runtime</code> 2.2.1 и отдельным расчётом на Python.</p>
+<table>
+<thead><tr><th>Шаг</th><th><code>m-0000</code></th><th><code>m-0007</code></th></tr></thead>
+<tbody>
+<tr><td><code>hashCode()</code> строки</td><td>-1131353760</td><td>-1131353753</td></tr>
+<tr><td><code>murmurHash</code> от него</td><td>1049440786</td><td>1500536744</td></tr>
+<tr><td>Остаток от деления на 128</td><td>18</td><td>40</td></tr>
+<tr><td>Подзадача при параллелизме 2</td><td>18 × 2 / 128 = 0</td><td>40 × 2 / 128 = 0</td></tr>
+<tr><td>Подзадача при параллелизме 4</td><td>18 × 4 / 128 = 0</td><td>40 × 4 / 128 = 1</td></tr>
+<tr><td>Подзадача при параллелизме 8</td><td>18 × 8 / 128 = 1</td><td>40 × 8 / 128 = 2</td></tr>
+</tbody>
+</table>
+<p>Хеши у двух строк почти одинаковые, отличаются на 7. После <code>murmurHash</code> они расходятся далеко, это и есть смысл второго хеширования. Обрати внимание, что номер группы от параллелизма не зависит. При смене параллелизма меняется только то, какая подзадача владеет группой 18.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Обе формулы живут в классе <code>KeyGroupRangeAssignment</code>. Сначала ключ превращается в номер группы, на вход идёт обычный <code>hashCode()</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/KeyGroupRangeAssignment.java" data-lines="63-77" data-must="MathUtils.murmurHash(keyHash) % maxParallelism"></div>
+<p>Потом группа превращается в номер подзадачи одной целочисленной формулой.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/KeyGroupRangeAssignment.java" data-lines="124-127" data-must="keyGroupId * parallelism / maxParallelism"></div>
+<p>Сама стратегия на ребре берёт ключ из записи и вызывает эту функцию. Число каналов <code>numberOfChannels</code> равно параллелизму получателя.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/partitioner/KeyGroupStreamPartitioner.java" data-lines="54-65" data-must="assignKeyToParallelOperator"></div>
+<p>Отсюда следует требование к ключу. Его <code>hashCode()</code> должен давать одно и то же число в разных JVM. У <code>String</code>, <code>Long</code> и record из строк так и есть. Хеш по умолчанию из <code>Object</code> зависит от конкретного объекта, и одинаковые ключи на разных машинах уйдут в разные подзадачи. Документация прямо запрещает ключи без переопределённого <code>hashCode()</code> и массивы.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/stateful-stream-processing/" target="_blank" rel="noopener">Stateful Stream Processing</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/" target="_blank" rel="noopener">Operators</a></p>
+</div>
+
+<h2>Максимальный параллелизм выбирают один раз</h2>
+<p>Группа ключей это единица, которой Flink переносит состояние при смене параллелизма. Отсюда два последствия. Параллелизм оператора с состоянием не может превысить <code>maxParallelism</code>, потому что подзадаче без единой группы нечего делать. И сменить <code>maxParallelism</code> после первого запуска без потери состояния нельзя, ведь от него зависит номер группы каждого ключа.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Если <code>maxParallelism</code> не задан, планировщик вычисляет его из параллелизма вершины.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/scheduler/SchedulerBase.java" data-lines="322-329" data-must="computeDefaultMaxParallelism"></div>
+<p>Формула берёт полтора параллелизма, округляет вверх до степени двойки и держит результат в пределах от 128 до 32768.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/KeyGroupRangeAssignment.java" data-lines="137-147" data-must="DEFAULT_LOWER_BOUND_MAX_PARALLELISM"></div>
+<p>Мы вызвали эту функцию для разных значений. До параллелизма 85 включительно получается 128, при 86 уже 256, при 200 получается 512. На странице Production Readiness написано, что 128 выдаётся для любого параллелизма до 128. Код с этим расходится, верь коду.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/execution/parallel/" target="_blank" rel="noopener">Parallel Execution</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/production_ready/" target="_blank" rel="noopener">Production Readiness Checklist</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Задай maxParallelism до первого запуска в прод</strong>
+    <p>Задание стартовало с параллелизмом 100 и без явной настройки получило 256 групп. Через год нагрузка выросла, и нужен параллелизм 300. Без потери состояния это невозможно. Выбери число с запасом на рост, например 1024 или 4096, и задай его через <code>env.setMaxParallelism</code> или ключ <code>pipeline.max-parallelism</code>. Слишком большое число тоже вредно, часть структур бэкенда состояния растёт вместе с числом групп.</p>
+  </div>
+</div>
+
+<p>В Spark Structured Streaming похожее ограничение устроено жёстче. Состояние там разбито хешем ключа на <code>spark.sql.shuffle.partitions</code> частей, и документация запрещает менять эту настройку после первого запуска запроса. Во Flink неизменно число групп, а параллелизм можно менять в его пределах.</p>
+
+<h2>Другие способы раздать записи</h2>
+<p>Ключ нужен не всегда. Если оператор работает с каждой записью отдельно, записи можно раздавать так, как удобнее сети. У каждого способа есть имя, которое Web UI пишет на ребре между вершинами.</p>
+<table>
+<thead><tr><th>Вызов в DataStream</th><th>Имя на ребре</th><th>Кому уходит запись</th><th>Когда нужен</th></tr></thead>
+<tbody>
+<tr><td><code>keyBy(...)</code></td><td>HASH</td><td>Подзадаче, которой принадлежит группа ключа</td><td>Состояние и агрегаты по ключу</td></tr>
+<tr><td><code>rebalance()</code></td><td>REBALANCE</td><td>По кругу всем подзадачам получателя</td><td>Выровнять перекос после источника</td></tr>
+<tr><td><code>rescale()</code></td><td>RESCALE</td><td>По кругу, но только своему подмножеству получателей</td><td>Разветвить поток без связи каждого с каждым</td></tr>
+<tr><td><code>forward()</code></td><td>FORWARD</td><td>Подзадаче с тем же номером</td><td>Цепочки, параллелизм обязан совпадать</td></tr>
+<tr><td><code>broadcast()</code></td><td>BROADCAST</td><td>Всем подзадачам сразу</td><td>Маленький справочник или правила, урок 8</td></tr>
+<tr><td><code>shuffle()</code>, <code>global()</code></td><td>SHUFFLE, GLOBAL</td><td>Случайной подзадаче или всегда первой</td><td>Редко, <code>global</code> сводит всё в одну подзадачу</td></tr>
+</tbody>
+</table>
+<p>Если ты ничего не указал, Flink выбирает сам. При одинаковом параллелизме соседей ставится FORWARD, при разном REBALANCE. Если явно попросить <code>forward()</code> между операторами с разным параллелизмом, задание упадёт ещё при построении графа.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Правило выбора по умолчанию и проверка для FORWARD находятся в одном методе <code>StreamGraph</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraph.java" data-lines="896-914" data-must="partitioner = new RebalancePartitioner"></div>
+<p>REBALANCE начинает со случайного канала, чтобы разные отправители не били в одного получателя одновременно, и дальше идёт по кругу.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/partitioner/RebalancePartitioner.java" data-lines="38-49" data-must="nextChannelToSendTo = (nextChannelToSendTo + 1) % numberOfChannels"></div>
+<p>RESCALE устроен так же внутри одного отправителя, а подмножество получателей определяется при построении графа исполнения. Если получателей больше, отправитель с номером <code>partitionNum</code> кормит непрерывный кусок из <code>numConsumers</code> подзадач.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/VertexInputInfoComputationUtils.java" data-lines="133-143" data-must="int numConsumers = end - start;"></div>
+<p>Имя на ребре в Web UI это результат <code>toString()</code> стратегии, поэтому там видны именно HASH, REBALANCE и FORWARD.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamingJobGraphGenerator.java" data-lines="1612-1613" data-must="setShipStrategyName"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/#physical-partitioning" target="_blank" rel="noopener">Physical Partitioning</a></p>
+</div>
+
+<p>Посмотри, как выглядит раскладка на практике. Модель использует те же формулы, что Flink, поэтому номера подзадач для ключей совпадают с настоящими. Включи и выключи горячего продавца, поменяй параллелизм получателя с 2 на 8 и сравни HASH с REBALANCE.</p>
+
+<div class="viz" id="viz-l04">
+  <p class="viz-title">Куда уходят платежи</p>
+  <div class="viz-controls">
+    <label>Стратегия <select id="viz-l04-strategy">
+      <option value="hash">keyBy (HASH)</option>
+      <option value="rebalance">rebalance</option>
+      <option value="rescale">rescale</option>
+      <option value="forward">forward</option>
+      <option value="broadcast">broadcast</option>
+    </select></label>
+    <label>Отправителей <input type="range" id="viz-l04-up" min="1" max="4" value="2"> <span id="viz-l04-up-value">2</span></label>
+    <label>Получателей <input type="range" id="viz-l04-down" min="1" max="8" value="4"> <span id="viz-l04-down-value">4</span></label>
+    <label><input type="checkbox" id="viz-l04-hot" checked> Горячий продавец m-0000</label>
+    <button class="primary" id="viz-l04-run" type="button">Отправить 700 платежей</button>
+  </div>
+  <svg id="viz-l04-svg" role="img" aria-label="Слева подзадачи-отправители, справа подзадачи-получатели. Линии показывают, кто с кем связан, столбцы показывают, сколько платежей получила каждая подзадача."></svg>
+  <p class="viz-note" id="viz-l04-result">Нажми кнопку, и платежи разойдутся по подзадачам.</p>
+</div>
+
+<p>При HASH и четырёх получателях одна подзадача получает больше других даже без горячего ключа. 50 ключей это мало, и на четыре подзадачи они легли как 8, 14, 11 и 17. Горячий продавец добавляет к этому треть всего потока в подзадачу 0. REBALANCE и RESCALE раскладывают ровно, но ключ при этом теряется, и считать по нему итог уже нельзя.</p>
+
+<h2>Где рвётся цепочка</h2>
+<p>Из урока 2 ты помнишь, что соседние операторы склеиваются в цепочку и работают в одном потоке. Склейка возможна только на ребре FORWARD. Любой из способов выше, кроме forward, разрывает цепочку, потому что запись может уйти в другую подзадачу, а значит в другой поток или на другую машину. Ещё цепочку рвут разный параллелизм, разные группы слотов, вызовы <code>startNewChain()</code> и <code>disableChaining()</code>.</p>
+<p>В PayGuard после этого урока две вершины. Первая заканчивается на <code>to-merchant-total</code>, вторая начинается с <code>merchant-running-total</code>, между ними ребро HASH.</p>
+
+<svg viewBox="0 0 860 200" role="img" aria-label="Две вершины задания PayGuard. В первой цепочка от источника до преобразования в итог, во второй reduce и печать. Между ними ребро HASH, каждая подзадача первой вершины связана с каждой подзадачей второй." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l04" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="12" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <text x="210" y="18" font-weight="700">Вершина 1, параллелизм 2</text>
+    <text x="680" y="18" font-weight="700">Вершина 2, параллелизм 2</text>
+    <rect x="10" y="30" width="400" height="66" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/>
+    <rect x="10" y="114" width="400" height="66" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/>
+    <text x="210" y="52">подзадача 0</text><text x="210" y="136">подзадача 1</text>
+    <text x="210" y="78" font-size="11">payments-raw → parse-payment → to-merchant-total (и dlq-sink)</text>
+    <text x="210" y="162" font-size="11">payments-raw → parse-payment → to-merchant-total (и dlq-sink)</text>
+    <rect x="560" y="30" width="240" height="66" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <rect x="560" y="114" width="240" height="66" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="680" y="52">подзадача 0</text><text x="680" y="136">подзадача 1</text>
+    <text x="680" y="78" font-size="11">merchant-running-total → stdout</text>
+    <text x="680" y="162" font-size="11">merchant-running-total → stdout</text>
+    <text x="485" y="108" font-weight="700" fill="var(--color-accent)">HASH</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l04)">
+    <path d="M410 63H558"/><path d="M410 147H558"/><path d="M410 70L558 140"/><path d="M410 140L558 70"/>
+  </g>
+</svg>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Внутри цепочки запись передаётся следующему оператору обычным вызовом метода. Сериализации, буферов и сети здесь нет, счётчики увеличиваются и сразу вызывается обработчик.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/ChainingOutput.java" data-lines="101-114" data-must="recordProcessor.accept(castRecord)"></div>
+<p>На разрыве цепочки запись проходит весь путь, о котором ниже. Её сериализуют в байты, копят в сетевом буфере, передают и разбирают на другой стороне. Поэтому лишний <code>rebalance()</code> между простыми операторами стоит заметно дороже самого оператора.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/#task-chaining-and-resource-groups" target="_blank" rel="noopener">Task Chaining and Resource Groups</a></p>
+</div>
+

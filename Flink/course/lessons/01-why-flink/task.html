@@ -1,0 +1,9 @@
+<h2>Задание. Почини свой старый конфиг</h2>
+<p>В корне проекта лежит <code>flink-conf.yaml</code>, с которым твой кластер получал ноль TaskManager. Перепиши его так, чтобы Flink 2.2.1 реально применил настройки. Сам исходный файл и <code>Makefile</code> оставь как есть, новый файл положи в <code>conf/config.yaml</code> внутри проекта.</p>
+<ol>
+  <li>Создай файл с правильным именем и ключами Flink 2.x. Сохрани смысл настроек, это 4 слота, параллелизм 2, состояние в куче и каталоги чекпоинтов в <code>/tmp</code>.</li>
+  <li>Подними JobManager и TaskManager обычным <code>docker run</code> в отдельной сети, смонтировав файл в <code>/opt/flink/conf/config.yaml</code>. Образ бери <code>flink:2.2.1-java17</code>.</li>
+  <li>Докажи, что настройки применились, запросами к REST.</li>
+</ol>
+<p>Готово, если <code>/overview</code> показывает 1 TaskManager и 4 слота, а <code>/jobmanager/config</code> содержит твои значения.</p>
+<p>Подсказка. Родной <code>config.yaml</code> в образе задаёт не только адрес JobManager. Посмотри на него командой <code>docker run --rm flink:2.2.1-java17 cat /opt/flink/conf/config.yaml</code> и подумай, на каком адресе процессы слушают сеть, если ключей <code>bind-host</code> нет.</p>

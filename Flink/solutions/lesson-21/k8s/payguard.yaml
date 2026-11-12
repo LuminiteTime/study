@@ -1,0 +1,54 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: payguard
+spec:
+  image: payguard-job:1.0.0
+  imagePullPolicy: IfNotPresent
+  flinkVersion: v2_2
+  serviceAccount: flink
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "2"
+    state.backend.type: rocksdb
+    execution.checkpointing.incremental: "true"
+    execution.checkpointing.interval: 15s
+    execution.checkpointing.min-pause: 10s
+    execution.checkpointing.dir: file:///flink-data/checkpoints
+    execution.checkpointing.savepoint-dir: file:///flink-data/savepoints
+    execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+    high-availability.type: kubernetes
+    high-availability.storageDir: file:///flink-data/ha
+    restart-strategy.type: exponential-delay
+    metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+    metrics.reporter.prom.port: "9249"
+  podTemplate:
+    spec:
+      securityContext:
+        fsGroup: 9999
+      containers:
+        - name: flink-main-container
+          env:
+            - { name: PAYGUARD_DB_URL, value: "jdbc:postgresql://postgres:5432/payguard" }
+            - { name: PAYGUARD_DB_USER, value: payguard }
+            - name: PAYGUARD_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: payguard-db, key: password }
+          volumeMounts:
+            - { name: flink-data, mountPath: /flink-data }
+      volumes:
+        - name: flink-data
+          persistentVolumeClaim:
+            claimName: flink-data
+  jobManager:
+    resource:
+      memory: 1600m
+      cpu: 0.5
+  taskManager:
+    resource:
+      memory: 2048m
+      cpu: 1
+  job:
+    jarURI: local:///opt/flink/usrlib/payguard.jar
+    parallelism: 2
+    upgradeMode: savepoint
+    state: running

@@ -1,0 +1,204 @@
+<h2>Итог, у которого нет конца</h2>
+<p>В уроке 4 задание считало по каждому продавцу накопительный итог через <code>keyBy</code> и <code>reduce</code>. Этот итог растёт с момента запуска и на вопрос «сколько продавец m-0000 принял с 12:00 до 12:01» ответить не может. Антифроду и дашборду нужны итоги за ограниченные отрезки времени. Сколько платежей прошло у продавца за минуту. Сколько раз карта платила подряд без долгих пауз.</p>
+<p>У накопительного итога есть и вторая беда. <code>reduce</code> держит по значению на каждый ключ всё время работы задания, и Flink не знает, когда это значение можно выбросить. Окно задаёт обе границы сразу. Оно говорит, когда результат готов к выдаче, и когда его состояние можно удалить.</p>
+
+<h2>Квитанция за свет</h2>
+<p>Представь управляющую компанию. Каждый жилец сдаёт показания счётчика, а бухгалтерия раз в месяц выставляет квитанцию. Месяц здесь это окно, жилец это ключ. Квитанцию за октябрь печатают, когда бухгалтерия решила, что показаний за октябрь больше не будет. Обычно это 3 ноября, к этому дню успевают даже те, кто сдаёт с небольшой задержкой. Такое решение во Flink принимает watermark, ты знаешь его по уроку 5.</p>
+<p>Жилец принёс октябрьские показания 10 ноября. Квитанция уже ушла, но перерасчёт разрешён до 25 ноября, и жилец получит исправленную квитанцию. Во Flink это допуск опозданий <code>allowedLateness</code> и позднее срабатывание окна. Показания за октябрь, принесённые в декабре, в октябрь уже не войдут. Их складывают в отдельную папку для ручного разбора, во Flink это побочный выход.</p>
+<p>Бухгалтерии незачем хранить каждое показание до конца месяца, ей достаточно текущей суммы по счётчику. Так работает <code>AggregateFunction</code>. А среднее потребление за последние три месяца, которое пересчитывают каждый месяц, это sliding окно. Каждое показание входит в три таких расчёта.</p>
+
+<h2>Четыре вида окон</h2>
+<p>Окно описывается в коде после <code>keyBy</code> вызовом <code>window(...)</code>. Аргумент этого вызова называется assigner. Он получает время события записи и возвращает окна, в которые она попадает.</p>
+<table>
+<thead><tr><th>Вид</th><th>Как назначаются окна</th><th>Окон на одну запись</th><th>Когда выдаётся итог</th><th>Пример в PayGuard</th></tr></thead>
+<tbody>
+<tr><td>Tumbling</td><td>Отрезки одной длины встык, без пересечений</td><td>1</td><td>Watermark прошёл конец отрезка</td><td>Оборот продавца за каждую минуту</td></tr>
+<tr><td>Sliding</td><td>Отрезки длины <code>size</code>, новый начинается каждые <code>slide</code></td><td><code>size / slide</code></td><td>Watermark прошёл конец отрезка</td><td>Платежи карты за 10 минут с обновлением каждую минуту</td></tr>
+<tr><td>Session</td><td>Каждая запись открывает отрезок длиной в паузу, пересекающиеся отрезки сливаются</td><td>1 после слияния</td><td>Watermark прошёл последний платёж плюс паузу</td><td>Серия платежей карты без перерыва дольше 30 с</td></tr>
+<tr><td>Global</td><td>Одно окно на ключ на всё время</td><td>1</td><td>Только по твоему trigger</td><td>Счётчик со своим условием выдачи</td></tr>
+</tbody>
+</table>
+
+<p>Попробуй виды окон на одной ленте. Двенадцать платежей одного ключа уже пришли вовремя, а ещё один, с временем 52 с, появится, когда watermark дойдёт до 75 с. Размер tumbling и sliding окна 30 с, шаг sliding окна 10 с, пауза сессии 10 с. Для простоты платежи здесь приходят строго по порядку, и watermark совпадает со временем последнего из них. Логика срабатываний повторяет код оконного оператора, который мы разберём ниже.</p>
+
+<div class="viz" id="viz-l06">
+  <p class="viz-title">Лента платежей и окна</p>
+  <div class="viz-controls">
+    <label>Вид окна <select id="viz-l06-type">
+      <option value="tumbling">Tumbling, 30 с</option>
+      <option value="sliding">Sliding, 30 с с шагом 10 с</option>
+      <option value="session">Session, пауза 10 с</option>
+      <option value="global">Global</option>
+    </select></label>
+    <label><input type="checkbox" id="viz-l06-lateness"> allowedLateness 20 с</label>
+    <button class="primary" id="viz-l06-run" type="button">Пустить watermark</button>
+  </div>
+  <svg id="viz-l06-svg" role="img" aria-label="Ось времени с платежами одного ключа. Под ней прямоугольники окон, которые меняют цвет, когда watermark проходит их конец."></svg>
+  <p class="viz-note" id="viz-l06-result"></p>
+</div>
+
+<p>Обрати внимание на три вещи. В sliding окнах каждый платёж лежит трижды, и счётчик копий в подписи под лентой растёт втрое. Global окно не выдаёт ничего, сколько бы ни шёл watermark. Опоздавший платёж ведёт себя по-разному в зависимости от вида окна и допуска, и в sliding окнах он может попасть только в часть своих окон.</p>
+
+<h3>Как tumbling окно находит своё начало</h3>
+<p>Assigner ничего не ищет в состоянии и не хранит список окон. Начало окна он вычисляет арифметикой от времени записи.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Метод <code>assignWindows</code> у tumbling окна возвращает список из одного окна. Смотри на две детали. Начало берётся из <code>getWindowStartWithOffset</code>, а запись без времени события роняет задание с понятным текстом.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/assigners/TumblingEventTimeWindows.java" data-lines="69-86" data-must="getWindowStartWithOffset"></div>
+<p>Сама формула занимает три строки. Остаток от деления времени на размер окна отбрасывается, ветка для отрицательного остатка нужна временам до 1970 года.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/windows/TimeWindow.java" data-lines="264-272" data-must="final long remainder = (timestamp - offset) % windowSize;"></div>
+<p>Проверим на настоящем платеже со стенда. Время события 1794085549065, размер окна 60000 мс, смещение по умолчанию 0. Остаток 49065, значит начало окна 1794085500000, а конец 1794085560000. Ровно такие границы ты увидишь в топике <code>merchant.stats</code> на практике. Окна выровнены по началу эпохи, поэтому минутное окно всегда начинается в ноль секунд по UTC. Сдвинуть границы можно вторым аргументом <code>of(size, offset)</code>, это нужно, например, для суточных окон по московскому времени.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#tumbling-windows" target="_blank" rel="noopener">Tumbling Windows</a></p>
+</div>
+
+<h3>Почему sliding окно дорого стоит</h3>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>У sliding окна тот же метод строит список. Цикл идёт от последнего начала назад с шагом <code>slide</code>, пока окно ещё накрывает запись.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/assigners/SlidingEventTimeWindows.java" data-lines="77-91" data-must="start -= slide"></div>
+<p>Ёмкость списка задана прямо как <code>size / slide</code>. Окно на 10 минут с шагом в минуту даёт 10 окон на каждую запись, с шагом в 10 секунд уже 60. Документация приводит крайний пример, сутки с шагом в секунду дают 86400 окон на запись.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#useful-state-size-considerations" target="_blank" rel="noopener">Useful state size considerations</a></p>
+</div>
+
+<h3>Как сессии склеиваются</h3>
+<p>Сессионное окно заранее не знает своих границ. Поэтому каждая запись сначала получает собственное окно длиной в паузу, а потом оператор склеивает его с соседними.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Assigner сессий возвращает окно от времени записи до этого времени плюс пауза.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/windowing/assigners/EventTimeSessionWindows.java" data-lines="60-64" data-must="timestamp + sessionTimeout"></div>
+<p>Склеиваются окна, которые пересекаются или касаются друг друга. Результат накрывает оба окна.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/windows/TimeWindow.java" data-lines="112-123" data-must="this.start &lt;= other.end"></div>
+<p>При склейке накопленные значения двух окон объединяются. Для состояния в куче это вызов <code>merge</code> твоей <code>AggregateFunction</code>. Метод выше, <code>add</code>, показывает, что состояние адресуется текущим namespace, то есть окном.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/HeapAggregatingState.java" data-lines="93-111" data-must="aggregateTransformation.aggFunction.merge(a, b)"></div>
+<p>Отсюда правило. Метод <code>merge</code> в <code>AggregateFunction</code> вызывается только при склейке окон. Tumbling окна его не трогают. Сессии без него дадут неверный результат. Конец сессии всегда равен времени последнего платежа плюс пауза.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#session-windows" target="_blank" rel="noopener">Session Windows</a></p>
+</div>
+
+<p>Global окно устроено проще всех. Все записи ключа попадают в одно окно, а trigger по умолчанию у него никогда не срабатывает.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Фабрика <code>create</code> подставляет <code>NeverTrigger</code>, комментарий прямо предупреждает, что без своего trigger вычислений не будет.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/assigners/GlobalWindows.java" data-lines="65-72" data-must="new GlobalWindows(new NeverTrigger())"></div>
+<p>Конец global окна равен <code>Long.MAX_VALUE</code>, поэтому оно никогда не считается опоздавшим и само из состояния не удаляется. Global окно имеет смысл только вместе со своим trigger и логикой очистки.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#global-windows" target="_blank" rel="noopener">Global Windows</a></p>
+</div>
+
+<h2>Из чего собран оконный оператор</h2>
+<p>За вызовами <code>window(...)</code> и <code>aggregate(...)</code> стоит один оператор <code>WindowOperator</code> из четырёх частей.</p>
+<svg viewBox="0 0 860 150" role="img" aria-label="Запись проходит через assigner, затем попадает в состояние окна. Trigger решает, когда отдать окно функции. Evictor, если он задан, убирает записи перед функцией." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l06" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="45" width="110" height="56" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="65" y="70">Платёж</text><text x="65" y="88" font-size="11">ключ и время</text>
+    <rect x="160" y="45" width="130" height="56" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="225" y="70" font-weight="700">Assigner</text><text x="225" y="88" font-size="11">в какие окна</text>
+    <rect x="330" y="45" width="150" height="56" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="405" y="70">Состояние окна</text><text x="405" y="88" font-size="11">ключ + окно</text>
+    <rect x="330" y="0" width="150" height="34" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="405" y="22" font-weight="700">Trigger</text>
+    <rect x="520" y="45" width="130" height="56" rx="8" fill="var(--color-surface)" stroke="var(--color-border)" stroke-dasharray="5 3"/><text x="585" y="70" font-weight="700">Evictor</text><text x="585" y="88" font-size="11">необязателен</text>
+    <rect x="690" y="45" width="160" height="56" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="770" y="70" font-weight="700">Функция окна</text><text x="770" y="88" font-size="11">итог наружу</text>
+    <text x="405" y="135" font-size="11">таймеры на конец окна и на очистку</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l06)">
+    <path d="M120 73H158"/><path d="M290 73H328"/><path d="M480 73H518"/><path d="M650 73H688"/><path d="M405 45V36"/>
+  </g>
+</svg>
+<ul>
+  <li>Assigner решает, в какие окна попадает запись. Мы его только что разобрали.</li>
+  <li>Trigger решает, когда окно готово отдать результат и нужно ли после этого очистить его содержимое. У каждого assigner есть trigger по умолчанию.</li>
+  <li>Evictor может выкинуть часть записей из окна до или после вызова функции. Он необязателен и дорого обходится, об этом ниже.</li>
+  <li>Функция окна считает результат. Это <code>ReduceFunction</code>, <code>AggregateFunction</code> или <code>ProcessWindowFunction</code>.</li>
+</ul>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Вот путь одной записи через оператор для окон без склейки. Assigner вызывается в начале <code>processElement</code>, дальше цикл по окнам записи.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperator.java" data-lines="405-432" data-must="windowState.setCurrentNamespace(window);"></div>
+<p>Для каждого окна выполняются одни и те же шаги. Опоздавшее окно пропускается. Состояние переключается на namespace этого окна, и запись добавляется туда. Trigger получает запись и отвечает <code>FIRE</code>, <code>PURGE</code>, оба сразу или ничего. На каждое окно регистрируется таймер очистки. Отсюда видно, как окно живёт в состоянии. Это обычный keyed state, где к ключу добавлен namespace окна, поэтому у одного продавца одновременно может жить несколько окон.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#window-lifecycle" target="_blank" rel="noopener">Window Lifecycle</a></p>
+</div>
+
+<h2>Когда окно срабатывает</h2>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Trigger по умолчанию для окон по времени события называется <code>EventTimeTrigger</code>. Посмотри, что он делает на каждую запись и на таймер.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/triggers/EventTimeTrigger.java" data-lines="36-52" data-must="ctx.registerEventTimeTimer(window.maxTimestamp());"></div>
+<p>Если watermark ещё не дошёл до окна, trigger ставит таймер на <code>maxTimestamp</code> окна. Таймер по времени события срабатывает, когда watermark его догоняет. Если watermark уже позади окна, trigger срабатывает сразу, на этой самой записи. Это и есть позднее срабатывание. <code>maxTimestamp</code> на единицу меньше конца, потому что конец окна в него не входит.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/windows/TimeWindow.java" data-lines="75-86" data-must="return end - 1;"></div>
+<p>Для нашего минутного окна, которое заканчивается в 1794085560000, таймер стоит на 1794085559999. Итог уйдёт, как только watermark станет не меньше этого числа. При задержке watermark в 10 с из урока 5 это случится, когда задание увидит платёж с временем около 12:01:10.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#triggers" target="_blank" rel="noopener">Triggers</a></p>
+</div>
+
+<h2>AggregateFunction или ProcessWindowFunction</h2>
+<p><code>ProcessWindowFunction</code> получает все записи окна разом и вдобавок контекст с границами окна. <code>AggregateFunction</code> видит записи по одной, складывает их в аккумулятор и о границах окна ничего не знает. Разница в стоимости решается в момент построения оператора.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Вызов <code>aggregate</code> с двумя функциями строит состояние типа <code>AggregatingStateDescriptor</code>. В нём лежит один аккумулятор на окно.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperatorBuilder.java" data-lines="325-352" data-must="AggregatingStateDescriptor&lt;T, ACC, V&gt; stateDesc ="></div>
+<p>Вызов <code>process</code> с одной <code>ProcessWindowFunction</code> строит <code>ListStateDescriptor</code>. Это список всех записей окна.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperatorBuilder.java" data-lines="388-405" data-must="ListStateDescriptor&lt;T&gt; stateDesc ="></div>
+<p>Обрати внимание на ветку <code>evictor != null</code> в обоих методах. С evictor даже <code>aggregate</code> собирает оператор, который хранит все записи, потому что evictor должен их видеть. Предварительное сложение пропадает.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#processwindowfunction-with-incremental-aggregation" target="_blank" rel="noopener">ProcessWindowFunction with Incremental Aggregation</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#evictors" target="_blank" rel="noopener">Evictors</a></p>
+</div>
+<p>Посчитаем для PayGuard. Примерно 200 платежей в секунду, окно в минуту, значит около 12000 платежей в окне на всех продавцов. С <code>ProcessWindowFunction</code> все они лежат в состоянии до конца окна и ещё минуту допуска. С <code>AggregateFunction</code> в состоянии 50 аккумуляторов по два числа. Две функции можно соединить. Аккумулятор копится по мере прихода записей, а <code>ProcessWindowFunction</code> в конце получает один готовый результат и добавляет к нему границы окна. Так сделан наш <code>MerchantStatsWindow</code>.</p>
+
+<h2>Опоздавшие платежи</h2>
+<p>У watermark есть задержка, но часть платежей приходит ещё позже. По умолчанию допуск опозданий равен нулю, и такая запись молча отбрасывается. Метрика <code>numLateRecordsDropped</code> на операторе увеличится на единицу, и больше ты ничего не узнаешь. Два вызова меняют это поведение. <code>allowedLateness</code> держит окно в состоянии дольше, и опоздавшая запись вызывает пересчёт. <code>sideOutputLateData</code> отправляет записи, которые не принял уже никто, в побочный выход.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Окно считается опоздавшим, когда watermark дошёл до его времени очистки. Время очистки равно <code>maxTimestamp</code> плюс допуск.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperator.java" data-lines="605-624" data-must="cleanupTime(window) &lt;= internalTimerService.currentWatermark()"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperator.java" data-lines="670-677" data-must="long cleanupTime = window.maxTimestamp() + allowedLateness;"></div>
+<p>В конце <code>processElement</code> запись уходит в побочный выход, только если её не приняло ни одно окно. Без тега она просто считается в метрике.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperator.java" data-lines="435-446" data-must="sideOutput(element);"></div>
+<p>Отсюда тонкость с sliding окнами, которую видно в визуализации. Опоздавший платёж может не попасть в старые окна и при этом попасть в одно ещё живое. Тогда в побочный выход он не уйдёт. Старые окна так и останутся без него.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/#allowed-lateness" target="_blank" rel="noopener">Allowed Lateness</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/side_output/" target="_blank" rel="noopener">Side Outputs</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Одно окно, несколько итогов</strong>
+    <p>При допуске больше нуля каждое позднее срабатывание выдаёт итог окна заново, уже с опоздавшим платежом. В топике <code>merchant.stats</code> окажется несколько записей с одним продавцом и одним <code>windowStartMs</code>. Последняя из них верная. Потребитель должен перезаписывать итог по ключу из продавца и начала окна, то есть делать upsert. Простое сложение всех записей подряд даст завышенный оборот.</p>
+  </div>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming окно задаётся функцией <code>window(col, "1 minute")</code> внутри <code>groupBy</code>, для скользящего окна передаётся третий аргумент с шагом, для сессий есть <code>session_window</code>. Порог опоздания там один, это задержка из <code>withWatermark</code>. Она же определяет, когда окно выдаёт итог в режиме append и когда его состояние выбрасывается. Записи позже этого порога Spark вправе отбросить, и побочного выхода для них нет.</p>
+<p>Во Flink это три независимые настройки. Задержка watermark решает, когда окно сработает впервые. <code>allowedLateness</code> решает, сколько ещё окно ждёт опоздавших. Побочный выход ловит то, что не дождалось. Сверх этого во Flink можно заменить trigger и выдавать, например, промежуточный итог каждые 10 секунд, не дожидаясь конца окна.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l06">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Sliding окно 10 минут с шагом 10 секунд даёт 60 окон на запись, а ProcessWindowFunction хранит в каждом список всех записей. AggregateFunction оставит 60 маленьких аккумуляторов."
+       data-explanation-wrong="Вспомни цикл в SlidingEventTimeWindows.assignWindows. Сколько раз он выполнится при size 600 с и slide 10 с, и что лежит в состоянии каждого окна при ProcessWindowFunction?">
+    <h3 class="quiz-question">Аналитик хочет видеть число платежей карты за последние 10 минут с обновлением каждые 10 секунд. Коллега написал sliding окно с одной ProcessWindowFunction, которая считает размер списка. Память TaskManager тает. Что происходит?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Каждый платёж хранится один раз, окна ссылаются на одну копию, виновато что-то другое</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Каждый платёж лежит в 60 окнах целиком, нужно перейти на AggregateFunction</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Каждый платёж лежит в 10 окнах, по числу минут, нужно увеличить память</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Это позднее срабатывание. Окно ещё живёт благодаря allowedLateness, опоздавший платёж добавился к аккумулятору, и trigger сразу выдал полный обновлённый итог. Брать надо последнюю запись по ключу из продавца и начала окна."
+       data-explanation-wrong="Посмотри на значения. Дубль из-за повторной отправки был бы точной копией. Разные paymentCount говорят о том, что окно выдало итог второй раз, уже с новым платежом.">
+    <h3 class="quiz-question">В merchant.stats пришли две записи для m-0007 с одинаковым windowStartMs, в первой paymentCount 30, во второй 31. Перезапусков задания не было. Что делать потребителю?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Выбросить вторую запись как дубль доставки at-least-once</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Заменить первую запись второй, это пересчёт окна после опоздавшего платежа</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Сложить записи, получится 61 платёж за минуту</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. При нулевом допуске окно удаляется, как только watermark проходит его конец. Платёж, опоздавший больше чем на задержку watermark, попадёт в побочный выход, если его минута к этому времени уже закрылась. Чем ближе платёж к концу минуты, тем меньше ему нужно опоздать."
+       data-explanation-wrong="Вспомни isWindowLate и isElementLate при allowedLateness, равном нулю. Окно живёт до момента, когда watermark проходит его конец, а watermark отстаёт от событий на 10 с.">
+    <h3 class="quiz-question">В MerchantStatsWindow убрали allowedLateness, побочный выход оставили. Генератор опаздывает с частью платежей до 30 с, задержка watermark 10 с. Что окажется в payments.late?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Ничего, опоздание меньше длины окна</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Все платежи, которые генератор пометил как опоздавшие</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Часть платежей, опоздавших больше чем на 10 с, у которых минута уже закрылась</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

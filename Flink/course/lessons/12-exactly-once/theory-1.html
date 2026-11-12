@@ -1,0 +1,100 @@
+<h2>Алерт, который пришёл дважды</h2>
+<p>В уроке 11 мы убили TaskManager, и задание продолжило работу с последнего чекпоинта. Состояние откатилось к барьеру, платежи после него прочитались из Kafka повторно, и счётчики учли их один раз. С алертами вышло хуже. Приёмник успел отправить их в <code>fraud.alerts</code> до падения. После восстановления те же платежи дали те же алерты, и они ушли в топик ещё раз.</p>
+<p>Для антифрода повтор дорог. Сервис, который читает <code>fraud.alerts</code>, звонит клиенту или блокирует карту. Два одинаковых алерта означают два звонка, и через месяц операторы начнут пропускать дубли вместе с настоящими сигналами. В этом уроке гарантия Flink дотягивается от состояния до внешней системы.</p>
+
+<h2>Три уровня гарантий</h2>
+<p>Гарантию доставки задаёт приёмник. У приёмника Kafka их три, и описание класса <code>KafkaSink</code> перечисляет, что каждая обещает.</p>
+<table>
+<thead><tr><th>Режим приёмника</th><th>Что увидит потребитель после сбоя</th><th>Цена</th></tr></thead>
+<tbody>
+<tr><td><code>NONE</code></td><td>Записи могут потеряться при проблемах брокера и повториться при перезапуске Flink</td><td>Ничего не ждёт</td></tr>
+<tr><td><code>AT_LEAST_ONCE</code></td><td>Ничего не теряется, повторы возможны</td><td>На чекпоинте ждёт подтверждения всех отправленных записей</td></tr>
+<tr><td><code>EXACTLY_ONCE</code></td><td>Ни потерь, ни повторов, если потребитель читает только зафиксированные данные</td><td>Записи видны только после чекпоинта</td></tr>
+</tbody>
+</table>
+<p>Exactly-once в уроке 11 касался состояния. Документация Flink уточняет, что повторная обработка событий при этом остаётся, просто каждое событие влияет на состояние ровно один раз. Чтобы гарантия дошла до внешней системы, нужны два условия. Источник должен уметь перечитать данные, и Kafka это умеет. Приёмник должен быть транзакционным или идемпотентным, то есть повторная запись не должна менять результат.</p>
+<p>Spark Structured Streaming тоже держится на воспроизводимом источнике и идемпотентном приёмнике. Его документация прямо пишет, что запись в Kafka там только at-least-once и повторы при перезапуске он предотвратить не может. Flink пишет в Kafka транзакциями, потому что его приёмник участвует в чекпоинте.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/learn-flink/fault_tolerance/#exactly-once-end-to-end" target="_blank" rel="noopener">Exactly Once End-to-end</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/guarantees/" target="_blank" rel="noopener">Fault Tolerance Guarantees of Data Sources and Sinks</a>, <a href="https://spark.apache.org/docs/latest/streaming/structured-streaming-kafka-integration.html#writing-data-to-kafka" target="_blank" rel="noopener">Spark, Writing Data to Kafka</a></p>
+
+<h2>Вёрстка номера и подпись в печать</h2>
+<p>Представь редакцию ежедневной газеты. Весь день журналисты сдают заметки, и верстальщик ставит их на полосы будущего номера. Читатели этих полос не видят. Вечером главный редактор проверяет, что номер собран целиком, и подписывает его в печать. Только тогда типография печатает тираж, и заметки попадают в киоски.</p>
+<p>Если ночью в редакции отключат свет до подписи, вёрстку выбросят. Утром журналисты восстановят заметки по черновикам и сдадут их в следующий номер. Читатель из киоска увидит каждую заметку один раз. Корректор, который ходит в типографию и читает сырые полосы, увидит и выброшенную вёрстку, и новую, так что часть заметок прочитает дважды. Есть и третий исход. Если типография ждёт подписи слишком долго, она сама разбирает вёрстку, и подписывать становится нечего.</p>
+<p>В PayGuard заметки это алерты, вёрстка это открытая транзакция Kafka, подпись редактора это завершённый чекпоинт. Читатель из киоска это потребитель с <code>isolation.level=read_committed</code>, корректор читает с <code>read_uncommitted</code>. Срок, после которого брокер сам прерывает транзакцию, задаёт <code>transaction.timeout.ms</code>.</p>
+
+<h2>Двухфазная фиксация в приёмнике Flink</h2>
+<p>Транзакционный приёмник Flink состоит из двух операторов. SinkWriter пишет записи во внешнюю систему так, чтобы их ещё никто не видел. Committer делает их видимыми. Между ними ходят committable, короткие описания подготовленных данных. Для Kafka это имя транзакции, producerId и эпоха продюсера.</p>
+<p>Первая фаза называется предкоммитом. Когда к Writer подходит барьер чекпоинта N, Writer сбрасывает буферы продюсера, помечает транзакцию подготовленной и отправляет её committable в Committer. Committer кладёт committable в своё состояние, и оно попадает в снимок N.</p>
+<p>Вторая фаза наступает после того, как JobManager собрал подтверждения от всех подзадач и объявил чекпоинт N завершённым. Каждый оператор получает вызов <code>notifyCheckpointComplete</code>, и Committer фиксирует транзакции до N включительно.</p>
+<p>Порядок фаз решает всё. Упадёт задание между фазами, и committable уже лежит в завершённом чекпоинте, поэтому после восстановления Committer зафиксирует транзакцию сам. Упадёт до завершения чекпоинта, и восстановление пойдёт из N-1. Транзакция N тогда так и останется незафиксированной, Writer её прервёт, а записи появятся заново из перечитанных платежей.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Интерфейс <code>SupportsCommitter</code> описывает это разделение ролей. Writer делает предкоммит и создаёт committable на чекпоинте, Committer фиксирует.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/connector/sink2/SupportsCommitter.java" data-lines="27-41" data-must="exactly-once semantics using a two-phase"></div>
+<p>Первая фаза. Оператор Writer вызывает <code>flush</code> и <code>emitCommittables</code> в <code>prepareSnapshotPreBarrier</code>, то есть до того, как барьер уйдёт дальше по графу. Committable успевает дойти до Committer раньше барьера.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/sink/SinkWriterOperator.java" data-lines="187-195" data-must="emitCommittables(checkpointId);"></div>
+<p>Вторая фаза и восстановление. При старте из чекпоинта Committer сразу фиксирует всё, что нашёл в своём состоянии. В обычной работе фиксация запускается из <code>notifyCheckpointComplete</code>, и берутся committable всех чекпоинтов до завершённого.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/sink/CommitterOperator.java" data-lines="135-162" data-must="try to re-commit recovered transactions as quickly as possible"></div>
+<p>Из этого следует требование к любому Committer. Одна и та же транзакция может прийти на фиксацию дважды, и описание интерфейса требует, чтобы повторная фиксация ничего не меняла.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/connector/sink2/Committer.java" data-lines="26-34" data-must="A commit must be idempotent"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/sinks/#supportscommitter" target="_blank" rel="noopener">Data Sinks, SupportsCommitter</a></p>
+</div>
+
+<h2>Путь алерта через чекпоинт</h2>
+<p>Пройди по шагам, что происходит с одним алертом между двумя чекпоинтами. Обрати внимание, в какой момент его впервые увидит потребитель.</p>
+<div class="flow-animation" id="flow-l12" data-steps='[
+  {"highlight":"flow-l12-2","label":"После чекпоинта 11 Writer открыл транзакцию payguard-alerts-0-12. Имя собрано из префикса, номера подзадачи и номера следующего чекпоинта."},
+  {"highlight":"flow-l12-2","label":"Алерт velocity по карте c-3268 приходит из enrich-alerts в Writer.","packet":true,"from":"l12-1","to":"l12-2"},
+  {"highlight":"flow-l12-3","label":"Writer отправляет запись в партицию внутри открытой транзакции. Брокер её хранит, но потребителю read_committed не отдаёт.","packet":true,"from":"l12-2","to":"l12-3"},
+  {"highlight":"flow-l12-5","label":"JobManager запускает чекпоинт 12. Барьер идёт от источников по графу вслед за записями."},
+  {"highlight":"flow-l12-2","label":"Барьер дошёл до Writer. В prepareSnapshotPreBarrier он сбрасывает буфер продюсера и помечает транзакцию подготовленной.","packet":true,"from":"l12-1","to":"l12-2"},
+  {"highlight":"flow-l12-4","label":"Committable с producerId, эпохой и именем транзакции уходит в Committer. Writer тут же открывает payguard-alerts-0-13 для следующих алертов.","packet":true,"from":"l12-2","to":"l12-4"},
+  {"highlight":"flow-l12-4","label":"Committer сохраняет committable в своё состояние, это часть снимка 12. Подзадача подтверждает чекпоинт.","packet":true,"from":"l12-4","to":"l12-5"},
+  {"highlight":"flow-l12-5","label":"Все подзадачи подтвердили. Чекпоинт 12 завершён, JobManager рассылает notifyCheckpointComplete.","packet":true,"from":"l12-5","to":"l12-4"},
+  {"highlight":"flow-l12-3","label":"Committer вызывает commitTransaction. Брокер отмечает транзакцию payguard-alerts-0-12 зафиксированной.","packet":true,"from":"l12-4","to":"l12-3"},
+  {"highlight":"flow-l12-6","label":"Только теперь потребитель read_committed получает алерт. С момента записи прошло до одного интервала чекпоинта.","packet":true,"from":"l12-3","to":"l12-6"}
+]'>
+  <div class="flow-actors">
+    <div class="flow-actor" id="flow-l12-1"><div class="flow-actor-icon">E</div><span>enrich-alerts</span></div>
+    <div class="flow-actor" id="flow-l12-2"><div class="flow-actor-icon">W</div><span>alerts-sink, Writer</span></div>
+    <div class="flow-actor" id="flow-l12-3"><div class="flow-actor-icon">K</div><span>Kafka, fraud.alerts</span></div>
+    <div class="flow-actor" id="flow-l12-4"><div class="flow-actor-icon">C</div><span>alerts-sink, Committer</span></div>
+    <div class="flow-actor" id="flow-l12-5"><div class="flow-actor-icon">J</div><span>JobManager</span></div>
+    <div class="flow-actor" id="flow-l12-6"><div class="flow-actor-icon">R</div><span>Потребитель read_committed</span></div>
+  </div>
+  <div class="flow-packet"></div>
+  <div class="flow-step-label">Нажми «Следующий шаг»</div>
+  <div class="flow-controls">
+    <button class="btn flow-next-btn">Следующий шаг</button>
+    <button class="btn flow-reset-btn">Сначала</button>
+    <span class="flow-progress"></span>
+  </div>
+</div>
+
+<h2>Что Writer делает на чекпоинте</h2>
+<p>У Writer приёмника Kafka в режиме <code>EXACTLY_ONCE</code> одна открытая транзакция на подзадачу в каждый момент. Чекпоинт закрывает её для записи и сразу открывает следующую, поэтому поток алертов не останавливается.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Класс <code>ExactlyOnceKafkaWriter</code>. Метод <code>prepareCommit</code> вызывается в первой фазе. Если в транзакции есть записи, он создаёт committable и помечает транзакцию. Пустую транзакцию он не фиксирует, продюсер возвращается в пул. Метод <code>snapshotState</code> сохраняет незавершённые транзакции в состояние Writer и открывает транзакцию под номер следующего чекпоинта.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/ExactlyOnceKafkaWriter.java" data-lines="220-248" data-must="currentProducer.precommitTransaction();"></div>
+<p>В графе задания у каждого приёмника Kafka есть пара <code>Writer -&gt; Committer</code>, даже у <code>dlq-sink</code> в режиме <code>AT_LEAST_ONCE</code>. Дело в том, что <code>KafkaSink</code> всегда объявляет двухфазный протокол. Без <code>EXACTLY_ONCE</code> он отдаёт Committer, который ничего не делает.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaSink.java" data-lines="112-125" data-must="return new NoopCommitter();"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#fault-tolerance" target="_blank" rel="noopener">Kafka Sink, Fault Tolerance</a></p>
+</div>
+
+<h2>Транзакции Kafka и read_committed</h2>
+<p>Транзакция в Kafka принадлежит продюсеру с настройкой <code>transactional.id</code>. Брокер знает этого продюсера по паре producerId и эпоха. Когда новый продюсер с тем же <code>transactional.id</code> регистрируется вызовом <code>initTransactions</code>, брокер завершает транзакцию прежнего владельца, и старый продюсер больше ничего не зафиксирует. Это называется fencing. Он защищает от продюсера на «мёртвой» машине, который вдруг ожил и продолжил писать.</p>
+<p>Потребитель сам выбирает, что читать. По умолчанию <code>isolation.level=read_uncommitted</code>, и он получает всё, включая записи прерванных транзакций. С <code>read_committed</code> он получает только зафиксированные транзакционные записи и не читает дальше LSO (last stable offset), смещения перед первой открытой транзакцией. Обычные записи без транзакций он получает в обоих режимах.</p>
+<p>Отсюда два практических следствия. Транзакционный приёмник бесполезен, если команда, которая читает топик, не включила <code>read_committed</code>. И потребитель <code>read_committed</code> стоит на месте, пока в партиции висит чужая открытая транзакция.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Как Flink называет транзакции. Имя состоит из префикса, номера подзадачи и смещения, которое почти всегда равно номеру чекпоинта. Поэтому в логах ты увидишь имена вроде <code>payguard-alerts-0-11</code>.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/TransactionalIdFactory.java" data-lines="28-45" data-must="transactionalIdPrefix-subtaskId-checkpointOffset"></div>
+<p>Стратегия по умолчанию <code>INCREMENTING</code> на каждый чекпоинт берёт новое имя. Описание перечисления предупреждает, что брокер держит метаданные каждого имени в памяти 7 дней. При интервале 15 секунд и двух подзадачах это до 80 тысяч имён за неделю на один приёмник.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/TransactionNamingStrategy.java" data-lines="26-45" data-must="memory for 7 days"></div>
+<p>Префикс обязан быть уникальным на весь кластер Kafka. Если тестовая копия задания запустится с тем же префиксом, её продюсеры будут вытеснять продюсеры боевой копии, и транзакции обеих начнут прерываться.</p>
+<p class="doc-links">Документация: <a href="https://kafka.apache.org/43/configuration/consumer-configs/#consumerconfigs_isolation.level" target="_blank" rel="noopener">Kafka, isolation.level</a>, <a href="https://kafka.apache.org/43/configuration/producer-configs/#producerconfigs_transactional.id" target="_blank" rel="noopener">Kafka, transactional.id</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#producerfencedexception" target="_blank" rel="noopener">Kafka connector, ProducerFencedException</a></p>
+</div>
+

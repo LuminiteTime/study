@@ -1,0 +1,154 @@
+<h2>Что будет в конце</h2>
+<p>В minikube работают оператор, Kafka на постоянном томе, PostgreSQL, генератор платежей и PayGuard в режиме Application с HA. Задание переживает удаление пода JobManager и рестарт Kafka. Новых классов Java в этом уроке нет, добавляются образ, манифесты Kubernetes и скрипт стенда. Ответ на задание тоже состоит из команд, новых файлов для него создавать не нужно.</p>
+
+<h2>Шаг 1. Что поставить</h2>
+<p>Понадобятся minikube, <code>kubectl</code> и Helm. Minikube запускает однонодовый кластер Kubernetes внутри контейнера Docker. <code>kubectl</code> это клиент API Kubernetes. Helm ставит приложения в Kubernetes готовыми пакетами, они называются чартами. Стенд из Compose можно остановить, памяти он заберёт заметно.</p>
+
+<h2>Шаг 2. Образ задания</h2>
+<p>В режиме Application jar должен лежать в образе. Создай <code>docker/job.Dockerfile</code>.</p>
+<div data-code="lesson-20/docker/job.Dockerfile"></div>
+<p>Базовый образ тот же, что в Compose, поэтому версия Flink совпадает с проверенной. Каталог <code>/opt/flink/usrlib</code> Flink добавляет в classpath задания, об этом шла речь в уроке 2. Путь к jar мы позже укажем в FlinkDeployment.</p>
+
+<h2>Шаг 3. Скрипт стенда</h2>
+<p>Создай <code>scripts/k8s-up.sh</code>. Он поднимает кластер, ставит оператор, создаёт инфраструктуру и загружает образ.</p>
+<div data-code="lesson-20/scripts/k8s-up.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-20/scripts/k8s-up.sh" data-lines="6-18"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Комментарий предупреждает о ловушке, на которую мы наступили. Размер памяти задаётся только при создании кластера.</p>
+      <p class="tl"><code>minikube start</code> создаёт кластер. <code>--cpus=6</code> и <code>--memory=9g</code> задают ресурсы узла, <code>--driver=docker</code> велит запустить узел контейнером Docker.</p>
+      <p class="tl"><code>helm repo add</code> регистрирует репозиторий чартов оператора. Адрес содержит версию, поэтому чарт совпадает с релизом 1.16.1.</p>
+      <p class="tl"><code>helm upgrade --install</code> ставит оператор или обновляет уже установленный. <code>webhook.create=false</code> отключает webhook проверки ресурсов, иначе пришлось бы сначала ставить cert-manager для его сертификатов. <code>--wait</code> ждёт готовности подов, <code>--timeout 15m</code> даёт на это пятнадцать минут вместо пяти по умолчанию.</p>
+      <p class="tl">Secret <code>payguard-db</code> хранит пароль PostgreSQL. Связка <code>--dry-run=client -o yaml | kubectl apply -f -</code> превращает «создать» в «создать или обновить», и скрипт можно запускать повторно.</p>
+      <p class="tl">ConfigMap <code>payguard-sql</code> несёт <code>sql/init.sql</code>, PostgreSQL выполнит его при первом старте.</p>
+      <p class="tl">Применяем манифест инфраструктуры, его разберём в следующем шаге.</p>
+      <p class="tl">Собираем jar, без него Dockerfile нечего копировать. <code>--console=plain</code> и <code>-q</code> убирают индикаторы прогресса и лишний вывод.</p>
+      <p class="tl">Собираем образ из <code>docker/job.Dockerfile</code>. Точка в конце задаёт контекст сборки, корень проекта.</p>
+      <p class="tl">У minikube своё хранилище образов внутри узла. <code>minikube image load</code> копирует туда образ, и поды найдут его без реестра.</p>
+    </div>
+  </div>
+</div>
+<pre data-lang="bash" data-title="терминал">chmod +x scripts/k8s-up.sh
+./scripts/k8s-up.sh</pre>
+<p>Если minikube у тебя уже запускался раньше, скрипт может сработать не так, как написано. Существующий профиль сохраняет свой размер памяти, и minikube честно об этом пишет, но продолжает запуск со старыми 4 ГиБ.</p>
+<pre data-lang="text" data-title="вывод minikube start" data-output>You cannot change the memory size for an existing minikube cluster. Please first delete the cluster.</pre>
+<p>Стенд из JobManager на 1600m, TaskManager на 2048m, Kafka, PostgreSQL и оператора в 4 ГиБ не помещается. У нас <code>docker stats</code> показал узел minikube на 3.93GiB из 4GiB, и API Kubernetes перестал отвечать.</p>
+<pre data-lang="text" data-title="вывод kubectl" data-output>Unable to connect to the server: net/http: TLS handshake timeout</pre>
+<p>Лечение одно. Удали профиль командой <code>minikube delete</code> и запусти скрипт заново.</p>
+<p>Вторая ловушка ждёт на первом запуске. Образ оператора скачивается долго, и Helm с таймаутом по умолчанию в пять минут не дождался готовности.</p>
+<pre data-lang="text" data-title="вывод helm" data-output>Error: resource not ready ... context deadline exceeded</pre>
+<p>Оператор при этом поднялся сам через несколько минут, ошибка относилась только к ожиданию. Поэтому в скрипте стоит <code>--timeout 15m</code>.</p>
+
+<h2>Шаг 4. Инфраструктура в кластере</h2>
+<p>Создай <code>k8s/infra.yaml</code>. Здесь Kafka, задание Kubernetes для создания топиков, PostgreSQL и два тома.</p>
+<div data-code="lesson-20/k8s/infra.yaml"></div>
+<p>Deployment это объект Kubernetes, который держит заданное число одинаковых подов и пересоздаёт их при гибели. Service даёт подам постоянное имя в DNS кластера. Благодаря Service <code>kafka</code> задание обращается к брокеру по адресу <code>kafka:9092</code>, как в Compose, и менять настройки задания не нужно. Самое важное в манифесте это том Kafka.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-20/k8s/infra.yaml" data-lines="31-40"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Комментарий объясняет, зачем всё это. Без тома брокер после рестарта забывает топики и транзакции.</p>
+      <p class="tl"><code>KAFKA_LOG_DIRS</code> переносит журналы брокера в отдельный каталог.</p>
+      <p class="tl">Монтируем в этот каталог том <code>kafka-data</code>.</p>
+      <p class="tl"><code>fsGroup</code> назначает группу файлам тома, чтобы процесс Kafka внутри контейнера мог в него писать.</p>
+      <p class="tl">Том берётся из PersistentVolumeClaim <code>kafka-data</code>, заявки на 5 ГиБ в конце файла. В minikube её выполняет встроенный провайдер дисков на узле.</p>
+    </div>
+  </div>
+</div>
+<p>Стратегия <code>Recreate</code> у Deployment Kafka нужна из-за тома. По умолчанию Kubernetes при одной реплике поднимает новый под раньше, чем гасит старый. На одном узле том <code>ReadWriteOnce</code> смонтируется в оба пода, и два брокера получат один каталог журналов. На разных узлах новый под не сможет смонтировать том, пока его держит старый. <code>Recreate</code> сначала останавливает старый под.</p>
+<p>Задание <code>kafka-init</code> это объект Job, он выполняет под до успешного завершения. Пока брокер не готов, команда падает, и <code>restartPolicy: OnFailure</code> с <code>backoffLimit: 20</code> перезапускают её, пока топики не создадутся. У PostgreSQL тома нет. После рестарта он заново выполнит <code>init.sql</code> и потеряет итоги по продавцам. Справочник продавцов восстановится из того же скрипта, для учебного стенда этого хватает.</p>
+<p>Том <code>flink-data</code> общий для JobManager и TaskManager, туда пойдут чекпоинты, savepoint и HA. Режим <code>ReadWriteOnce</code> разрешает монтировать том на одном узле. В minikube узел один, и все поды видят один каталог. На настоящем кластере из нескольких узлов эти каталоги кладут в S3 или другое объектное хранилище.</p>
+
+<h2>Шаг 5. Описание задания</h2>
+<p>Создай <code>k8s/payguard.yaml</code>. Это и есть желаемое состояние, которое оператор будет поддерживать.</p>
+<div data-code="lesson-20/k8s/payguard.yaml"></div>
+<p>Первые строки выбирают образ и версию API Flink. <code>imagePullPolicy: IfNotPresent</code> велит не ходить в реестр, если образ уже есть на узле, у нас его туда положил <code>minikube image load</code>. <code>serviceAccount: flink</code> это учётная запись, которую создал чарт оператора. От её имени JobManager создаёт поды TaskManager и пишет HA ConfigMap. Блок <code>flinkConfiguration</code> заменяет переменную <code>FLINK_PROPERTIES</code> из Compose.</p>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-20/k8s/payguard.yaml" data-lines="10-23"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Два слота на TaskManager. При параллелизме 2 хватит одного TaskManager, при 3 понадобится второй.</p>
+      <p class="tl">Состояние в RocksDB, как в уроке 19, и инкрементальные чекпоинты из урока 11.</p>
+      <p class="tl">Чекпоинт каждые 15 секунд и не меньше 10 секунд паузы между ними.</p>
+      <p class="tl">Чекпоинты и savepoint пишутся на общий том <code>/flink-data</code>. Каталог savepoint обязателен для режима savepoint, без него оператору некуда снимать снимок.</p>
+      <p class="tl"><code>RETAIN_ON_CANCELLATION</code> сохраняет последний чекпоинт при отмене задания. Это страховка на случай апгрейда stateless или ручной отмены.</p>
+      <p class="tl">HA через Kubernetes, файлы метаданных в <code>/flink-data/ha</code>.</p>
+      <p class="tl">Стратегия перезапуска с растущей паузой. Подробно о ней в уроке 21.</p>
+      <p class="tl">Репортер Prometheus из урока 17 на порту 9249. Prometheus в этом стенде нет, порт пригодится при подключении мониторинга кластера.</p>
+    </div>
+  </div>
+</div>
+<p>Ключа <code>kubernetes.cluster-id</code> в конфигурации нет. Оператор подставляет его сам из имени ресурса, поэтому все объекты кластера называются с префиксом <code>payguard</code>.</p>
+<p>Блок <code>podTemplate</code> общий для подов JobManager и TaskManager. Контейнер обязан называться <code>flink-main-container</code>, по этому имени оператор находит основной контейнер и дополняет его своими настройками. В контейнер передаются три переменные окружения для PostgreSQL, пароль берётся из Secret через <code>secretKeyRef</code> и в манифест не попадает. Том <code>flink-data</code> монтируется в <code>/flink-data</code>. <code>fsGroup: 9999</code> отдаёт файлы тома группе <code>flink</code>, в официальном образе у неё и у пользователя <code>flink</code> идентификатор 9999.</p>
+<p>Блоки <code>jobManager</code> и <code>taskManager</code> задают ресурсы. Память здесь означает весь процесс, ту самую величину <code>process.size</code>, которую мы раскладывали в уроке 19.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Как поле <code>memory</code> из манифеста попадает в конфигурацию Flink. <code>FlinkConfigBuilder</code> записывает его в <code>TOTAL_PROCESS_MEMORY</code> нужного процесса, а CPU в отдельную настройку Kubernetes.</p>
+<div data-src="operator:flink-kubernetes-operator/src/main/java/org/apache/flink/kubernetes/operator/config/FlinkConfigBuilder.java" data-lines="612-626" data-must="TaskManagerOptions.TOTAL_PROCESS_MEMORY"></div>
+<p>Значит, <code>memory: 2048m</code> у TaskManager даёт <code>taskmanager.memory.process.size</code> 2048m. Раскладка областей будет та же, что в калькуляторе урока 19, а лимит контейнера совпадёт с размером процесса.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/custom-resource/pod-template/" target="_blank" rel="noopener">Pod template</a>, <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/custom-resource/reference/" target="_blank" rel="noopener">Reference</a></p>
+</div>
+
+<p>Блок <code>job</code> описывает само задание. <code>jarURI</code> со схемой <code>local://</code> указывает на файл внутри образа. Главный класс возьмётся из манифеста jar, как в уроке 1. <code>parallelism: 2</code> и <code>upgradeMode: savepoint</code> мы будем менять и проверять в задании. <code>state: running</code> значит, что задание должно работать. Значение <code>suspended</code> остановило бы его тем способом, который задаёт <code>upgradeMode</code>.</p>
+
+<h2>Шаг 6. Запусти задание</h2>
+<pre data-lang="bash" data-title="терминал">kubectl apply -f k8s/payguard.yaml
+kubectl get flinkdep payguard</pre>
+<p><code>flinkdep</code> это короткое имя типа FlinkDeployment. Когда развёртывание закончится, колонка <code>JOB STATUS</code> покажет <code>RUNNING</code>, а <code>LIFECYCLE STATE</code> покажет <code>STABLE</code>. Именно так было на нашем стенде. Теперь открой доступ к REST JobManager. Native-интеграция создаёт для него Service <code>payguard-rest</code>.</p>
+<pre data-lang="bash" data-title="терминал">kubectl port-forward svc/payguard-rest 18081:8081</pre>
+<p><code>port-forward</code> пробрасывает порт 18081 твоей машины в под за этим Service. Команда работает, пока открыт терминал. Во втором терминале спроси кластер о себе и о задании.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:18081/overview | jq .
+JOB=$(kubectl get flinkdep payguard -o jsonpath='{.status.jobStatus.jobId}')
+curl -s localhost:18081/jobs/$JOB/checkpoints/config | jq .state_backend
+kubectl get configmaps</pre>
+<p><code>jsonpath</code> вытаскивает jobId из статуса ресурса, оператор записал его туда при развёртывании. На стенде получилось следующее.</p>
+<table>
+<thead><tr><th>Что смотрели</th><th>Результат</th></tr></thead>
+<tbody>
+<tr><td><code>/overview</code></td><td><code>taskmanagers</code> 1, <code>slots-total</code> 2, <code>jobs-running</code> 1, <code>flink-version</code> 2.2.1</td></tr>
+<tr><td>Бэкенд состояния</td><td><code>EmbeddedRocksDBStateBackend</code></td></tr>
+<tr><td>Длительность чекпоинта</td><td>105 мс</td></tr>
+<tr><td>ConfigMap</td><td><code>autoscaler-payguard</code>, <code>flink-config-payguard</code>, <code>payguard-&lt;jobId&gt;-config-map</code>, <code>payguard-cluster-config-map</code>, <code>pod-template-payguard</code></td></tr>
+</tbody>
+</table>
+<p>Один TaskManager на два слота ровно под параллелизм 2. Его под создал ResourceManager JobManager. Оператор через native-интеграцию создал только Deployment JobManager.</p>
+
+<h2>Шаг 7. Генератор внутри кластера</h2>
+<p>Генератору нужен адрес <code>kafka:9092</code>, который виден только внутри кластера. Запустим его подом из того же образа, jar содержит и задание, и генератор. Создай <code>k8s/loadgen.yaml</code>.</p>
+<div data-code="lesson-20/k8s/loadgen.yaml"></div>
+<p>Первая версия манифеста запускала <code>java -cp /opt/flink/usrlib/payguard.jar</code> без второго элемента classpath, и под сразу падал.</p>
+<pre data-lang="text" data-title="kubectl logs deploy/loadgen" data-output>java.lang.NoClassDefFoundError: org/slf4j/LoggerFactory</pre>
+<p>В кластере Flink логгер уже есть, поэтому slf4j в jar задания не попадает. Генератор запускается обычной JVM, без Flink вокруг, и логгера не находит. Лечение в строке <code>command</code>. В classpath добавлен <code>/opt/flink/lib/*</code>, там лежит логгер образа. Команда в манифесте запускается без shell, звёздочку в classpath разворачивает сама JVM.</p>
+<pre data-lang="bash" data-title="терминал">kubectl apply -f k8s/loadgen.yaml
+kubectl logs -f deploy/loadgen</pre>
+
+<h2>Шаг 8. Убей JobManager</h2>
+<p>Проверим HA. Native-интеграция ставит подам метки <code>app</code> с именем кластера и <code>component</code> с ролью, по ним и выберем под JobManager.</p>
+<pre data-lang="bash" data-title="терминал">kubectl delete pod -l app=payguard,component=jobmanager
+kubectl get pods -l app=payguard -w</pre>
+<p>Флаг <code>-w</code> следит за изменениями. Deployment сразу создаст новый под. <code>port-forward</code> держится за конкретный под и после его удаления завершится, запусти его заново. Затем посмотри, откуда задание восстановилось.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:18081/jobs/$JOB/checkpoints | jq .latest.restored</pre>
+<p>На стенде задание снова было в <code>RUNNING</code> через 34 с после удаления. jobId остался прежним, <code>0de8a1877f17c73f80cd4c109fc665d4</code>, а восстановление шло из чекпоинта <code>file:/flink-data/checkpoints/0de8a1877f17c73f80cd4c109fc665d4/chk-10</code>. Оператор в этом не участвовал. Новый JobManager взял jobId из своей конфигурации и нашёл указатель на <code>chk-10</code> в ConfigMap задания.</p>
+
+<h2>Шаг 9. Перезапусти Kafka</h2>
+<p>Теперь проверим том брокера. Генератор пишет 200 платежей в секунду.</p>
+<pre data-lang="bash" data-title="терминал">kubectl delete pod -l app=kafka
+curl -s localhost:18081/jobs/$JOB/checkpoints | jq .counts
+kubectl exec deploy/kafka -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list</pre>
+<p>Через 90 с задание было в <code>RUNNING</code>, чекпоинты шли дальше. Счётчик <code>completed</code> вырос с 2488 до 2494, <code>failed</code> остался 0. Все топики на месте, включая <code>__transaction_state</code>. Бесконечных рестартов нет.</p>
+
+<h2>Шаг 10. Что ещё ломалось</h2>
+<p>До появления тома у Kafka этот же рестарт закончился плохо. Под Kafka перезапустился во время апгрейда, брокер поднялся пустым, остались только топики <code>payments.raw</code>, <code>payments.confirmations</code> и <code>rules.config</code>, которые клиенты создали автоматически. Задание восстановилось из savepoint и упало на фиксации транзакции.</p>
+<pre data-lang="text" data-title="исключение задания" data-output>java.lang.IllegalStateException: Failed to commit KafkaCommittable{producerId=31, epoch=2, transactionalId='payguard-alerts-0-11', producer=null}
+Caused by: org.apache.kafka.common.errors.InvalidPidMappingException: The producer attempted to use a producer id which is not currently assigned to its transactional id.</pre>
+<p>Задание восстанавливалось 17 раз, 11 чекпоинтов закончились <code>FAILED</code>, состояние <code>RESTARTING</code> не прекращалось. Почему коннектор не пропускает эту ошибку и чего стоило восстановление, разберём в уроке 21. Профилактика уже в манифесте, это том <code>kafka-data</code> и стратегия <code>Recreate</code>.</p>
+<p>После инцидента minikube пришлось пересоздавать, и это принесло ещё две ошибки. Сначала <code>minikube delete</code> не смог удалить контейнер узла.</p>
+<pre data-lang="text" data-title="вывод minikube delete" data-output>docker rm -f -v minikube: context deadline exceeded</pre>
+<p>Том узла остался, и новый узел поднялся со старыми данными etcd, базы, где Kubernetes хранит свои объекты. Ресурсы вернулись, а образ задания из хранилища узла пропал.</p>
+<pre data-lang="text" data-title="kubectl describe pod" data-output>ErrImagePull: pull access denied for payguard-job</pre>
+<p>Kubernetes не нашёл образ на узле и пошёл за ним в Docker Hub, где такого образа нет. Лечение в повторном <code>minikube image load payguard-job:1.0.0</code>. Запомни правило. После любого пересоздания узла образ загружают заново.</p>

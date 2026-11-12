@@ -1,0 +1,84 @@
+### тесты
+RESULT tests 39 fail 0
+jar bytes 29440602
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+Job has been submitted with JobID 959e9026583b695ae1f4a2b0195cd313
+### job 959e9026583b695ae1f4a2b0195cd313
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"Source: rules-config","parallelism":2,"status":"RUNNING"},{"name":"Source: payment-confirmations","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rules-dynamic","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"join-confirmations -> confirmed-sink: Writer -> confirmed-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rule-unconfirmed","parallelism":2,"status":"RUNNING"},{"name":"cep-card-testing","parallelism":2,"status":"RUNNING"},{"name":"cep-impossible-travel","parallelism":2,"status":"RUNNING"},{"name":"enrich-alerts -> alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 21:17:19 : 959e9026583b695ae1f4a2b0195cd313 : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe) :: [{"id":"numRecordsIn","min":8020.0,"max":9620.0,"sum":17640.0},{"id":"numRecordsOut","min":8020.0,"max":9620.0,"sum":17640.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":3.0,"sum":5.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+Source: rules-config :: [{"id":"numRecordsIn","min":0.0,"max":0.0,"sum":0.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+Source: payment-confirmations :: [{"id":"numRecordsIn","min":8276.0,"max":8308.0,"sum":16584.0},{"id":"numRecordsOut","min":8276.0,"max":8308.0,"sum":16584.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+deduplicate :: [{"id":"numRecordsIn","min":8691.0,"max":8760.0,"sum":17451.0},{"id":"numRecordsOut","min":8509.0,"max":8594.0,"sum":17103.0},{"id":"busyTimeMsPerSecond","min":4.0,"max":5.0,"sum":9.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer) :: [{"id":"numRecordsIn","min":6782.0,"max":10310.0,"sum":17092.0},{"id":"numRecordsOut","min":43.0,"max":45.0,"sum":88.0},{"id":"busyTimeMsPerSecond","min":7.0,"max":8.0,"sum":15.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer :: [{"id":"numRecordsIn","min":8536.0,"max":8560.0,"sum":17096.0},{"id":"numRecordsOut","min":1650.0,"max":1653.0,"sum":3303.0},{"id":"busyTimeMsPerSecond","min":16.0,"max":17.0,"sum":33.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+rules-dynamic :: [{"id":"numRecordsIn","min":8531.0,"max":8554.0,"sum":17085.0},{"id":"numRecordsOut","min":27.0,"max":28.0,"sum":55.0},{"id":"busyTimeMsPerSecond","min":15.0,"max":15.0,"sum":30.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+rule-amount-spike :: [{"id":"numRecordsIn","min":8534.0,"max":8558.0,"sum":17092.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":10.0,"max":12.0,"sum":22.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+join-confirmations -> confirmed-sink: Writer -> confirmed-sink: Committer :: [{"id":"numRecordsIn","min":16755.0,"max":16906.0,"sum":33661.0},{"id":"numRecordsOut","min":8027.0,"max":8121.0,"sum":16148.0},{"id":"busyTimeMsPerSecond","min":21.0,"max":22.0,"sum":43.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086314081","1794086314081"]
+rule-unconfirmed :: [{"id":"numRecordsIn","min":16755.0,"max":16895.0,"sum":33650.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":13.0,"max":14.0,"sum":27.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086314081","1794086314081"]
+cep-card-testing :: [{"id":"numRecordsIn","min":8531.0,"max":8554.0,"sum":17085.0},{"id":"numRecordsOut","min":22.0,"max":28.0,"sum":50.0},{"id":"busyTimeMsPerSecond","min":22.0,"max":22.0,"sum":44.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+cep-impossible-travel :: [{"id":"numRecordsIn","min":8539.0,"max":8564.0,"sum":17103.0},{"id":"numRecordsOut","min":24.0,"max":24.0,"sum":48.0},{"id":"busyTimeMsPerSecond","min":63.0,"max":65.0,"sum":128.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086322961","1794086322961"]
+enrich-alerts -> alerts-sink: Writer -> alerts-sink: Committer :: [{"id":"numRecordsIn","min":74.0,"max":79.0,"sum":153.0},{"id":"numRecordsOut","min":74.0,"max":79.0,"sum":153.0},{"id":"busyTimeMsPerSecond","min":1.0,"max":1.0,"sum":2.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794086314081","1794086314081"]
+### checkpoints
+{"counts":{"restored":0,"total":3,"in_progress":0,"completed":3,"failed":0},"recent":[{"id":3,"status":"COMPLETED","ms":390,"state_kb":12251,"written_kb":4825},{"id":2,"status":"COMPLETED","ms":318,"state_kb":8011,"written_kb":4831},{"id":1,"status":"COMPLETED","ms":328,"state_kb":3756,"written_kb":3756}]}
+### exceptions
+[]
+### топики
+--- card.sessions
+{"cardId":"c-1676","sessionStartMs":1794086262730,"sessionEndMs":1794086292730,"paymentCount":1,"amountMinor":18619}
+{"cardId":"c-3901","sessionStartMs":1794086262730,"sessionEndMs":1794086292730,"paymentCount":1,"amountMinor":43802}
+{"cardId":"c-4546","sessionStartMs":1794086254043,"sessionEndMs":1794086292730,"paymentCount":2,"amountMinor":87454}
+--- fraud.alerts
+{"alertId":"velocity:e3ccc62b-fe97-aae1-38b3-fd50e79812fa","ruleId":"velocity","cardId":"c-2455","merchantId":"m-0025","paymentId":"e3ccc62b-fe97-aae1-38b3-fd50e79812fa","detail":"11 платежей за минуту","eventTimeMs":1794086246335,"merchantRisk":"LOW"}
+{"alertId":"velocity:5b554549-2b7c-6c3b-4cda-f0a4a7b12bc1","ruleId":"velocity","cardId":"c-3966","merchantId":"m-0020","paymentId":"5b554549-2b7c-6c3b-4cda-f0a4a7b12bc1","detail":"11 платежей за минуту","eventTimeMs":1794086249575,"merchantRisk":"HIGH"}
+{"alertId":"velocity:94dac536-38d8-e994-2855-53565965a93c","ruleId":"velocity","cardId":"c-0856","merchantId":"m-0026","paymentId":"94dac536-38d8-e994-2855-53565965a93c","detail":"11 платежей за минуту","eventTimeMs":1794086253629,"merchantRisk":"LOW"}
+--- merchant.stats
+{"merchantId":"m-0038","windowStartMs":1794086160000,"windowEndMs":1794086220000,"paymentCount":1,"amountMinor":9078}
+{"merchantId":"m-0025","windowStartMs":1794086160000,"windowEndMs":1794086220000,"paymentCount":1,"amountMinor":40260}
+{"merchantId":"m-0030","windowStartMs":1794086160000,"windowEndMs":1794086220000,"paymentCount":1,"amountMinor":15663}
+--- payments.confirmations
+{"paymentId":"1f02f9b7-52c1-374b-6f96-0f3446a2be71","status":"APPROVED","eventTimeMs":1794086245310}
+{"paymentId":"a6d104d8-738c-32a6-97e2-fc5c24ee4d8b","status":"APPROVED","eventTimeMs":1794086246874}
+{"paymentId":"72a044cf-8a85-5af5-f973-02854126b636","status":"APPROVED","eventTimeMs":1794086245247}
+--- payments.confirmed
+{"paymentId":"e2d39f39-391f-d563-d5ef-cf185ba6899d","merchantId":"m-0025","amountMinor":5000,"status":"APPROVED","confirmationDelayMs":1199}
+{"paymentId":"707f9a2f-fbff-8519-41d5-f215eb0f80ec","merchantId":"m-0000","amountMinor":5000,"status":"APPROVED","confirmationDelayMs":1184}
+{"paymentId":"85ebd28a-34a8-7fb6-0bee-4f2ca090a665","merchantId":"m-0000","amountMinor":49719,"status":"APPROVED","confirmationDelayMs":1392}
+--- payments.dlq
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794086241020}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794086241126}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794086242992}
+--- payments.late
+--- payments.raw
+{"paymentId":"35f3624d-6c8f-1d66-205e-a5f5410a1553","cardId":"c-4849","merchantId":"m-0000","amountMinor":21135,"currency":"EUR","country":"DE","eventTimeMs":1794086242105}
+{"paymentId":"e95dadfc-7a46-abb5-d2f4-aae6b7a4ec91","cardId":"c-1599","merchantId":"m-0000","amountMinor":34454,"currency":"EUR","country":"NL","eventTimeMs":1794086242107}
+{"paymentId":"4ba321b5-c01b-d532-a220-43e87022f197","cardId":"c-2028","merchantId":"m-0046","amountMinor":45082,"currency":"EUR","country":"PL","eventTimeMs":1794086242107}
+--- rules.config
+### postgres
+           List of relations
+ Schema |   Name    | Type  |  Owner   
+--------+-----------+-------+----------
+ public | merchants | table | payguard
+(1 row)
+
+ risk_level | count 
+------------+-------
+ MEDIUM     |    15
+ HIGH       |     5
+ LOW        |    30
+(3 rows)
+
+### лог TaskManager, ошибки
+2026-11-07 21:18:48,763 WARN  org.apache.flink.metrics.MetricGroup                         [] - Name collision: Group already contains a Metric with the name 'pendingCommittables'. Metric will not be reported.[192.168.97
+2026-11-07 21:18:48,768 WARN  org.apache.flink.metrics.MetricGroup                         [] - Name collision: Group already contains a Metric with the name 'pendingCommittables'. Metric will not be reported.[192.168.97
+2026-11-07 21:18:48,768 WARN  org.apache.flink.metrics.MetricGroup                         [] - Name collision: Group already contains a Metric with the name 'pendingCommittables'. Metric will not be reported.[192.168.97
+2026-11-07 21:18:48,770 WARN  org.apache.flink.metrics.MetricGroup                         [] - Name collision: Group already contains a Metric with the name 'pendingCommittables'. Metric will not be reported.[192.168.97
+2026-11-07 21:18:48,770 WARN  org.apache.flink.metrics.MetricGroup                         [] - Name collision: Group already contains a Metric with the name 'pendingCommittables'. Metric will not be reported.[192.168.97

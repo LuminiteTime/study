@@ -1,0 +1,142 @@
+<h2>Что будет в конце</h2>
+<p>В проекте появятся проверка графа, restore-тест, сквозной тест на настоящих Kafka и PostgreSQL, отдельная задача Gradle для него и файл CI. Итог прогона на нашем стенде был такой. Обычных тестов 45, вместе с тестом из задания, и все зелёные. Сквозной тест занял 7 с. Файл GitHub Actions мы не запускали ни разу, поэтому считай его проверенным только глазами.</p>
+<p>Файл решения задания <code>DeduplicateRestoreTest.java</code> пока создавать не нужно. Без него обычных тестов будет на один меньше.</p>
+
+<h2>Шаг 1. Отдели описание графа от запуска</h2>
+<p>Весь граф был описан прямо в <code>main</code> и там же запускался. Тест такой метод вызвать не сможет, потому что <code>env.execute</code> начнёт работу. В <code>PayGuardJob.java</code> разделим его на три метода.</p>
+<div data-diff="lesson-15/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-16/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-16/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="53-67"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>main</code> теперь занимает три строки. Он создаёт окружение, описывает граф и запускает его. Поведение на кластере осталось прежним.</p>
+      <p class="tl"><code>createEnvironment</code> хранит запрет на Kryo. Тесты вызовут именно его и получат те же условия, что и прод. Если написать в тесте свой <code>getExecutionEnvironment</code>, запрет потеряется молча.</p>
+      <p class="tl"><code>GENERIC_TYPES</code> со значением <code>false</code> это настройка <code>pipeline.generic-types</code> из урока 3.</p>
+      <p class="tl"><code>buildPipeline</code> только описывает граф. Он ничего не исполняет и принимает окружение снаружи, поэтому тест топологии и E2E вызовут его со своим окружением.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 2. Настройки базы, доступные из теста</h2>
+<p>Настройки PostgreSQL читались прямо из <code>System.getenv</code>. Поменять переменные окружения работающей JVM из Java-кода нельзя, а адрес базы в контейнере Testcontainers становится известен только после запуска контейнера. MiniCluster работает в той же JVM, что и тест, поэтому подойдут системные свойства. Создай в пакете <code>job</code> новый файл.</p>
+<div data-code="lesson-16/src/main/java/dev/study/payguard/job/DbSettings.java"></div>
+<p>Сначала читается переменная окружения, и на кластере ничего не меняется. Если её нет, берётся системное свойство. Теперь замени прямые вызовы в двух местах.</p>
+<div data-diff="lesson-15/src/main/java/dev/study/payguard/job/JdbcSinks.java lesson-16/src/main/java/dev/study/payguard/job/JdbcSinks.java"></div>
+<div data-diff="lesson-15/src/main/java/dev/study/payguard/pipeline/JdbcMerchantDirectory.java lesson-16/src/main/java/dev/study/payguard/pipeline/JdbcMerchantDirectory.java"></div>
+
+<h2>Шаг 3. Тест топологии</h2>
+<p>Создай <code>src/test/java/dev/study/payguard/job/PipelineTopologyTest.java</code>.</p>
+<div data-code="lesson-16/src/test/java/dev/study/payguard/job/PipelineTopologyTest.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-16/src/test/java/dev/study/payguard/job/PipelineTopologyTest.java" data-lines="17-36"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Граф строится один раз на весь класс, тесты только смотрят на него.</p>
+      <p class="tl">Заглушки настроек нужны потому, что JDBC-приёмник читает настройки уже при описании графа, а конструктор <code>JdbcConnectionOptions</code> не принимает пустой адрес. Соединения с <code>unused</code> никто не открывает.</p>
+      <p class="tl">Окружение и граф берутся из тех же методов, что и в проде. Адрес Kafka остаётся значением по умолчанию, его тоже никто не использует.</p>
+      <p class="tl"><code>getStreamGraph</code> превращает описание в граф узлов. Если функция несериализуема, тест упадёт ещё раньше, в <code>buildPipeline</code>, и упадёт весь класс.</p>
+      <p class="tl">Первый тест собирает имена всех узлов без <code>uid</code> и требует пустой список. Сообщение AssertJ сразу называет виноватых.</p>
+    </div>
+  </div>
+</div>
+<p>Тесты <code>uidsAreUnique</code> и <code>graphTranslatesToJobGraph</code> проверяют, что идентификаторы не повторяются и что граф переводится в <code>JobGraph</code>. Запусти только этот класс.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test --tests '*PipelineTopologyTest'</pre>
+<p>Флаг <code>--tests</code> отбирает тесты по шаблону имени. Кавычки нужны, чтобы оболочка не раскрыла звёздочку сама. Теперь проверь, что тест умеет падать, потому что тест, который никогда не падает, ничего не доказывает. Мы сделали две поломки на копии снапшота, повтори их и верни код обратно.</p>
+<ul>
+  <li>Убери <code>.uid("dlq-sink")</code> в <code>PayGuardJob</code>. Упадут <code>everyOperatorHasStableUid</code> и <code>uidsAreUnique</code>. Первый назовёт сразу два узла, <code>dlq-sink: Writer</code> и <code>dlq-sink: Committer</code>, потому что один вызов <code>sinkTo</code> разворачивается в два оператора. Второй увидит в списке повторяющийся <code>null</code>.</li>
+  <li>Убери <code>implements Serializable</code> у <code>RuleConfig</code>. Класс упадёт с тем же сообщением, что и <code>flink run</code> из урока 8. Тест <code>DynamicRulesTest</code> на harness при этом останется зелёным.</li>
+</ul>
+
+<h2>Шаг 4. Restore-тест</h2>
+<p>Создай <code>src/test/java/dev/study/payguard/pipeline/CardProfileRestoreTest.java</code>.</p>
+<div data-code="lesson-16/src/test/java/dev/study/payguard/pipeline/CardProfileRestoreTest.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-16/src/test/java/dev/study/payguard/pipeline/CardProfileRestoreTest.java" data-lines="17-39"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Первый harness играет задание до падения. <code>open</code> создаёт состояние, и два платежа копятся в профиле карты <code>c1</code>.</p>
+      <p class="tl"><code>snapshot</code> снимает состояние. Аргументы это номер чекпоинта и его время, сами значения на результат здесь не влияют. После закрытия первого harness снимок остаётся живым.</p>
+      <p class="tl">Второй harness это задание после рестарта. <code>initializeState</code> вызывается строго до <code>open</code>, иначе harness бросит исключение, в исходниках эта проверка стоит первой.</p>
+      <p class="tl">Третий платёж и проверка. Значения 3 платежа и 700 единиц получаются, только если первые два платежа пережили рестарт. <code>extractOutputValues</code> вернёт выход только нового экземпляра, поэтому в нём один элемент.</p>
+      <p class="tl">Настоящий <code>KeyedProcessOperator</code> оборачивает функцию, и harness получает селектор ключа. Метод вынесен отдельно, чтобы оба экземпляра были созданы одинаково.</p>
+    </div>
+  </div>
+</div>
+<p>Проверь и его поломкой. Замени в <code>CardProfileFunction</code> состояние обычным полем. На копии снапшота <code>CardProfileFunctionTest</code> остался зелёным, а этот тест упал и показал профиль из одного платежа на 400 единиц. Именно такую ошибку он и должен ловить.</p>
+
+<h2>Шаг 5. Отдельная задача Gradle для E2E</h2>
+<p>Контейнеры не должны запускаться при каждом <code>./gradlew test</code>. Сквозной тест помечается тегом JUnit, и две задачи выбирают тесты по этому тегу.</p>
+<div data-diff="lesson-15/build.gradle.kts lesson-16/build.gradle.kts"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-16/build.gradle.kts" data-lines="54-72"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>platform</code> подключает BOM, файл с согласованными версиями библиотек Testcontainers. Поэтому у трёх модулей ниже версия не указана.</p>
+      <p class="tl">Обычная задача <code>test</code> выбрасывает всё, что помечено тегом <code>e2e</code>.</p>
+      <p class="tl">Своей задаче типа <code>Test</code> надо явно сказать, где лежат скомпилированные тесты и какой classpath брать. Значения те же, что у обычных тестов.</p>
+      <p class="tl"><code>includeTags</code> оставляет только сквозные тесты. <code>shouldRunAfter</code> просит запускать их после обычных, если в одной команде указаны обе задачи, и зависимости между ними не создаёт.</p>
+    </div>
+  </div>
+</div>
+<p>Блок про <code>commons-lang3</code> в конце этого diff разберём в шаге 7, это следствие настоящего расследования. В комментарии к задаче стоит оценка «минуты», на нашем стенде тест занял 7 с. При первом запуске добавится скачивание образов.</p>
+
+<h2>Шаг 6. Сквозной тест</h2>
+<p>Создай <code>src/test/java/dev/study/payguard/job/PayGuardE2ETest.java</code>.</p>
+<div data-code="lesson-16/src/test/java/dev/study/payguard/job/PayGuardE2ETest.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-16/src/test/java/dev/study/payguard/job/PayGuardE2ETest.java" data-lines="35-68"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>@Tag("e2e")</code> связывает класс с задачей из шага 5. <code>@Testcontainers</code> сам запустит и остановит поля с аннотацией <code>@Container</code>.</p>
+      <p class="tl">Образы заданы точно, как и везде в курсе. PostgreSQL получает при старте тот же <code>sql/init.sql</code>, что и стенд Compose, поэтому схема и справочник продавцов настоящие.</p>
+      <p class="tl">MiniCluster с одним TaskManager на 8 слотов. Этого хватает на весь граф при параллелизме 2.</p>
+      <p class="tl">Адрес базы становится известен только после старта контейнера. Он уходит в системные свойства, которые прочитает <code>DbSettings</code>.</p>
+      <p class="tl">Топики создаются заранее, по две партиции на каждый.</p>
+    </div>
+  </div>
+</div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-16/src/test/java/dev/study/payguard/job/PayGuardE2ETest.java" data-lines="70-102"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Настоящий граф через настоящую фабрику. Чекпоинты каждую секунду нужны, чтобы транзакция с алертами фиксировалась быстро. Аргумент <code>--bootstrap</code> читает <code>JobConfig</code>, так задание получает адрес Kafka из контейнера.</p>
+      <p class="tl"><code>executeAsync</code> запускает задание и сразу возвращает управление. Обычный <code>execute</code> ждал бы конца потока, которого нет.</p>
+      <p class="tl">Потребитель читает алерты и DLQ. В <code>newConsumer</code> задан <code>read_committed</code>, поэтому он увидит только зафиксированные транзакции. Так тест проверяет, что транзакция с алертом действительно фиксируется.</p>
+      <p class="tl">Источник читает с конца топика и стартует не сразу. Одна посылка могла бы пропасть, поэтому пачка отправляется в цикле, пока не появится результат или не выйдет дедлайн в две минуты.</p>
+      <p class="tl">Проверяем три вещи сразу. Правило <code>velocity</code> сработало, потому что в пачке 12 платежей по карте при пороге 10. Обогащение сходило в настоящую базу и принесло <code>HIGH</code> для <code>m-0000</code>, так задано в <code>init.sql</code>. Битая запись попала в DLQ.</p>
+      <p class="tl"><code>job.cancel</code> в <code>finally</code> останавливает задание, даже если проверка упала.</p>
+    </div>
+  </div>
+</div>
+<p>Docker должен быть запущен. Поднимать стенд из Compose не нужно, контейнеры тест создаёт себе сам.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test
+./gradlew e2eTest</pre>
+<p>Первая команда идёт без Docker. Результаты смотри в <code>build/reports/tests/test/index.html</code> и <code>build/reports/tests/e2eTest/index.html</code>. На нашем стенде это 45 тестов в первом отчёте, вместе с тестом из задания, и один сквозной за 7 с во втором.</p>
+
+<h2>Шаг 7. Как мы нашли проблему с commons-lang3</h2>
+<p>Этот шаг про диагностику. При первом запуске сквозной тест повис на 60 с и упал так.</p>
+<pre data-lang="text" data-title="вывод теста" data-output>Timed out waiting for log output matching '.*Transitioning from RECOVERY to RUNNING.*'</pre>
+<p>Сообщение наводит на мысль о медленной Kafka. Но логов контейнера не было совсем. Значит, Kafka внутри него даже не начала запускаться. Такая подсказка важнее текста ошибки, поэтому мы пошли смотреть, что происходит в самом тесте. В стандартном потоке ошибок лежала строка, которую легко было пропустить. В HTML-отчёте Gradle такой поток показан у класса теста отдельно.</p>
+<pre data-lang="text" data-title="stderr теста" data-output>Exception in thread "Thread-6" java.lang.NoSuchMethodError: 'java.lang.String org.apache.commons.lang3.SystemProperties.getUserName(java.lang.String)'</pre>
+<p>Причина оказалась вот в чём. Testcontainers копирует скрипт старта в контейнер Kafka tar-архивом, который пакует в отдельном потоке. Этот поток вызвал метод <code>commons-lang3</code> и умер, потому что такого метода не нашлось. Docker получил пустой архив и ответил 200, скрипт старта в контейнере не появился. Сам тест об этом не узнал и 60 с честно ждал строку в логе.</p>
+<p>Откуда взялась старая версия. Библиотека <code>openlineage-sql-java-1.32.0.jar</code> содержит внутри себя копию <code>commons-lang3</code> и стоит раньше на classpath. В проект она приходит транзитивно, из JDBC-коннектора. Проверить оба факта можно самому.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew dependencyInsight --dependency openlineage-sql-java --configuration testRuntimeClasspath
+find ~/.gradle/caches/modules-2/files-2.1/io.openlineage -name 'openlineage-sql-java-1.32.0.jar' \
+  -exec unzip -l {} \; | grep lang3/SystemProperties</pre>
+<p>Первая команда показывает цепочку, по которой зависимость попала в указанную конфигурацию, и там будет <code>flink-connector-jdbc-core</code>. Вторая находит jar в кэше Gradle и показывает в нём класс <code>SystemProperties</code> из чужого пакета.</p>
+<p>Первая мысль это исключить jar из тестовых зависимостей. Она не работает, потому что он нужен самому коннектору.</p>
+<pre data-lang="text" data-title="вывод теста после исключения jar" data-output>NoClassDefFoundError: io/openlineage/sql/OpenLineageSql</pre>
+<p>Рабочее решение в том, чтобы поставить настоящую библиотеку раньше на classpath. Для всех задач типа <code>Test</code> мы берём jar <code>commons-lang3</code> из разрешённых зависимостей и дописываем его в начало. Это строки 76-78 файла сборки из шага 5. Первым найденным классом становится настоящий, а <code>openlineage</code> остаётся на месте и работает.</p>
+<p>Похожая ловушка с лишним коннектором была в уроке 14. В Java порядок на classpath решает, какой из одинаковых классов загрузится, поэтому при странном <code>NoSuchMethodError</code> первым делом ищи вторую копию класса.</p>
+
+<h2>Шаг 8. CI</h2>
+<p>Положи в проект <code>.github/workflows/ci.yml</code>.</p>
+<div data-code="lesson-16/.github/workflows/ci.yml"></div>
+<p>Блок <code>on</code> запускает файл на каждый push в <code>main</code> и на каждый pull request. Задание <code>build</code> гонит обычные тесты и собирает толстый jar, а <code>upload-artifact</code> сохраняет его как артефакт прогона. Действие <code>setup-gradle</code> настраивает Gradle и его кэш. Флаг <code>--console=plain</code> убирает анимированный прогресс, который только мешает читать лог. Задание <code>e2e</code> благодаря <code>needs: build</code> стартует только после успеха первого. Отдельной настройки Docker в нём нет, расчёт на то, что на раннере Ubuntu от GitHub он уже стоит.</p>
+<p>Этот файл мы ни разу не запускали. Считай первый прогон проверкой самого файла.</p>

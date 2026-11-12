@@ -1,0 +1,149 @@
+<h2>Что будет в конце</h2>
+<p>Сразу после разбора платежей стоит дедупликация, и окна из урока 6 считают уже очищенный поток. Платежи, разложенные по карте, проверяет правило частоты, а его алерты уходят в топик <code>fraud.alerts</code>. Генератор умеет устраивать серии платежей по одной карте, чтобы правилу было что ловить. Обе функции проверены тестами на harness. Файлы правила суммы из задания пока создавать не нужно. Новых зависимостей нет, <code>build.gradle.kts</code> и <code>docker-compose.yml</code> не меняются, топик <code>fraud.alerts</code> служба <code>kafka-init</code> создаёт с урока 6.</p>
+
+<h2>Шаг 1. Модель алерта</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/model/FraudAlert.java</code>. Идентификатор алерта собирается из правила и платежа. Если после сбоя Flink обработает тот же платёж повторно, алерт получит тот же <code>alertId</code>, и потребитель сможет отбросить повтор.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/model/FraudAlert.java"></div>
+
+<h2>Шаг 2. Дедупликация</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/DeduplicateFunction.java</code>. Функция разложена по <code>paymentId</code>, поэтому её состояние это один флаг на платёж.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/DeduplicateFunction.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/DeduplicateFunction.java" data-lines="14-33"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Три параметра типа означают тип ключа, вход и выход. Ключ здесь строка, это <code>paymentId</code>.</p>
+      <p class="tl">Срок памяти вынесен в публичную константу. Тест сошлётся на неё и не разойдётся с кодом.</p>
+      <p class="tl">Поле состояния помечено <code>transient</code>. Сама функция сериализуется и едет на TaskManager, а объект состояния создаётся уже там.</p>
+      <p class="tl"><code>open</code> вызывается один раз на подзадачу перед первой записью. Дескриптор называет состояние <code>seen</code> и задаёт тип значения.</p>
+      <p class="tl"><code>enableTimeToLive</code> включает TTL с настройками по умолчанию. Срок отсчитывается от записи флага, чтения его не продлевают.</p>
+      <p class="tl"><code>getState</code> возвращает доступ к состоянию. Один и тот же объект служит всем ключам подзадачи.</p>
+      <p class="tl">Для нового платежа <code>value()</code> вернёт <code>null</code>. Ставим флаг и пропускаем платёж дальше.</p>
+      <p class="tl">Для повтора флаг уже стоит, и функция просто ничего не выдаёт.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 3. Корзины</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/BucketedSum.java</code>. Это обычный класс поверх <code>MapState</code>. Он пригодится двум правилам, поэтому логика корзин вынесена из функции. Видимость пакетная, снаружи пакета <code>pipeline</code> он никому не нужен.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/BucketedSum.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/BucketedSum.java" data-lines="19-50"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>add</code> находит начало корзины и прибавляет значение. Для правила частоты значение равно единице, для правила суммы это сумма платежа.</p>
+      <p class="tl"><code>sumSince</code> складывает корзины, которые кончаются позже заданного момента. Корзина, задевшая границу, берётся целиком, отсюда плавающая минута из теории.</p>
+      <p class="tl"><code>evictBefore</code> удаляет корзины, которые целиком лежат раньше заданного момента. Удаление идёт через итератор ключей.</p>
+      <p class="tl"><code>bucketEnd</code> нужен правилу, чтобы поставить таймер на конец корзины. Так все платежи одной корзины делят один таймер.</p>
+      <p class="tl">Начало корзины получается отбрасыванием остатка от деления. Корзины выровнены по началу эпохи, как окна в уроке 6.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 4. Правило частоты</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/VelocityRule.java</code>. Лимит приходит через конструктор, поэтому его можно менять параметром запуска без пересборки.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/VelocityRule.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/VelocityRule.java" data-lines="28-56"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">В <code>open</code> создаются два состояния. <code>payment-counts</code> хранит корзины, <code>last-alert-at</code> хранит время последнего алерта по карте.</p>
+      <p class="tl">На каждый платёж счётчик его корзины растёт на единицу.</p>
+      <p class="tl">Таймер ставится на конец корзины плюс минута. В этот момент корзина гарантированно выпала из окна любого будущего платежа, если он не опоздал сильнее watermark.</p>
+      <p class="tl">Правило считает платежи за минуту до текущего. Если их больше лимита и алерт давно не выдавался, выдаём алерт и запоминаем его время.</p>
+      <p class="tl"><code>onTimer</code> вызывается, когда watermark дошёл до времени таймера. Он удаляет корзины, которые кончились минуту назад и раньше.</p>
+      <p class="tl"><code>alertIsDue</code> не даёт выдать больше одного алерта в минуту на карту. Без него серия из 25 платежей дала бы 15 алертов подряд.</p>
+    </div>
+  </div>
+</div>
+<p>У <code>last-alert-at</code> нет ни TTL, ни таймера. Значение остаётся у каждой карты, по которой хоть раз был алерт. Карт в нашем генераторе 5000, и это сознательное упрощение. В проде с миллионами карт сюда стоит добавить TTL.</p>
+
+<h2>Шаг 5. Настройки и задание</h2>
+<p>В <code>JobConfig</code> появляются топик алертов и лимиты правил. Поле лимита суммы пригодится в задании, заведи его сразу, чтобы не возвращаться к файлу.</p>
+<div data-diff="lesson-06/src/main/java/dev/study/payguard/job/JobConfig.java lesson-07/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+<p>В <code>PayGuardJob</code> дедупликация встаёт в общую цепочку сразу после пробы опозданий. Метод <code>parsePayments</code> теперь возвращает очищенный поток, и окна продавцов и сессий карт получают его без изменений в своём коде.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="61-68"></div>
+<p>Перед правилами поток раскладывается по карте. Переменная <code>byCard</code> живёт в <code>main</code>, потому что к этому же разложению позже подключатся другие потребители. Правила собираются в методе <code>fraudAlerts</code>, приёмник алертов в <code>sinkAlerts</code>.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="41-42"></div>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="91-95"></div>
+<p>В снапшоте <code>fraudAlerts</code> возвращает <code>union</code> с правилом из задания, у тебя пока метод вернёт только <code>velocityAlerts</code>. Приёмник получает готовый поток алертов.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="106-108"></div>
+<p>Добавь импорты <code>FraudAlert</code>, <code>DeduplicateFunction</code>, <code>VelocityRule</code> и <code>KeyedStream</code>.</p>
+
+<h2>Шаг 6. Тесты на harness</h2>
+<p>Функции с состоянием и таймерами удобно проверять на harness из урока 3. Он даёт управлять watermark, временем TTL и смотреть на число таймеров. Создай <code>src/test/java/dev/study/payguard/pipeline/DeduplicateFunctionTest.java</code>.</p>
+<div data-code="lesson-07/src/test/java/dev/study/payguard/pipeline/DeduplicateFunctionTest.java"></div>
+<p>Второй тест двигает часы TTL вручную. <code>setStateTtlProcessingTime</code> подменяет время, по которому TTL проверяет срок, поэтому тест не ждёт час и не зависит от настоящих часов.</p>
+<p>Теперь <code>src/test/java/dev/study/payguard/pipeline/VelocityRuleTest.java</code>.</p>
+<div data-code="lesson-07/src/test/java/dev/study/payguard/pipeline/VelocityRuleTest.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-07/src/test/java/dev/study/payguard/pipeline/VelocityRuleTest.java" data-lines="61-73"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Три платежа приходят на 1, 2 и 3 секунде. Все они лежат в корзине от 0 до 10 секунд.</p>
+      <p class="tl">Таймер у них общий, на 70 секунде. Тест проверяет это через <code>numEventTimeTimers</code>, и значение 1 доказывает слияние таймеров.</p>
+      <p class="tl">Watermark на 200 секунде обгоняет таймер. Таймер срабатывает и исчезает, а с ним уходит корзина.</p>
+      <p class="tl">Четвёртый платёж через 200 секунд даёт в окне всего один платёж. Будь старая корзина жива, сумма была бы 4, и правило выдало бы алерт при лимите 3.</p>
+    </div>
+  </div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Можно ли верить harness? Фабрика оборачивает функцию в <code>KeyedProcessOperator</code>, тот же класс, что разбирали в теории.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/ProcessFunctionTestHarnesses.java" data-lines="75-92" data-must="new KeyedProcessOperator&lt;&gt;(Preconditions.checkNotNull(function))"></div>
+<p>В задании <code>KeyedStream.process</code> делает то же самое, если не включено асинхронное состояние.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/datastream/KeyedStream.java" data-lines="360-367" data-must="new KeyedProcessOperator&lt;&gt;(clean(keyedProcessFunction))"></div>
+<p>Время TTL harness берёт из своего провайдера, его и двигает <code>setStateTtlProcessingTime</code>.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/AbstractStreamOperatorTestHarness.java" data-lines="802-808" data-must="ttlTimeProvider.setCurrentTimestamp(timeStamp);"></div>
+<p>Чего harness не проверит, так это сериализацию функции при отправке задания. Её ловит только настоящий запуск, в уроке 8 мы на это наткнёмся.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/testing/" target="_blank" rel="noopener">Testing</a></p>
+</div>
+
+<pre data-lang="bash" data-title="терминал">./gradlew test --tests 'dev.study.payguard.pipeline.DeduplicateFunctionTest' --tests 'dev.study.payguard.pipeline.VelocityRuleTest'</pre>
+<p>Флаг <code>--tests</code> можно повторять, тогда запустятся оба класса. Все шесть тестов должны пройти. Попробуй ради эксперимента убрать строку с <code>enableTimeToLive</code>. Тест <code>paymentIsForgottenAfterTtl</code> упадёт, на выходе останется один платёж.</p>
+
+<h2>Шаг 7. Генератор с сериями</h2>
+<p>Правилу частоты нужна атака, а случайные платежи по 5000 картам почти никогда не дают 11 платежей карты за минуту. Генератор учится делать серию из 25 платежей по одной карте подряд. Новая опция <code>--burst</code> задаёт долю, с которой серия начинается вместо обычного платежа.</p>
+<div data-diff="lesson-06/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java lesson-07/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java"></div>
+<p>В <code>PaymentFactory</code> создание платежа вынесено в <code>paymentOn</code>, и метод <code>burst</code> переиспользует его для одной карты. Время событий серии идёт с шагом в миллисекунду, а суммы мелкие, так и выглядит проверка украденной карты.</p>
+<div data-diff="lesson-06/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java lesson-07/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java"></div>
+<p><code>RawRecordSource</code> складывает серию в очередь и отдаёт по одному платежу за вызов, поэтому темп генератора не меняется.</p>
+<div data-diff="lesson-06/src/main/java/dev/study/payguard/loadgen/RawRecordSource.java lesson-07/src/main/java/dev/study/payguard/loadgen/RawRecordSource.java"></div>
+<p>Осталось передать долю серий в конструктор и поправить старый тест под новую сигнатуру.</p>
+<div data-diff="lesson-06/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java lesson-07/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java"></div>
+<div data-diff="lesson-06/src/test/java/dev/study/payguard/loadgen/RawRecordSourceTest.java lesson-07/src/test/java/dev/study/payguard/loadgen/RawRecordSourceTest.java"></div>
+
+<h2>Шаг 8. Запусти на стенде</h2>
+<p>Порядок прежний, сначала сборка, потом стенд. Затем найди задание прошлого урока и останови его. Состояние его окон новому заданию не нужно. Снимков у нас пока нет, переносить всё равно нечего.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list
+docker compose exec jobmanager flink cancel &lt;JobID&gt;</pre>
+<p>Отправь новое задание и запусти генератор с дубликатами, битыми записями и сериями.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --dup 0.02 --bad 0.01 --burst 0.002"</pre>
+<p>Флаг <code>--dup 0.02</code> повторяет предыдущую запись в 2 % случаев, <code>--bad 0.01</code> подмешивает 1 % битого JSON, <code>--burst 0.002</code> начинает серию с вероятностью 0,2 % на каждой записи. Через пару минут посмотри на метрики дедупликации и правила частоты. Команды те же, что в уроке 6, меняется только имя вершины.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+for NAME in deduplicate rule-velocity; do
+  V=$(curl -s localhost:8081/jobs/$JOB | jq -r --arg n "$NAME" '.vertices[] | select(.name == $n) | .id')
+  curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=numRecordsIn,numRecordsOut,busyTimeMsPerSecond,backPressuredTimeMsPerSecond&amp;agg=min,max,sum" | jq -c .
+done</pre>
+<pre data-lang="json" data-title="вывод" data-output>[{"id":"numRecordsIn","min":8725.0,"max":8865.0,"sum":17590.0},{"id":"numRecordsOut","min":8550.0,"max":8714.0,"sum":17264.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":3.0,"sum":5.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]
+[{"id":"numRecordsIn","min":8537.0,"max":8719.0,"sum":17256.0},{"id":"numRecordsOut","min":19.0,"max":21.0,"sum":40.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]</pre>
+<p>Это числа с нашего стенда, у тебя они будут другими, они зависят от длительности прогона и долей генератора. Первая строка относится к дедупликации. На вход пришло 17590 платежей, дальше ушло 17264, выброшено 326, почти 2 %. Ровно столько повторов и заказано флагом <code>--dup</code>. Подзадачи нагружены поровну, у <code>paymentId</code> нет горячих значений.</p>
+<p>Вторая строка относится к правилу частоты. Из 17256 платежей получилось 40 алертов. Метрика <code>busyTimeMsPerSecond</code> равна 2 мс в секунду, то есть правило с состоянием в куче почти ничего не стоит при такой нагрузке. Теперь прочитай сами алерты.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic fraud.alerts --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"alertId":"velocity:9f83941a-d1f6-aa34-2b55-488691ed5149","ruleId":"velocity","cardId":"c-1764","merchantId":"m-0000","paymentId":"9f83941a-d1f6-aa34-2b55-488691ed5149","detail":"11 платежей за минуту","eventTimeMs":1794085691016}
+{"alertId":"velocity:681860b7-5e8c-bdb5-1366-c0f1f50a0c2a","ruleId":"velocity","cardId":"c-4262","merchantId":"m-0000","paymentId":"681860b7-5e8c-bdb5-1366-c0f1f50a0c2a","detail":"11 платежей за минуту","eventTimeMs":1794085692640}
+{"alertId":"velocity:9ab9501b-b3b5-dd7a-0188-9dfc628b84f0","ruleId":"velocity","cardId":"c-1321","merchantId":"m-0047","paymentId":"9ab9501b-b3b5-dd7a-0188-9dfc628b84f0","detail":"11 платежей за минуту","eventTimeMs":1794085696992}</pre>
+<p>Во всех трёх алертах ровно 11 платежей. Так выглядит серия генератора. Правило сработало на одиннадцатом платеже серии, а оставшиеся 14 платежей той же карты промолчали благодаря <code>last-alert-at</code>. <code>alertId</code> собран из правила и платежа, поэтому повторная обработка того же платежа даст тот же идентификатор.</p>
+<p>Последняя проверка касается сохранности состояния.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:8081/jobs/$JOB/checkpoints | jq -c '{counts, recent: .history}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}</pre>
+<p>Ни одного чекпоинта, мы их ещё не включали. Если TaskManager сейчас упадёт, корзины и флаги дедупликации пропадут вместе с кучей. Это исправит урок 11.</p>

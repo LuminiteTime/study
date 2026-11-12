@@ -1,0 +1,25 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Модель повторяет <code>MerchantStats</code>, только вместо продавца карта, а вместо минуты границы сессии.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/model/CardSession.java"></div>
+<p>Окно собрано из тех же частей, что и минутное. <code>PaymentTotals</code> используется как есть, и здесь впервые работает его метод <code>merge</code>. Он складывает аккумуляторы двух сессий, когда новый платёж их соединяет. Вторая функция <code>ToCardSession</code> добавляет границы сессии, без неё их не узнать. Допуск опозданий здесь не задан. Сессия закрывается через 30 с после последнего платежа и ещё 10 с задержки watermark, для антифрода это и так долго.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/pipeline/CardSessionWindow.java"></div>
+<p>В задании окно подключается к тому же потоку <code>payments</code>, что и минутные итоги. У потока теперь два потребителя, и каждый платёж уходит в оба.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="72-75"></div>
+<p>Тест проверяет склейку и разрыв. Платёж в 1 с открывает окно до 31 с, платёж в 20 с открывает окно до 50 с. Окна пересекаются и сливаются в сессию от 1 до 50 с. Платёж в 100 с отстоит от 50 с дальше паузы и начинает вторую сессию от 100 до 130 с.</p>
+<div data-code="lesson-06/src/test/java/dev/study/payguard/pipeline/CardSessionWindowTest.java"></div>
+<p>Итог прогона всех тестов снапшота на стенде курса.</p>
+<pre data-lang="text" data-title="итог прогона" data-output>RESULT tests 18 fail 0
+jar bytes 24351512</pre>
+<p>После сборки и нового запуска граф задания выглядит так.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:8081/jobs/$JOB | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Вершин три. <code>keyBy</code> по продавцу и <code>keyBy</code> по карте требуют двух разных перераспределений, поэтому каждое окно стоит в своей вершине. Приёмники сцеплены с окнами.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic card.sessions --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"cardId":"c-3710","sessionStartMs":1794085556146,"sessionEndMs":1794085590732,"paymentCount":2,"amountMinor":29438}
+{"cardId":"c-2015","sessionStartMs":1794085560732,"sessionEndMs":1794085590732,"paymentCount":1,"amountMinor":41989}
+{"cardId":"c-1722","sessionStartMs":1794085560732,"sessionEndMs":1794085590732,"paymentCount":1,"amountMinor":4280}</pre>
+<p>У <code>c-2015</code> один платёж, и сессия длится ровно 30000 мс. У <code>c-3710</code> два платежа, сессия кончается через 30 с после второго, значит, второй платёж был в 1794085560732. Карт 5000, поэтому почти все сессии при 200 платежах в секунду состоят из одного-двух платежей. Метрики вершины <code>card-sessions</code> на нашем стенде показали 17604 платежа на входе и 3248 сессий на выходе. Подзадачи получили 8734 и 8870 платежей, у карт нет горячего ключа, и перекоса тоже нет.</p>
+</div>

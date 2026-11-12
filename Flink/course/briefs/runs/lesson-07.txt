@@ -1,0 +1,52 @@
+### тесты
+RESULT tests 26 fail 0
+jar bytes 24362847
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+Job has been submitted with JobID 83bbc1b661dee67af56abc533ecd4eda
+### job 83bbc1b661dee67af56abc533ecd4eda
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rule-velocity","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 21:08:09 : 83bbc1b661dee67af56abc533ecd4eda : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe) :: [{"id":"numRecordsIn","min":8580.0,"max":9200.0,"sum":17780.0},{"id":"numRecordsOut","min":8580.0,"max":9200.0,"sum":17780.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":3.0,"sum":5.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+deduplicate :: [{"id":"numRecordsIn","min":8725.0,"max":8865.0,"sum":17590.0},{"id":"numRecordsOut","min":8550.0,"max":8714.0,"sum":17264.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":3.0,"sum":5.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085771219","1794085771219"]
+merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer) :: [{"id":"numRecordsIn","min":6901.0,"max":10363.0,"sum":17264.0},{"id":"numRecordsOut","min":64.0,"max":74.0,"sum":138.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085771219","1794085771219"]
+card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer :: [{"id":"numRecordsIn","min":8539.0,"max":8725.0,"sum":17264.0},{"id":"numRecordsOut","min":1609.0,"max":1611.0,"sum":3220.0},{"id":"busyTimeMsPerSecond","min":5.0,"max":5.0,"sum":10.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085771219","1794085771219"]
+rule-velocity :: [{"id":"numRecordsIn","min":8537.0,"max":8719.0,"sum":17256.0},{"id":"numRecordsOut","min":19.0,"max":21.0,"sum":40.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085771219","1794085771219"]
+rule-amount-spike :: [{"id":"numRecordsIn","min":8539.0,"max":8725.0,"sum":17264.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085771219","1794085771219"]
+alerts-sink: Writer -> alerts-sink: Committer :: [{"id":"numRecordsIn","min":19.0,"max":21.0,"sum":40.0},{"id":"numRecordsOut","min":19.0,"max":21.0,"sum":40.0},{"id":"busyTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks ["1794085771219","1794085771219"]
+### checkpoints
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}
+### exceptions
+[]
+### топики
+--- card.sessions
+{"cardId":"c-0401","sessionStartMs":1794085691985,"sessionEndMs":1794085723630,"paymentCount":2,"amountMinor":52023}
+{"cardId":"c-3015","sessionStartMs":1794085693738,"sessionEndMs":1794085723738,"paymentCount":1,"amountMinor":39875}
+{"cardId":"c-0758","sessionStartMs":1794085680666,"sessionEndMs":1794085723739,"paymentCount":2,"amountMinor":27626}
+--- fraud.alerts
+{"alertId":"velocity:9f83941a-d1f6-aa34-2b55-488691ed5149","ruleId":"velocity","cardId":"c-1764","merchantId":"m-0000","paymentId":"9f83941a-d1f6-aa34-2b55-488691ed5149","detail":"11 платежей за минуту","eventTimeMs":1794085691016}
+{"alertId":"velocity:681860b7-5e8c-bdb5-1366-c0f1f50a0c2a","ruleId":"velocity","cardId":"c-4262","merchantId":"m-0000","paymentId":"681860b7-5e8c-bdb5-1366-c0f1f50a0c2a","detail":"11 платежей за минуту","eventTimeMs":1794085692640}
+{"alertId":"velocity:9ab9501b-b3b5-dd7a-0188-9dfc628b84f0","ruleId":"velocity","cardId":"c-1321","merchantId":"m-0047","paymentId":"9ab9501b-b3b5-dd7a-0188-9dfc628b84f0","detail":"11 платежей за минуту","eventTimeMs":1794085696992}
+--- merchant.stats
+{"merchantId":"m-0015","windowStartMs":1794085620000,"windowEndMs":1794085680000,"paymentCount":3,"amountMinor":80015}
+{"merchantId":"m-0048","windowStartMs":1794085620000,"windowEndMs":1794085680000,"paymentCount":1,"amountMinor":26043}
+{"merchantId":"m-0043","windowStartMs":1794085620000,"windowEndMs":1794085680000,"paymentCount":1,"amountMinor":28306}
+--- payments.dlq
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085690909}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085691361}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085691469}
+--- payments.late
+--- payments.raw
+{"paymentId":"7d8d4850-32f4-2b92-496c-5498aeac3f2b","cardId":"c-2607","merchantId":"m-0000","amountMinor":18015,"currency":"EUR","country":"DE","eventTimeMs":1794085691985}
+{"paymentId":"a6ae7ebe-d561-22cd-9140-98989cd4585f","cardId":"c-0427","merchantId":"m-0046","amountMinor":8863,"currency":"EUR","country":"PL","eventTimeMs":1794085691985}
+{"paymentId":"633f6ab6-3a43-5205-3cde-3ad841baa06c","cardId":"c-2301","merchantId":"m-0000","amountMinor":23962,"currency":"EUR","country":"NL","eventTimeMs":1794085691985}
+--- rules.config
+### postgres
+### лог TaskManager, ошибки

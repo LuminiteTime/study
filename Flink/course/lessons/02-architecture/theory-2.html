@@ -1,0 +1,158 @@
+<h2>RUNNING ещё ничего не гарантирует</h2>
+<p>Вернёмся к ночной аварии. Статус задания и состояние подзадач разные вещи, и разница видна в одном методе.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Планировщик сначала переводит задание в RUNNING и только потом запускает стратегию, которая просит слоты.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/scheduler/DefaultScheduler.java" data-lines="243-249" data-must="transitionToRunning"></div>
+<p>Подзадача считается работающей только после отчёта из потока на TaskManager. Сначала JobMaster отправляет описание подзадачи, TaskManager запускает поток, и уже поток проходит свои состояния.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/Execution.java" data-lines="653-662" data-must="taskManagerGateway.submitTask"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/taskexecutor/TaskExecutor.java" data-lines="875-886" data-must="task.startTaskThread"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/taskmanager/Task.java" data-lines="947-955" data-must="ExecutionState.RUNNING"></div>
+<p>Смотри на статус вершин в <code>/jobs/&lt;id&gt;</code>, в этом ответе видно настоящее положение дел. Этому полю мы и посвятим скрипт в задании.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/rest_api/" target="_blank" rel="noopener">REST API</a></p>
+</div>
+
+<h2>Когда слотов не хватило</h2>
+<p>Кластер standalone не умеет сам поднимать новые TaskManager, ResourceManager распределяет только то, что уже подключилось. На Kubernetes или YARN он может запросить новые процессы. Поэтому в нашем стенде нехватка слотов кончается ошибкой, и поведение зависит от возраста кластера.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первые минуты после старта кластер терпит нехватку, потому что TaskManager могут ещё подключаться. Длительность задаёт <code>resourcemanager.standalone.start-up-time</code>, а без него берётся <code>slot.request.timeout</code>, то есть пять минут.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/resourcemanager/StandaloneResourceManager.java" data-lines="110-121" data-must="setFailUnfulfillableRequest(true)"></div>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/JobManagerOptions.java" data-lines="409-413" data-must="slot.request.timeout"></div>
+<p>После этого периода менеджер слотов сообщает о нехватке заданию сразу.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/resourcemanager/slotmanager/FineGrainedSlotManager.java" data-lines="699-708" data-must="notEnoughResourceAvailable"></div>
+<p>В пуле слотов этого задания такое уведомление отменяет все потоковые запросы, ожидающие слот.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/jobmaster/slotpool/DeclarativeSlotPoolBridge.java" data-lines="507-521" data-must="Could not acquire the minimum required resources"></div>
+<p>Есть и вторая проверка, в самом JobMaster. Если запрос не удаётся выполнить в течение таймаута, он отменяется с другим текстом. Поэтому при поиске в логах проверяй обе строки.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/jobmaster/slotpool/PhysicalSlotRequestBulkCheckerImpl.java" data-lines="86-93" data-must="Slot request bulk is not fulfillable"></div>
+<p>Дальше решает стратегия перезапуска. Без чекпоинтов её значение по умолчанию это отсутствие перезапуска, с чекпоинтами это экспоненциальная задержка. В нашем задании чекпоинтов пока нет, поэтому оно перейдёт в FAILED. Этот сценарий мы в стенде не прогоняли, описание составлено по коду.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/config/" target="_blank" rel="noopener">Configuration</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/resource-providers/standalone/overview/" target="_blank" rel="noopener">Standalone</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Частичный запуск тоже бывает</strong>
+    <p>Планирование идёт по регионам, связанным передачей данных. У нашей цепочки нет связей между подзадачами, поэтому часть подзадач может получить слоты и успеть стартовать, пока остальные ждут. В этот момент задание читает только часть партиций Kafka, а смотреть в мониторинге надо на статус вершин.</p>
+  </div>
+</div>
+
+<h2>Групповой чат запуска</h2>
+<p>Тот же запуск глазами участников, вместе с вопросом, что случится при нехватке слотов.</p>
+
+<div class="chat-window" id="chat-l02">
+  <div class="chat-messages">
+    <div class="chat-message" data-msg="0" data-sender="client" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-1)">К</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-1)">Клиент</span><p>Выполнил main, собрал StreamGraph на три оператора. Шлю его вместе с jar на POST /jobs. Я запущен с --detached, ждать результата не буду.</p></div>
+    </div>
+    <div class="chat-message" data-msg="1" data-sender="dispatcher" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-2)">D</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-2)">Dispatcher</span><p>Такого JobID у меня нет, принимаю. План сохранил. JobMaster, этот заказ твой.</p></div>
+    </div>
+    <div class="chat-message" data-msg="2" data-sender="jobmaster" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-3)">J</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-3)">JobMaster</span><p>Операторы связаны через FORWARD с одним параллелизмом, склеиваю в одну вершину. Подзадач две. Статус ставлю RUNNING. ResourceManager, мне нужно два слота.</p></div>
+    </div>
+    <div class="chat-message" data-msg="3" data-sender="rm" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-4)">R</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-4)">ResourceManager</span><p>TaskManager, у тебя четыре свободных. Выдели два и предложи их JobMaster, вот его адрес.</p></div>
+    </div>
+    <div class="chat-message" data-msg="4" data-sender="tm" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-5)">T</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-5)">TaskManager</span><p>Выделил. JobMaster, вот два слота, берёшь?</p></div>
+    </div>
+    <div class="chat-message" data-msg="5" data-sender="jobmaster" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-3)">J</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-3)">JobMaster</span><p>Беру. Держи описания двух подзадач, запускай.</p></div>
+    </div>
+    <div class="chat-message" data-msg="6" data-sender="tm" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-5)">T</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-5)">TaskManager</span><p>Два потока запущены. Сообщаю по каждому, INITIALIZING, затем RUNNING.</p></div>
+    </div>
+    <div class="chat-message" data-msg="7" data-sender="client" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-1)">К</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-1)">Клиент</span><p>А если бы я попросил параллелизм 8, когда слотов всего четыре?</p></div>
+    </div>
+    <div class="chat-message" data-msg="8" data-sender="rm" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-4)">R</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-4)">ResourceManager</span><p>Новых TaskManager я в standalone поднять не могу. Если кластер только стартовал, подождём пять минут. Если он старше, сразу скажу JobMaster, что ресурсов не хватает.</p></div>
+    </div>
+    <div class="chat-message" data-msg="9" data-sender="jobmaster" style="display:none">
+      <div class="chat-avatar" style="background: var(--color-actor-3)">J</div>
+      <div class="chat-bubble"><span class="chat-sender" style="color: var(--color-actor-3)">JobMaster</span><p>Тогда запросы подзадач закончатся NoResourceAvailableException. Чекпоинтов в задании нет, перезапуска не будет, ставлю FAILED.</p></div>
+    </div>
+  </div>
+  <div class="chat-typing" id="chat-l02-typing" style="display:none">
+    <div class="chat-avatar" id="chat-l02-typing-avatar">?</div>
+    <div class="chat-typing-dots"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
+  </div>
+  <div class="chat-controls">
+    <button class="btn chat-next-btn">Следующее сообщение</button>
+    <button class="btn chat-all-btn">Показать всё</button>
+    <button class="btn chat-reset-btn">Сначала</button>
+    <span class="chat-progress"></span>
+  </div>
+</div>
+
+<h2>Режимы Session и Application</h2>
+<p>Сегодня Flink разворачивается двумя способами. Они различаются временем жизни кластера и тем, где выполняется <code>main</code>. Третий режим per-job удалён во Flink 2.0, и в старых статьях он всё ещё встречается.</p>
+<table>
+<thead><tr><th></th><th>Session</th><th>Application</th></tr></thead>
+<tbody>
+<tr><td>Кластер</td><td>Уже запущен и живёт независимо от заданий</td><td>Создаётся на приложение и останавливается вместе с ним</td></tr>
+<tr><td>Где выполняется main</td><td>В клиенте</td><td>В JobManager</td></tr>
+<tr><td>Изоляция</td><td>Задания делят TaskManager, упавший процесс задевает всех</td><td>Ресурсы только у этого приложения</td></tr>
+<tr><td>Откуда берётся jar</td><td>Клиент загружает его на кластер</td><td>Он уже лежит на classpath кластера, в папке <code>usrlib</code></td></tr>
+<tr><td>Команда</td><td><code>flink run --target remote</code></td><td><code>flink run --target kubernetes-application</code></td></tr>
+</tbody>
+</table>
+<p>В нашем стенде режим Session, потому что кластер поднимает Docker Compose заранее. Развёртывание в Kubernetes разберём в уроке 20. Учти одну тонкость стенда. Команда <code>docker compose exec jobmanager flink run</code> выполняется в контейнере JobManager, но клиент при этом отдельная JVM. Твой <code>main</code> работает в ней, и JobManager его кода не исполняет.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>В режиме Application задание подаётся изнутри кластера. Исполнитель обращается к Dispatcher напрямую, минуя REST, а в остальном передаёт тот же <code>StreamGraph</code>.</p>
+<div data-src="flink:flink-clients/src/main/java/org/apache/flink/client/deployment/application/executors/EmbeddedExecutor.java" data-lines="139-151" data-must="submitJob(configuration, dispatcherGateway, streamGraph, timeout)"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/overview/" target="_blank" rel="noopener">Deployment Modes</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/release-notes/flink-2.0/" target="_blank" rel="noopener">Release Notes 2.0</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/cli/" target="_blank" rel="noopener">CLI</a></p>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l02">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Все вершины в одной группе slot sharing, поэтому слотов нужно столько, сколько составляет наибольший параллелизм, то есть 6. Разные параллелизмы при этом разрывают цепочки, и потоков будет 10."
+       data-explanation-wrong="Вспомни правило. В одном слоте может быть по одной подзадаче от каждой вершины. Какая вершина требует больше всего мест?">
+    <h3 class="quiz-question">В задании источник с параллелизмом 2, оператор с keyBy с параллелизмом 6 и приёмник с параллелизмом 2. Группа slot sharing одна. Сколько свободных слотов нужно кластеру?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>2</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>6</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>10</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Статус задания ставится до поиска слотов. Настоящее положение видно в статусах вершин, а причину объяснит число свободных слотов и лог JobManager."
+       data-explanation-wrong="Посмотри, в каком порядке идут вызовы в startSchedulingInternal. Что означает RUNNING в этот момент?">
+    <h3 class="quiz-question">После релиза задание показывает RUNNING, но лаг Kafka растёт, а обработанных записей нет. Что проверишь первым?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Сеть между Kafka и JobManager, потому что записи читает он</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Код фильтра, потому что RUNNING доказывает, что подзадачи работают</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Статусы вершин задания и число свободных слотов в /overview</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. В режиме Application main выполняется в JobManager, поэтому пути из main должны быть доступны там. Раньше файл читался на машине клиента."
+       data-explanation-wrong="Подумай, какая JVM выполняет main в каждом режиме и на какой машине лежит файл.">
+    <h3 class="quiz-question">В main читается файл /etc/payguard/rules.yaml, он есть на сервере CI. После перехода с режима Session на Application задание падает с FileNotFoundException. Почему?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Теперь main выполняется в JobManager, и файла на этой машине нет</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>В режиме Application нельзя читать файлы из main</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Файл читают все TaskManager, и его нет на одном из них</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

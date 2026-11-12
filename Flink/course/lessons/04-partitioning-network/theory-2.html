@@ -1,0 +1,114 @@
+<h2>Сетевой стек</h2>
+<p>Когда цепочка разорвана, у отправителя появляется результирующая партиция (ResultPartition). Она разбита на подчасти (subpartition), по одной на каждую подзадачу получателя. На стороне получателя её встречает входной шлюз (InputGate) с каналами (InputChannel), по одному на каждого отправителя. Если отправитель работает в том же TaskManager, канал локальный и читает подчасть напрямую. Если в другом, канал удалённый, и данные идут по TCP через библиотеку Netty.</p>
+<p>Записи едут сетевыми буферами по 32 КиБ. Это размер по умолчанию ключа <code>taskmanager.memory.segment-size</code>. Буфер уходит, когда заполнится или когда истечёт <code>execution.buffer-timeout.interval</code>, это ты видел в уроке 1.</p>
+<p>Главный вопрос в том, что делать, если получатель не успевает. Flink отвечает управлением потоком на кредитах (credit-based flow control). Отправитель шлёт буфер только тогда, когда получатель заранее сообщил, что ему есть куда этот буфер положить. Пройди по шагам.</p>
+
+<div class="flow-animation" data-steps='[
+  {"highlight":"flow-l04a-4","label":"Удалённый канал получателя при запуске забирает 2 эксклюзивных буфера (exclusive buffers) и сообщает отправителю начальный кредит 2."},
+  {"highlight":"flow-l04a-1","label":"Оператор отправителя сериализует запись и дописывает её в буфер подчасти, соответствующей нужной подзадаче.","packet":true,"from":"l04a-1","to":"l04a-2"},
+  {"highlight":"flow-l04a-2","label":"Буфер заполнился или истёк таймаут. Он встаёт в очередь подчасти и ждёт отправки."},
+  {"highlight":"flow-l04a-3","label":"Netty берёт буфер, только если кредит больше нуля, и уменьшает кредит на 1. Вместе с буфером уходит backlog, число буферов, оставшихся в очереди.","packet":true,"from":"l04a-2","to":"l04a-4"},
+  {"highlight":"flow-l04a-4","label":"Получатель кладёт буфер в очередь канала. Увидев backlog, он просит у шлюза плавающие буферы (floating buffers), чтобы принять очередь целиком."},
+  {"highlight":"flow-l04a-4","label":"Оператор получателя разобрал буфер, буфер вернулся каналу. Канал копит невыданный кредит и шлёт отправителю сообщение AddCredit.","packet":true,"from":"l04a-4","to":"l04a-3"},
+  {"highlight":"flow-l04a-2","label":"Если получатель не успевает, кредиты кончаются. Буферы копятся у отправителя, его пул пустеет, и оператор отправителя встаёт. Так рождается backpressure."}
+]'>
+  <div class="flow-actors">
+    <div class="flow-actor" id="flow-l04a-1"><div class="flow-actor-icon">O</div><span>Оператор отправителя</span></div>
+    <div class="flow-actor" id="flow-l04a-2"><div class="flow-actor-icon">P</div><span>ResultPartition</span></div>
+    <div class="flow-actor" id="flow-l04a-3"><div class="flow-actor-icon">N</div><span>Netty</span></div>
+    <div class="flow-actor" id="flow-l04a-4"><div class="flow-actor-icon">C</div><span>InputChannel получателя</span></div>
+  </div>
+  <div class="flow-packet"></div>
+  <div class="flow-step-label">Нажми «Следующий шаг»</div>
+  <div class="flow-controls">
+    <button class="btn flow-next-btn">Следующий шаг</button>
+    <button class="btn flow-reset-btn">Сначала</button>
+    <span class="flow-progress"></span>
+  </div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Начнём с получателя. Когда в канале освобождается буфер, растёт счётчик невыданного кредита. Сообщение отправителю уходит, если до этого счётчик был нулём, иначе сообщение уже в пути и заберёт свежий кредит с собой.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/partition/consumer/RemoteInputChannel.java" data-lines="427-432" data-must="unannouncedCredit.getAndAdd"></div>
+<p>Само сообщение <code>AddCredit</code> забирает и обнуляет накопленный кредит в момент отправки.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/netty/NettyPartitionRequestClient.java" data-lines="297-303" data-must="getAndResetUnannouncedCredit"></div>
+<p>Каждый пришедший буфер несёт backlog отправителя, и получатель сразу просит плавающие буферы под всю очередь плюс начальный кредит.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/partition/consumer/RemoteInputChannel.java" data-lines="558-560" data-must="requestFloatingBuffers(backlog + initialCredit)"></div>
+<p>На стороне отправителя каждый буфер с данными списывает один кредит. Отправить буфер без кредита нельзя, это считается ошибкой. События, например барьер чекпоинта, кредита не требуют.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/netty/CreditBasedSequenceNumberingViewReader.java" data-lines="255-268" data-must="--numCreditsAvailable &lt; 0"></div>
+<p>Сколько буферов у канала. В Flink 2.2.1 числа зашиты в код. 2 эксклюзивных буфера на канал, 8 плавающих на шлюз и не больше 10 буферов на одну подчасть у отправителя. Ключей <code>buffers-per-channel</code> и <code>floating-buffers-per-gate</code> в классах настроек этой версии нет, хотя страница о сетевой памяти их ещё упоминает.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/taskmanager/NettyShuffleEnvironmentConfiguration.java" data-lines="325-332" data-must="int buffersPerChannel = 2;"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/memory/network_mem_tuning/" target="_blank" rel="noopener">Network memory tuning guide</a></p>
+</div>
+
+<p>На стенде курса один TaskManager, поэтому все каналы там локальные. Кредиты в них не участвуют, получатель читает подчасть напрямую, и сдерживание работает через пул буферов отправителя, о котором следующий раздел.</p>
+
+<h2>Откуда берётся backpressure</h2>
+<p>Обратное давление (backpressure) это состояние, при котором подзадача хочет отправить данные дальше и не может, потому что у неё нет свободного выходного буфера. Буферы не возвращаются, потому что получатель не выдаёт кредит. Кредит не выдаётся, потому что получатель не успевает разбирать вход. Так задержка одного медленного оператора поднимается вверх по графу до самого источника, и источник просто перестаёт читать Kafka быстрее, чем задание успевает обработать. Ни данные, ни память при этом не теряются, растёт только лаг.</p>
+<p>У этого механизма есть следствие, которое касается перекоса. Пул буферов отправителя становится недоступным, как только хотя бы одна его подчасть набрала 10 буферов. Если подзадача с горячим ключом не успевает, её подчасть у каждого отправителя заполняется, и отправители встают целиком. Остальные получатели в это время простаивают, хотя работы для них хватает.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Пул отправителя считает буферы по подчастям. Подчасть, дошедшая до предела, делает весь пул недоступным.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/buffer/LocalBufferPool.java" data-lines="410-414" data-must="maxBuffersPerChannel"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/io/network/buffer/LocalBufferPool.java" data-lines="513-518" data-must="unavailableSubpartitionsCount == 0"></div>
+<p>Подзадача замечает это в главном цикле. Если выход недоступен, она приостанавливает обработку входа и начинает отсчёт времени backpressure. Если недоступен вход, считается время простоя.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/StreamTask.java" data-lines="674-682" data-must="getSoftBackPressuredTimePerSecond"></div>
+<p>Метрика <code>backPressuredTimeMsPerSecond</code>, которую показывает Web UI, складывается из этого мягкого ожидания и жёсткого, когда буфер пришлось ждать посреди записи.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/metrics/groups/TaskIOMetricGroup.java" data-lines="240-243" data-must="getHardBackPressuredTimePerSecond"></div>
+<p>Документация советует читать три метрики вместе. <code>busyTimeMsPerSecond</code>, <code>idleTimeMsPerSecond</code> и <code>backPressuredTimeMsPerSecond</code> в сумме дают около 1000 мс. Виноват обычно первый оператор по ходу потока, у которого busy высокий, а backpressure нулевой.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/monitoring/back_pressure/" target="_blank" rel="noopener">Monitoring Back Pressure</a></p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Больше параллелизма горячему ключу не поможет</strong>
+    <p>Все записи одного ключа обрабатывает одна подзадача. При параллелизме 8 она всё равно получит 30 % потока, только остальные станут ещё свободнее. Лечат перекос двухфазной агрегацией с солью, когда ключ временно дробят на части, считают частичные итоги и потом сливают. Это мы сделаем в уроке 18.</p>
+  </div>
+</div>
+
+<h2>Сравнение с shuffle в Spark</h2>
+<p>В Spark shuffle разделяет задание на стадии. Задачи первой стадии сортируют результат по целевым партициям и пишут его в файлы на локальном диске, задачи следующей стадии потом читают нужные блоки. Файлы переживают падение задачи-получателя, и Spark может перезапустить только её.</p>
+<p>Потоковый Flink передаёт данные конвейером. Запись уходит получателю сразу, как только заполнился буфер или истёк таймаут, на диск по дороге ничего не пишется. Задержка получается маленькой, зато обе стороны обязаны работать одновременно, а при падении восстановление идёт от чекпоинта. Медленного получателя Flink сдерживает кредитами и backpressure, в Spark ту же роль играет то, что следующая стадия просто стартует позже.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/execution_mode/" target="_blank" rel="noopener">Execution Mode</a>, <a href="https://spark.apache.org/docs/latest/rdd-programming-guide.html#shuffle-operations" target="_blank" rel="noopener">Spark Shuffle operations</a>, <a href="https://spark.apache.org/docs/latest/streaming/additional-information.html#miscellaneous-notes" target="_blank" rel="noopener">Spark Structured Streaming notes</a></p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l04">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Все записи одного ключа живут в одной подзадаче, поэтому новая подзадача ей не поможет. Нужно раздробить ключ солью и сложить частичные итоги во второй фазе."
+       data-explanation-wrong="Вспомни формулу. Ключ всегда попадает в одну группу, а группа принадлежит ровно одной подзадаче при любом параллелизме.">
+    <h3 class="quiz-question">Агрегат по merchantId на параллелизме 4. Одна подзадача занята 1000 мс в секунду, три других около 300. Команда предлагает поднять параллелизм до 8. Что произойдёт?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Нагрузка горячей подзадачи поделится пополам, и проблема уйдёт</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Горячий ключ останется в одной подзадаче, нужна двухфазная агрегация с солью</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Поможет только увеличение maxParallelism до 1024</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Источник ждёт кредиты, потому что ниже по потоку кто-то не успевает. Ищи первый оператор, у которого busy высокий, а backpressure около нуля."
+       data-explanation-wrong="Backpressure показывает жертву, а не виновника. Источник стоит, потому что ему не дают кредитов.">
+    <h3 class="quiz-question">Web UI красит источник чёрным, backPressuredTimeMsPerSecond 950. Ниже два оператора, у второго busy 990 и backpressure 0. Что чинить первым?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Источник, ему не хватает партиций Kafka</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Сетевую память, буферов слишком мало</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Второй оператор, он не успевает и перестал выдавать кредиты</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Без явной настройки при параллелизме 100 Flink выбрал 256 групп. Подзадач больше, чем групп, быть не может, а число групп из savepoint не меняется."
+       data-explanation-wrong="Посчитай computeDefaultMaxParallelism(100). Полтора параллелизма это 150, вверх до степени двойки получается 256.">
+    <h3 class="quiz-question">Задание с состоянием год работает с параллелизмом 100, maxParallelism никто не задавал. Теперь нужно 300. Что будет при перезапуске из savepoint с -p 300?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Не выйдет, групп ключей всего 256, и это число нельзя поменять без потери состояния</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Всё пройдёт, Flink пересчитает группы под новый параллелизм</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Всё пройдёт, потому что по умолчанию групп 32768</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

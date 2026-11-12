@@ -1,0 +1,114 @@
+<h2>Что будет в конце</h2>
+<p>Алерты пишутся в <code>fraud.alerts</code> транзакциями. Подтверждённые платежи в <code>payments.confirmed</code> остаются в режиме <code>AT_LEAST_ONCE</code>, это контрольная группа. Мы дважды убьём TaskManager под нагрузкой и посчитаем повторы в обоих топиках скриптом <code>verify-no-duplicates.sh</code>.</p>
+<p>Итоги продавцов в PostgreSQL относятся к заданию. Файл <code>JdbcSinks.java</code>, таблицу <code>merchant_stats</code> и зависимости JDBC пока не создавай, итоги в этой части урока по-прежнему идут в топик <code>merchant.stats</code>.</p>
+
+<h2>Шаг 1. Приёмник с транзакциями</h2>
+<p>В <code>KafkaSinks</code> появляется второй метод сборки. Общая часть, сериализация в JSON, выносится в отдельный метод, чтобы два приёмника не расходились.</p>
+<div data-diff="lesson-11/src/main/java/dev/study/payguard/job/KafkaSinks.java lesson-12/src/main/java/dev/study/payguard/job/KafkaSinks.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-12/src/main/java/dev/study/payguard/job/KafkaSinks.java" data-lines="25-35"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Метод принимает третий параметр, префикс имён транзакций. Он должен быть уникальным для каждого приёмника на весь кластер Kafka.</p>
+      <p class="tl">Готовим настройки продюсера. <code>transaction.timeout.ms</code> ставим в 15 минут из константы <code>TRANSACTION_TIMEOUT</code>. Это ровно предел брокера по умолчанию, значение приёмника в час брокер бы отверг.</p>
+      <p class="tl">Адрес брокера и сериализатор те же, что у приёмника at-least-once.</p>
+      <p class="tl"><code>EXACTLY_ONCE</code> включает транзакционный Writer и настоящий Committer. Без префикса <code>build()</code> упадёт на проверке.</p>
+      <p class="tl"><code>setKafkaProducerConfig</code> добавляет наши настройки к тем, что строитель положил сам. Сериализаторы ключа и значения при этом остаются прежними.</p>
+    </div>
+  </div>
+</div>
+<p>Новых зависимостей нет, транзакции умеет тот же <code>flink-connector-kafka</code>. Класс <code>ProducerConfig</code> приходит из клиента Kafka, который подтягивает коннектор.</p>
+
+<h2>Шаг 2. Префикс в настройках задания</h2>
+<p>Префикс передаётся аргументом, чтобы тестовая копия задания на том же кластере Kafka могла взять другой. Добавь в record <code>JobConfig</code> поле после <code>alertsTopic</code>.</p>
+<div data-code="lesson-12/src/main/java/dev/study/payguard/job/JobConfig.java" data-lines="13-14"></div>
+<p>И его чтение в <code>fromArgs</code> на том же месте.</p>
+<div data-code="lesson-12/src/main/java/dev/study/payguard/job/JobConfig.java" data-lines="30-31"></div>
+
+<h2>Шаг 3. Подключи приёмник алертов</h2>
+<p>В <code>PayGuardJob</code> меняется только последний приёмник. Имя и <code>uid</code> остаются прежними.</p>
+<div data-code="lesson-12/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="164-176"></div>
+<p>Приёмник подтверждений <code>confirmed-sink</code> не трогай. Он останется at-least-once, и на нём будет видно, что даёт обычный режим при тех же падениях.</p>
+
+<h2>Шаг 4. Интервал чекпоинта</h2>
+<p>В <code>docker-compose.yml</code> интервал уменьшается с 30 до 15 секунд. Это потолок задержки алерта для потребителя <code>read_committed</code>.</p>
+<div data-code="lesson-12/docker-compose.yml" data-lines="9-17"></div>
+<p>Строки <code>KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1</code> и <code>KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1</code> в описании Kafka стоят с первого урока, и теперь они нужны. Документация Kafka предупреждает, что по умолчанию транзакциям нужен кластер минимум из трёх брокеров. Это настройка внутреннего топика <code>__transaction_state</code>, где брокер хранит состояние транзакций. На стенде с одним брокером без этих строк транзакции не заработают.</p>
+
+<h2>Шаг 5. Скрипт подсчёта повторов</h2>
+<p>Создай <code>scripts/verify-no-duplicates.sh</code>. Он читает топик глазами потребителя с выбранным уровнем изоляции и считает идентификаторы, которые встретились больше одного раза.</p>
+<div data-code="lesson-12/scripts/verify-no-duplicates.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-12/scripts/verify-no-duplicates.sh" data-lines="9-18"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Запускаем консольного потребителя внутри контейнера Kafka. Флаг <code>-T</code> отключает псевдотерминал, чтобы вывод без искажений шёл дальше по конвейеру.</p>
+      <p class="tl">Внутри контейнера брокер слушает <code>localhost:9092</code>.</p>
+      <p class="tl"><code>--from-beginning</code> читает топик с первой записи, поэтому в счёт попадает всё, что когда-либо туда писали.</p>
+      <p class="tl"><code>--isolation-level</code> выбирает режим потребителя. Это та же настройка <code>isolation.level</code>, что у KafkaConsumer.</p>
+      <p class="tl"><code>--timeout-ms 10000</code> завершает чтение, если 10 секунд не пришло ни одной записи. Без него потребитель ждал бы вечно. Сообщения потребителя в stderr отбрасываем, а <code>jq</code> вынимает из каждого JSON поле-идентификатор.</p>
+      <p class="tl">Считаем непустые строки, это число записей.</p>
+      <p class="tl"><code>sort | uniq -d</code> оставляет идентификаторы, встретившиеся больше одного раза, и мы считаем их количество.</p>
+      <p class="tl">Печатаем итог одной строкой.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 6. Чистый стенд, запуск и два падения</h2>
+<p>Скрипт читает топики с начала. Если в <code>fraud.alerts</code> остались алерты прошлых уроков, записанные без транзакций, потребитель <code>read_committed</code> получит их как обычные записи вместе с их повторами. Поэтому начни с чистого стенда. У Kafka в нашем Compose нет тома, и <code>docker compose down</code> удаляет топики.</p>
+<pre data-lang="bash" data-title="терминал">docker compose down
+./gradlew shadowJar
+docker compose up -d --wait
+scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --dup 0.02 --bad 0.01 --burst 0.002"</pre>
+<pre data-lang="text" data-title="вывод" data-output>Job has been submitted with JobID ecae15caffd4514a0e8d686d56059fc5</pre>
+<p>Во втором терминале проверь, что у приёмников появилась пара Writer и Committer. Фильтр <code>test</code> оставляет вершины, в имени которых есть один из двух приёмников.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[].name | select(test("alerts-sink|confirmed-sink"))'</pre>
+<pre data-lang="text" data-title="вывод" data-output>join-confirmations -&gt; confirmed-sink: Writer -&gt; confirmed-sink: Committer
+enrich-alerts -&gt; alerts-sink: Writer -&gt; alerts-sink: Committer</pre>
+<p>Снаружи оба приёмника выглядят одинаково. Разница внутри, у <code>confirmed-sink</code> Committer пустой. В логе TaskManager при старте будут предупреждения <code>Name collision: Group already contains a Metric with the name 'pendingCommittables'. Metric will not be reported.</code> Они говорят только о том, что одна метрика с повторяющимся именем не попадёт в отчёт. На запись это не влияет.</p>
+<p>Дай заданию поработать минуту, затем дважды убей TaskManager скриптом из урока 11. Между запусками подожди хотя бы один чекпоинт, это 15 секунд.</p>
+<pre data-lang="bash" data-title="терминал">scripts/chaos-kill-tm.sh
+scripts/chaos-kill-tm.sh</pre>
+<pre data-lang="text" data-title="вывод" data-output>Убиваю TaskManager
+Задание восстановлено из чекпоинта за 24 с
+Убиваю TaskManager
+Задание восстановлено из чекпоинта за 19 с</pre>
+
+<h2>Шаг 7. Посчитай повторы</h2>
+<p>Останови генератор, чтобы топики перестали расти, и запусти проверку трижды. Алерты читаем в обоих режимах, подтверждения только в <code>read_committed</code>. Транзакций в <code>payments.confirmed</code> нет, и режим для него ничего не меняет.</p>
+<pre data-lang="bash" data-title="терминал">scripts/verify-no-duplicates.sh fraud.alerts alertId read_committed
+scripts/verify-no-duplicates.sh fraud.alerts alertId read_uncommitted
+scripts/verify-no-duplicates.sh payments.confirmed paymentId read_committed</pre>
+<pre data-lang="text" data-title="сводка прогона стенда" data-output>fraud.alerts [read_committed]: записей 290, повторов 0
+fraud.alerts [read_uncommitted]: записей 301, повторов 8
+payments.confirmed (AT_LEAST_ONCE) [read_committed]: записей 32075, повторов 1848</pre>
+<p>Сводка собрана из вывода скрипта на нашем стенде при 200 платежах в секунду. Читай её построчно.</p>
+<ul>
+  <li>В <code>read_committed</code> 290 алертов и ни одного повтора. Два падения не оставили следа для потребителя.</li>
+  <li>В <code>read_uncommitted</code> на 11 записей больше, и у 8 алертов есть копия. Это записи транзакций, которые убил <code>SIGKILL</code>. После восстановления задание перечитало платежи и записало те же алерты в новые транзакции. Оставшиеся три записи без пары, скорее всего, лежали в транзакции, которая ещё была открыта в момент проверки.</li>
+  <li>Подтверждения в режиме <code>AT_LEAST_ONCE</code> получили 1848 повторов. Приёмник после каждого восстановления заново отправил то, что задание выдало после последнего завершённого чекпоинта, и эти записи видны любому потребителю.</li>
+</ul>
+
+<h2>Шаг 8. Посмотри на задержку</h2>
+<p>Запусти генератор снова и открой в двух терминалах потребителей <code>fraud.alerts</code> с разной изоляцией.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic fraud.alerts --isolation-level read_committed</pre>
+<p>Во втором терминале та же команда с <code>read_uncommitted</code>. Смотри на ритм. Потребитель <code>read_uncommitted</code> получает алерты по мере появления. Потребитель <code>read_committed</code> должен получать их пачками, примерно раз в 15 секунд, сразу после завершения очередного чекпоинта. Сверь моменты пачек с временем завершения чекпоинтов в Web UI на вкладке Checkpoints.</p>
+
+<h2>Шаг 9. Ловушка, на которую мы наступили позже</h2>
+<p>В уроке 20 этот же приёмник сломался в Kubernetes. Под Kafka перезапустился из-за нехватки памяти, а тома у него не было. Брокер потерял топики и журнал транзакций <code>__transaction_state</code>. Задание восстановилось из savepoint, и Committer попытался зафиксировать подготовленную транзакцию, о которой новый брокер ничего не знал.</p>
+<pre data-lang="text" data-title="исключение задания, урок 20" data-output>java.lang.IllegalStateException: Failed to commit KafkaCommittable{producerId=31, epoch=2, transactionalId='payguard-alerts-0-11', producer=null}
+Caused by: org.apache.kafka.common.errors.InvalidPidMappingException: The producer attempted to use a producer id which is not currently assigned to its transactional id.</pre>
+<p>Задание восстанавливалось 17 раз, 11 чекпоинтов закончились <code>FAILED</code>, и состояние <code>RESTARTING</code> не кончалось. Обрати внимание на <code>producer=null</code>. Этот committable восстановлен из состояния, живого продюсера Writer за ним нет. Committer делал ровно то, что мы видели в <code>CommitterOperator.initializeState</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Почему задание не пропустило транзакцию и не пошло дальше. Список известных причин в <code>KafkaCommitter</code> заканчивается на <code>UnknownProducerIdException</code>. <code>InvalidPidMappingException</code> попадает в общий <code>catch</code>, и запрос завершается как неизвестный отказ, который роняет задание. После перезапуска тот же committable снова восстанавливается из чекпоинта, и круг повторяется.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/KafkaCommitter.java" data-lines="123-149" data-must="request.signalFailedWithUnknownReason(e);"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#troubleshooting" target="_blank" rel="noopener">Kafka connector, Troubleshooting</a></p>
+</div>
+<p>Лечение в два шага. Чтобы не повторилось, Kafka должна жить на постоянном томе, тогда <code>__transaction_state</code> переживает перезапуск брокера. Мы проверили это в уроке 20, после удаления пода Kafka с томом задание через 90 секунд работало, чекпоинты шли без отказов. Чтобы выйти из уже начавшегося цикла, задание запускают без состояния приёмника. Как это делать аккуратно и что при этом теряется, разберём в уроке 21.</p>

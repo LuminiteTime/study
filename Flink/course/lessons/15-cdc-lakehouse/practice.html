@@ -1,0 +1,115 @@
+<h2>Что будет в конце</h2>
+<p>На стенде работают два кластера, основной на порту 8081 и SQL на порту 8082. Изменение строки в <code>merchants</code> появляется в топике <code>merchants.changelog</code>, а алерты складываются в таблицу Paimon на диске. Файл задания мы пока не создаём, он появится на вкладке «Задание». Файл <code>build.gradle.kts</code> в этом уроке не меняется, потому что новые коннекторы лежат в образе SQL-кластера и в jar не попадают.</p>
+
+<h2>Шаг 1. Добавь коннекторы в образ</h2>
+<p>Открой <code>docker/Dockerfile</code> из урока 14 и допиши три файла в <code>/opt/flink/lib</code>.</p>
+<div data-diff="lesson-14/docker/Dockerfile lesson-15/docker/Dockerfile"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-15/docker/Dockerfile" data-lines="13-16"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Толстый jar коннектора <code>postgres-cdc</code>. Версия <code>3.7.0-2.2</code> читается как версия Flink CDC плюс версия Flink, под которую он собран.</p>
+      <p class="tl">Коннектор и каталог Paimon. Сборка привязана к Flink 2.2 через имя артефакта <code>paimon-flink-2.2</code>, а <code>2.1.0</code> это уже версия самого Paimon.</p>
+      <p class="tl">Комментарий объясняет следующую строку. Склад у нас на локальном диске, но классы Hadoop всё равно нужны.</p>
+      <p class="tl">Сборка Hadoop от проекта Flink, все классы в одном jar.</p>
+    </div>
+  </div>
+</div>
+<p>Мы проверили, что будет без последней строки. Paimon падает с такой ошибкой.</p>
+<pre data-lang="text" data-title="вывод" data-output>java.lang.ClassNotFoundException: org.apache.hadoop.conf.Configuration</pre>
+
+<h2>Шаг 2. Настрой PostgreSQL и Kafka</h2>
+<p>В <code>docker-compose.yml</code> меняются две службы.</p>
+<div data-diff="lesson-14/docker-compose.yml lesson-15/docker-compose.yml"></div>
+<p>В <code>kafka-init</code> появляется топик <code>merchants.changelog</code>. Флаг <code>--config cleanup.policy=compact</code> делает его компактируемым, поэтому он создаётся отдельной командой вне общего цикла. В <code>postgres</code> строка <code>command</code> запускает сервер с <code>wal_level=logical</code>. Этот параметр читается только при старте сервера, поэтому он задан в аргументах запуска.</p>
+
+<h2>Шаг 3. Включи REPLICA IDENTITY</h2>
+<div data-diff="lesson-14/sql/init.sql lesson-15/sql/init.sql"></div>
+<p>Строка стоит сразу после создания таблицы. Если её забыть, снимок прочитается нормально, топик заполнится, и всё будет выглядеть рабочим до первого <code>UPDATE</code>. После него задание уходит в цикл RESTARTING.</p>
+<pre data-lang="text" data-title="лог" data-output>java.lang.IllegalStateException: The "before" field of UPDATE/DELETE message is null, please check the Postgres table has been set REPLICA IDENTITY to FULL level.</pre>
+<p>Лечение в уже работающей системе требует порядка, потому что плохая запись осталась в журнале, а слот будет отдавать её снова. Сначала отмени задание, удали слот, выполни <code>ALTER TABLE merchants REPLICA IDENTITY FULL</code> и запусти задание заново со снимка. Повторный снимок топику не вредит, у каждой строки тот же ключ.</p>
+
+<h2>Шаг 4. Собери и подними стенд</h2>
+<p>Команды выполняй именно в таком порядке.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose --profile sql down -v
+docker compose --profile sql up -d --wait --build</pre>
+<p>Сборка идёт первой, иначе Docker смонтирует пустую <code>build/libs</code>, и jar в контейнере не появится. На этом мы реально споткнулись.</p>
+<p>Флаг <code>-v</code> у <code>down</code> удаляет анонимные тома контейнеров. Это важно для PostgreSQL, потому что образ выполняет <code>init.sql</code> только на пустом каталоге данных, и старая база осталась бы без новой строки <code>ALTER TABLE</code>. Папка <code>./data</code> смонтирована как обычный каталог и при этом не удаляется. Флаг <code>--build</code> заставляет пересобрать образ. Без него Compose увидит готовый <code>payguard-flink-sql:2.2.1</code> из урока 14 и новых коннекторов в кластере не будет. Флаг <code>--profile sql</code> включает службы SQL-кластера, ты уже знаешь его по уроку 14.</p>
+
+<h2>Шаг 5. Запусти CDC</h2>
+<p>Создай <code>sql/cdc_merchants.sql</code>.</p>
+<div data-code="lesson-15/sql/cdc_merchants.sql"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-15/sql/cdc_merchants.sql" data-lines="10-20"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Строка <code>connector</code> выбирает коннектор, следующие строки говорят, куда подключаться и под каким пользователем. Значения совпадают с настройками службы <code>postgres</code> в Compose.</p>
+      <p class="tl">База, схема и таблица, которые мы читаем.</p>
+      <p class="tl">Имя слота на сервере. Обязательная настройка, и каждому заданию нужно своё имя.</p>
+      <p class="tl">Режим снимка по чанкам. По умолчанию выключен.</p>
+      <p class="tl">Плагин декодирования. Значение по умолчанию <code>decoderbufs</code> должно быть установлено на сервере, мы его не ставим и берём стандартный <code>pgoutput</code>.</p>
+    </div>
+  </div>
+</div>
+<p>Таблица-приёмник в строках 23-33 содержит <code>PRIMARY KEY</code>, он станет ключом сообщения. Колонку <code>updated_at</code> мы намеренно не переносим. Формат JSON указан отдельно для ключа и для значения. Отправь задание на SQL-кластер.</p>
+<pre data-lang="bash" data-title="терминал">docker compose --profile sql exec -T sql-jobmanager sql-client.sh -f /sql/cdc_merchants.sql</pre>
+<p>Флаг <code>-f</code> выполняет файл целиком, флаг <code>-T</code> у <code>exec</code> отключает псевдотерминал, в скрипте он не нужен. Клиент отправит <code>INSERT</code> и завершится, а задание останется работать на кластере, потому что по умолчанию DML выполняется асинхронно.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Значение по умолчанию у настройки <code>table.dml-sync</code> равно <code>false</code>, описание говорит об асинхронном запуске. Именно поэтому терминал вернётся сразу.</p>
+<div data-src="flink:flink-table/flink-table-api-java/src/main/java/org/apache/flink/table/api/config/TableConfigOptions.java" data-lines="75-83" data-must="table.dml-sync"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sqlclient/" target="_blank" rel="noopener">SQL Client</a></p>
+</div>
+
+<p>Посмотри на слот со стороны базы.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec postgres psql -U payguard -d payguard -c "SELECT slot_name, plugin, active, restart_lsn, confirmed_flush_lsn, wal_status, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) AS retained FROM pg_replication_slots;"</pre>
+<p>Должна быть строка <code>payguard_merchants</code> с плагином <code>pgoutput</code> и <code>active</code>, равным <code>t</code>. Колонка <code>retained</code> показывает, сколько журнала удерживает слот, разницу считает <code>pg_wal_lsn_diff</code>. Этот же запрос подойдёт для алерта. В момент снимка рядом могут появиться временные слоты с суффиксами <code>_0</code> и <code>_1</code>.</p>
+
+<h2>Шаг 6. Поменяй строку и прочитай топик</h2>
+<pre data-lang="bash" data-title="терминал">docker compose exec postgres psql -U payguard -d payguard \
+  -c "update merchants set risk_level='HIGH' where merchant_id='m-0007'"
+
+docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic merchants.changelog --from-beginning \
+  --formatter-property print.key=true --timeout-ms 10000 2>/dev/null | grep m-0007</pre>
+<p>Настройка <code>print.key=true</code> велит печатать ключ перед значением через табуляцию, а <code>--timeout-ms</code> завершает чтение, когда новых записей нет 10 с. Изменение появилось в топике.</p>
+<pre data-lang="text" data-title="вывод" data-output>{"merchant_id":"m-0007"}	{"merchant_id":"m-0007","risk_level":"HIGH"}</pre>
+<p>Слева ключ, справа значение. Рядом с этой строкой лежит прежняя с <code>LOW</code>, она из снимка. Компактирование её пока не убрало, потому что активный сегмент не компактируется. Для потребителя это безопасно, последняя запись по ключу побеждает.</p>
+<p>Посчитай записи, заменив <code>grep m-0007</code> на <code>wc -l</code>. На чистом стенде мы получили 50 записей сразу после снимка, по одной на продавца из <code>init.sql</code>, и 51 после одного <code>UPDATE</code>. Повторяется по ключу только <code>m-0007</code>. В первом, отладочном прогоне вышло 52. Там строку меняли и до включения <code>REPLICA IDENTITY FULL</code>, и после него, и лишняя запись скорее всего осталась от той отладки. Приёмник по умолчанию даёт гарантию at-least-once, а повтор по тому же ключу компактируемому топику не вредит.</p>
+
+<h2>Шаг 7. Сложи алерты в озеро</h2>
+<p>Создай <code>sql/paimon_alerts.sql</code>.</p>
+<div data-code="lesson-15/sql/paimon_alerts.sql"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-15/sql/paimon_alerts.sql" data-lines="4-21"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Каталог Paimon. <code>warehouse</code> это корневая папка всех таблиц. Она лежит на томе <code>./data</code>, который виден и JobManager, и TaskManager. В проде здесь был бы адрес объектного хранилища.</p>
+      <p class="tl">Таблица создаётся в каталоге и переживает перезапуск клиента, поэтому <code>IF NOT EXISTS</code> позволяет запускать файл повторно.</p>
+      <p class="tl">Обычные колонки алерта и день события, по которому мы партиционируем.</p>
+      <p class="tl">В первичный ключ входит колонка партиции, поэтому строка не может переехать в другую партицию, и особый режим cross partition upsert не нужен. Повтор <code>alert_id</code> в пределах дня схлопнется в одну строку.</p>
+      <p class="tl">Два фиксированных бакета в каждой партиции. <code>changelog-producer = input</code> велит считать входной поток полным changelog и писать его в отдельные файлы для потоковых читателей. У нас вход состоит из вставок, поэтому никаких затрат на вычисление старых значений нет.</p>
+    </div>
+  </div>
+</div>
+<p>Таблица <code>alerts_topic</code> объявлена как <code>TEMPORARY</code>, поэтому живёт только в сессии и не записывается в каталог Paimon. Настройка <code>properties.isolation.level = read_committed</code> нужна, чтобы не читать незафиксированные алерты, разницу мы измерили в уроке 12.</p>
+<p>Запусти основное задание, задание озера и генератор с редкими сериями. Генератор занимает терминал, поэтому он идёт последним.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+docker compose --profile sql exec -T sql-jobmanager sql-client.sh -f /sql/paimon_alerts.sql
+./gradlew loadgen --args="--rate 100 --burst 0.001 --card-testing 0.002"</pre>
+<p>Флаги <code>--burst</code> и <code>--card-testing</code> задают доли платежей, из которых вырастают серии для правил <code>velocity</code> и <code>card-testing</code>. Через пару чекпоинтов посмотри на папку таблицы из второго терминала.</p>
+<pre data-lang="bash" data-title="терминал">ls -F data/lake/default.db/fraud_alerts</pre>
+<pre data-lang="text" data-title="вывод" data-output>event_day=2026-11-07/ manifest/ schema/ snapshot/</pre>
+<p>Имя партиции у тебя будет с другой датой. Внутри неё лежат <code>bucket-0</code> и <code>bucket-1</code> с файлами <code>data-*.parquet</code> и <code>changelog-*.parquet</code>. Файл <code>snapshot/LATEST</code> хранит номер последнего снимка. Открой файл снимка с этим номером, это JSON, поля <code>totalRecordCount</code> и <code>deltaRecordCount</code> показывают, сколько записей в таблице и сколько добавил этот коммит.</p>
+
+<h2>Шаг 8. Убери слот за собой</h2>
+<p>Когда закончишь эксперименты, отмени задание CDC и удали слот. Команда <code>flink list</code> покажет идентификатор задания. Слот с подключённым получателем удалить нельзя, поэтому порядок такой.</p>
+<pre data-lang="bash" data-title="терминал">docker compose --profile sql exec -T sql-jobmanager flink list
+docker compose --profile sql exec -T sql-jobmanager flink cancel &lt;job-id&gt;
+docker compose exec postgres psql -U payguard -d payguard \
+  -c "SELECT pg_drop_replication_slot('payguard_merchants');"</pre>
+<p class="doc-links">Документация: <a href="https://www.postgresql.org/docs/17/functions-admin.html" target="_blank" rel="noopener">pg_drop_replication_slot</a>, <a href="https://www.postgresql.org/docs/17/protocol-replication.html" target="_blank" rel="noopener">DROP_REPLICATION_SLOT</a></p>

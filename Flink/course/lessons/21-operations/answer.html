@@ -1,0 +1,38 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<h3>Runbook</h3>
+<div data-code="lesson-21/ops/runbook.md"></div>
+<p>Почему разделы устроены именно так.</p>
+<ul>
+  <li><code>PayGuardJobRestarted</code> начинается с истории исключений, потому что по ней видно, повторяется ли причина. Ошибка в коде или данных возвращается после каждого рестарта, так было в аварии из теории и с битыми записями в уроке 3. Ошибки окружения, как в хаос-тесте этого урока, проходят сами.</li>
+  <li><code>PayGuardCheckpointStale</code> и <code>PayGuardCheckpointsFailing</code> объединены, у них общий разбор через <code>checkpoint-report.sh</code> из урока 11. Пункт про unaligned-чекпоинты опирается на замеры урока 18, где они вернули длительность к сотням миллисекунд под backpressure. Пункт про <code>transaction.timeout.ms</code> взят из урока 12. Без успешного чекпоинта дольше 15 минут брокер отменит транзакции.</li>
+  <li><code>PayGuardBackpressure</code> и <code>PayGuardKafkaLagHigh</code> разбираются через <code>vertex-load.sh</code> из урока 18. Узкое место это самая верхняя по потоку вершина с busy около 1000. Пункт про перекос повторяет опыт с горячим продавцом <code>m-0000</code> из того же урока.</li>
+  <li><code>PayGuardSourceSilent</code> вынесен отдельно, потому что метрик лага в этот момент нет, это вывод урока 17. Лаг смотрят снаружи через <code>kafka-consumer-groups.sh</code>.</li>
+  <li>Плановые операции опираются на урок 13 про savepoint и эволюцию схемы и на урок 20 про режим апгрейда <code>savepoint</code>. Повторная обработка требует новый префикс транзакций, иначе новый приёмник столкнётся с транзакциями старого, это урок 12.</li>
+</ul>
+<h3>Чек-лист готовности</h3>
+<div data-code="lesson-21/ops/production-readiness.md"></div>
+<table>
+<thead><tr><th>Пункт</th><th>Где проверялся</th></tr></thead>
+<tbody>
+<tr><td>uid у всех операторов</td><td>Урок 13, сопоставление состояния. Урок 16, <code>PipelineTopologyTest</code></td></tr>
+<tr><td>Нет Kryo в состоянии, DLQ для битых записей</td><td>Урок 3</td></tr>
+<tr><td>TTL у состояния</td><td>Урок 7</td></tr>
+<tr><td>Детерминированные идентификаторы алертов</td><td>Урок 12, проверка дублей по <code>alertId</code></td></tr>
+<tr><td>Интервал чекпоинта и <code>transaction.timeout.ms</code></td><td>Урок 12, цена exactly-once в задержке</td></tr>
+<tr><td>Внешнее хранилище чекпоинтов, <code>RETAIN_ON_CANCELLATION</code></td><td>Урок 11</td></tr>
+<tr><td>HA и падение JobManager</td><td>Урок 20, тот же jobId через 34 с</td></tr>
+<tr><td>Восстановление из savepoint прошлой версии</td><td>Урок 13, запуск v2 из savepoint v1. Урок 16, restore-тест</td></tr>
+<tr><td>Отключение внешних систем</td><td>Урок 21, итоговый хаос-тест</td></tr>
+<tr><td><code>pipeline.max-parallelism</code></td><td>Уроки 4 и 13</td></tr>
+<tr><td>Объём состояния и память</td><td>Урок 19</td></tr>
+<tr><td>Нагрузочный тест</td><td>Урок 18</td></tr>
+<tr><td>Дашборд, алерты, лаг снаружи</td><td>Урок 17</td></tr>
+<tr><td>Секреты, TLS, закрытый REST</td><td>Урок 20, секрет для PostgreSQL. Урок 21, SASL и раздел про безопасность</td></tr>
+</tbody>
+</table>
+<p>Последний пункт чек-листа PayGuard пока не проходит. На стенде нет TLS ни у Kafka, ни у PostgreSQL. Чек-лист для того и нужен, чтобы такие пробелы были записаны до запуска.</p>
+<h3>Как проверить</h3>
+<p>Пройди runbook на стенде. Убей TaskManager через <code>chaos-kill-tm.sh</code> и выполни команды раздела <code>PayGuardJobRestarted</code>. Останови TaskManager через <code>docker compose stop taskmanager</code> и пройди раздел <code>PayGuardSourceSilent</code>. Если какая-то команда не работает или её вывод не помогает принять решение, раздел надо переписать. Чек-лист сравни с разделом Production Readiness Checklist документации Flink. Его пункты про max parallelism, uid, интервал чекпоинта, HA и закрытый доступ к кластеру в нашем списке есть.</p>
+</div>

@@ -1,0 +1,75 @@
+/* Кнопки. Разметка уроков и скрипты дают свои классы, здесь они сведены к трём видам. */
+.btn,
+.viz button,
+.lesson-footer button,
+.quiz-check-btn,
+.quiz-reset-btn,
+.reveal-answer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 38px;
+  padding: var(--space-2) var(--space-4);
+  font: 600 var(--text-sm) / 1.3 var(--font-body);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
+}
+
+.btn:hover,
+.viz button:hover:not(:disabled),
+.lesson-footer button:hover,
+.quiz-reset-btn:hover {
+  border-color: var(--color-accent-muted);
+  color: var(--color-accent-hover);
+}
+
+.btn-primary,
+.viz button.primary,
+.lesson-footer button.primary,
+.quiz-check-btn {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.btn-primary:hover,
+.viz button.primary:hover:not(:disabled),
+.lesson-footer button.primary:hover,
+.quiz-check-btn:hover {
+  color: var(--color-on-accent);
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+.reveal-answer {
+  margin: var(--space-4) 0;
+  color: var(--color-accent-hover);
+  border-color: var(--color-accent);
+}
+
+.reveal-answer:hover {
+  background: var(--color-accent-light);
+}
+
+.viz button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.lesson-footer button {
+  min-height: 44px;
+}
+
+.quiz-check-btn,
+.quiz-reset-btn {
+  margin-top: var(--space-6);
+}
+
+.quiz-check-btn {
+  margin-right: var(--space-3);
+}

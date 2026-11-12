@@ -1,0 +1,54 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Класс целиком.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/pipeline/SaltedMerchantStats.java"></div>
+<p>Решения внутри класса.</p>
+<ul>
+  <li>Соль равна <code>Math.floorMod(paymentId.hashCode(), salts)</code>. Идентификатор платежа случаен, поэтому части получаются почти равными, а одинаковый платёж всегда даёт одинаковый ключ. <code>floorMod</code> нужен, потому что <code>hashCode</code> бывает отрицательным.</li>
+  <li>Первая фаза использует тот же <code>PaymentTotals</code>, что и старое окно. Сумма и количество складываются, поэтому частичный итог совместим со второй фазой. <code>PartialStats</code> отрезает соль от ключа и кладёт в <code>MerchantStats</code> настоящего продавца с границами окна.</li>
+  <li>Вторая фаза это <code>reduce</code> по продавцу в таком же минутном окне. Она хранит один объект на ключ и окно и складывает части по мере прихода.</li>
+  <li>В первой фазе нет <code>allowedLateness</code>. Окно с допуском опозданий выпускает итог повторно на каждый опоздавший платёж, и вторая фаза сложила бы обновлённый частичный итог с прежним. Опоздавшие платежи уходят в боковой выход и дальше в <code>payments.late</code>.</li>
+</ul>
+<p>Почему вторая фаза попадает в нужное окно. Её записи несут время события, которое им назначило окно первой фазы.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Перед вызовом функции окна оператор ставит всем её выходным записям одно время, максимум окна.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/windowing/WindowOperator.java" data-lines="575-580" data-must="timestampedCollector.setAbsoluteTimestamp(window.maxTimestamp())"></div>
+<p>Максимум окна на единицу меньше его конца.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/windowing/windows/TimeWindow.java" data-lines="83-86" data-must="return end - 1;"></div>
+<p>Для окна с 12:00 до 12:01 частичные итоги получат время 12:00:59.999 и попадут во второй фазе в то же окно. Сработает оно, когда watermark пройдёт конец минуты, то есть сразу после первой фазы.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/windows/" target="_blank" rel="noopener">Windows</a></p>
+</div>
+<p>Поле и чтение флага в <code>JobConfig</code>.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/job/JobConfig.java" data-lines="22-22"></div>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/job/JobConfig.java" data-lines="42-42"></div>
+<p>Подключение в <code>PayGuardJob</code>. Боковой выход опоздавших берётся у первой фазы, потому что именно она стоит на сыром потоке платежей. При выключенной соли <code>firstStats</code> это старое окно, и поведение не меняется.</p>
+<div data-code="lesson-18/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="111-123"></div>
+<p>Тест. MiniCluster из урока 16, параллелизм 4, соль 8. Платежи с временем 1000-1099 мс попадают в первую минуту, и после двух фаз ожидается одна строка.</p>
+<div data-code="lesson-18/src/test/java/dev/study/payguard/pipeline/SaltedMerchantStatsTest.java"></div>
+<p>Запуск на стенде. Сначала без соли, потом с солью, каждый раз отменяя предыдущее задание.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test --tests '*SaltedMerchantStatsTest' shadowJar
+docker compose exec -T jobmanager flink run --detached -p 4 /jobs/payguard-1.0.0.jar
+scripts/vertex-load.sh
+
+docker compose exec -T jobmanager flink cancel "$JOB"
+docker compose exec -T jobmanager flink run --detached -p 4 /jobs/payguard-1.0.0.jar --stats-salts 16
+scripts/vertex-load.sh</pre>
+<p>Перед отменой получи <code>$JOB</code> той же командой, что в практике. Цифры на стенде при 200 платежах в секунду.</p>
+<table>
+<thead><tr><th>Вершина</th><th>numRecordsIn, минимум</th><th>numRecordsIn, максимум</th><th>Разброс</th></tr></thead>
+<tbody>
+<tr><td><code>merchant-stats-1m</code> без соли</td><td>11476</td><td>29551</td><td>2,6 раза</td></tr>
+<tr><td><code>merchant-stats-salted</code>, соль 16</td><td>4716</td><td>8433</td><td>1,8 раза</td></tr>
+<tr><td><code>merchant-stats-merged</code></td><td>266</td><td>555</td><td>частичные итоги</td></tr>
+</tbody>
+</table>
+<p>Почему разброс не стал единицей. С солью 16 продавец <code>m-0000</code> превратился в 16 ключей примерно по 1,9 % потока. Обычный продавец получает 70 % на 49 продавцов, около 1,4 %. Горячего ключа больше нет, а остаток неравномерности даёт раскладка 800 ключей по группам ключей и подзадачам, её ты видел в уроке 4.</p>
+<p>Корректность проверь в Postgres. Возьми одну законченную минуту и сравни строку <code>m-0000</code> с суммой по всем продавцам.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T postgres psql -U payguard -d payguard -c \
+  "select merchant_id, payment_count from merchant_stats
+   where window_start_ms = (select max(window_start_ms) - 60000 from merchant_stats)
+   order by payment_count desc limit 3"</pre>
+<p>У нас за минуту на <code>m-0000</code> пришлось 3285 платежей из 10969, это 30 %, ровно столько задано в <code>PaymentFactory</code>. Соль поменяла раскладку работы и не тронула результат.</p>
+</div>

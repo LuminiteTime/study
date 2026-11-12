@@ -1,0 +1,27 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="CEP|complex event processing">CEP (complex event processing)</dt><dd>Обработка сложных событий. Поиск в потоке последовательностей событий по шаблону. Во Flink это библиотека FlinkCEP, артефакт <code>flink-cep</code>.</dd>
+<dt data-match="шаблон|Pattern">Шаблон (pattern)</dt><dd>Описание искомой последовательности из именованных шагов с условиями, квантификаторами, смежностью и ограничением по времени.</dd>
+<dt data-match="шаг|step">Шаг шаблона</dt><dd>Именованная часть шаблона, например <code>probes</code> или <code>cash-out</code>. По имени шага функция совпадения получает принятые в него события.</dd>
+<dt data-match="частичн[а-я]* совпадени|попытк|partial match">Частичное совпадение (partial match)</dt><dd>Начатая, но ещё не законченная попытка совпасть с шаблоном. Хранится в состоянии оператора, пока не завершится, не оборвётся или не истечёт.</dd>
+<dt data-match="NFA|автомат">NFA</dt><dd>Недетерминированный конечный автомат. В него компилятор CEP переводит шаблон. Из одного состояния на одно событие могут сработать несколько переходов, и попытка раздваивается.</dd>
+<dt data-match="смежност|contiguity">Смежность (contiguity)</dt><dd>Правило, какие события можно пропустить между шагами шаблона. Строгая задаётся <code>next</code>, ослабленная <code>followedBy</code>, недетерминированная ослабленная <code>followedByAny</code>.</dd>
+<dt data-match="квантификатор|timesOrMore|oneOrMore|quantifier">Квантификатор (quantifier)</dt><dd>Сколько событий принимает шаг. Например <code>times(3)</code>, <code>timesOrMore(3)</code>, <code>oneOrMore()</code>, <code>optional()</code>.</dd>
+<dt data-match="consecutive|allowCombinations">consecutive и allowCombinations</dt><dd>Смежность между событиями внутри шага с квантификатором. <code>consecutive</code> делает её строгой, <code>allowCombinations</code> недетерминированной, по умолчанию она ослабленная.</dd>
+<dt data-match="within">within</dt><dd>Предельное время от первого до последнего события совпадения. Попытки, которые не уложились, выбрасываются и освобождают состояние.</dd>
+<dt data-match="IterativeCondition">IterativeCondition</dt><dd>Условие шага, которое видит события, уже принятые в другие шаги этого совпадения, через <code>getEventsForPattern</code>.</dd>
+<dt data-match="SimpleCondition">SimpleCondition</dt><dd>Условие шага, которое смотрит только на текущее событие. Создаётся из лямбды методом <code>SimpleCondition.of</code>.</dd>
+<dt data-match="стратеги[а-я]* пропуска|AfterMatchSkipStrategy|skipPastLastEvent|NO_SKIP">Стратегия пропуска (AfterMatchSkipStrategy)</dt><dd>Что делать с остальными попытками после найденного совпадения. <code>NO_SKIP</code> оставляет все, <code>skipPastLastEvent</code> выбрасывает начатые до конца совпадения.</dd>
+<dt data-match="PatternProcessFunction|processMatch">PatternProcessFunction</dt><dd>Функция, которую CEP вызывает на каждое совпадение. Получает словарь от имени шага к списку событий.</dd>
+<dt data-match="CepOperator">CepOperator</dt><dd>Оператор Flink, который исполняет шаблон. Буферизует события до watermark, ведёт автомат и хранит всё в keyed state.</dd>
+<dt data-match="SharedBuffer|общ[а-я]* буфер">SharedBuffer</dt><dd>Общий буфер событий оператора CEP в keyed state. Хранит каждое событие один раз, попытки ссылаются на него.</dd>
+<dt data-match="MATCH_RECOGNIZE">MATCH_RECOGNIZE</dt><dd>Оператор стандарта SQL для поиска шаблонов в строках таблицы. Во Flink SQL работает поверх библиотеки CEP.</dd>
+<dt data-match="watermark">Watermark</dt><dd>Отметка времени события в потоке, после которой более ранних событий оператор не ждёт. CEP обрабатывает события только до текущего watermark.</dd>
+<dt data-match="keyed state|состояни">Состояние с ключом (keyed state)</dt><dd>Состояние, которое Flink хранит отдельно для каждого ключа. CEP держит в нём автомат и буферы каждой карты.</dd>
+<dt data-match="KeyedProcessFunction">KeyedProcessFunction</dt><dd>Функция над потоком с ключом с доступом к состоянию и таймерам. На ней правило последовательности пишут вручную.</dd>
+<dt data-match="card testing">Card testing</dt><dd>Мошенническая проверка украденных карт мелкими платежами перед крупной покупкой.</dd>
+<dt data-match="impossible travel">Impossible travel</dt><dd>Признак скопированной карты, когда соседние платежи пришли из мест, между которыми нельзя успеть переместиться.</dd>
+<dt data-match="родительск[а-я]* загрузчик|parent-first">Parent-first</dt><dd>Порядок загрузки классов, при котором класс сначала ищется в библиотеках кластера и только потом в jar задания. Для пакета <code>org.apache.flink.</code> он действует всегда.</dd>
+<dt data-match="MiniCluster">MiniCluster</dt><dd>Кластер Flink внутри одного процесса JVM для тестов. На нём работают настоящие операторы со временем и состоянием.</dd>
+<dt data-match="Structured Streaming|flatMapGroupsWithState|transformWithState">Spark Structured Streaming</dt><dd>Потоковый движок Spark. Логику последовательностей в нём пишут вручную в <code>flatMapGroupsWithState</code> или <code>transformWithState</code>.</dd>
+</dl>

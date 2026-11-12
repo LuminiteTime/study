@@ -1,0 +1,34 @@
+### тесты
+RESULT tests 11 fail 0
+jar bytes 24333158
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+Job has been submitted with JobID 013a070d18cd8a75bfd8bd29657cd664
+### job 013a070d18cd8a75bfd8bd29657cd664
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> parse-payment -> (dlq-sink: Writer -> dlq-sink: Committer, Sink: stdout)","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 20:59:10 : 013a070d18cd8a75bfd8bd29657cd664 : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> parse-payment -> (dlq-sink: Writer -> dlq-sink: Committer, Sink: stdout) :: [{"id":"numRecordsIn","min":8573.0,"max":9207.0,"sum":17780.0},{"id":"numRecordsOut","min":84.0,"max":92.0,"sum":176.0},{"id":"busyTimeMsPerSecond","min":5.0,"max":6.0,"sum":11.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+### checkpoints
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}
+### exceptions
+[]
+### топики
+--- fraud.alerts
+--- payments.dlq
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085151733}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085158791}
+{"raw":"{\"paymentId\": broken","reason":"bad-json","rejectedAtMs":1794085160285}
+--- payments.raw
+{"paymentId":"a4816398-c235-a9cd-86b8-325887957123","cardId":"c-0923","merchantId":"m-0031","amountMinor":7733,"currency":"EUR","country":"NL","eventTimeMs":1794085153128}
+{"paymentId":"4548a5f3-d04c-8453-3987-e4c48cf0a88d","cardId":"c-4106","merchantId":"m-0038","amountMinor":16662,"currency":"EUR","country":"FR","eventTimeMs":1794085153129}
+{"paymentId":"8ee5271d-56ee-b290-7399-e67eadf7d6fc","cardId":"c-0687","merchantId":"m-0030","amountMinor":7988,"currency":"EUR","country":"NL","eventTimeMs":1794085153129}
+--- rules.config
+### postgres
+### лог TaskManager, ошибки

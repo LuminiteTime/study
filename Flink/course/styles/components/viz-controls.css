@@ -1,0 +1,102 @@
+/* Элементы управления схем: нативные select, ползунок и флажок в стиле курса. */
+.viz select {
+  appearance: none;
+  padding: var(--space-1) var(--space-8) var(--space-1) var(--space-3);
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%238D8D8D' stroke-width='1.5'%3E%3Cpath d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E") no-repeat right 10px center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  height: 32px;
+  cursor: pointer;
+}
+
+.viz input[type="range"] {
+  appearance: none;
+  width: 120px;
+  height: 4px;
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+}
+
+.viz input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-text);
+  box-shadow: var(--shadow-sm);
+}
+
+.viz input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-text);
+}
+
+.viz input[type="checkbox"] {
+  appearance: none;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: var(--radius-full);
+  background: var(--color-border-strong);
+  position: relative;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.viz input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.viz input[type="checkbox"]:checked {
+  background: var(--color-accent);
+}
+
+.viz input[type="checkbox"]:checked::after {
+  transform: translateX(12px);
+}
+
+.viz-controls label > span {
+  min-width: 2ch;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.viz-controls input[type="number"],
+.viz-controls input[type="text"] {
+  width: 7.5em;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.viz-controls input[type="number"]:focus-visible,
+.viz-controls input[type="text"]:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.viz-controls input[type="radio"] {
+  accent-color: var(--color-accent);
+}

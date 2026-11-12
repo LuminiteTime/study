@@ -1,0 +1,227 @@
+<h2>Отчёт, ради которого жалко писать оператор</h2>
+<p>Финансовому отделу нужна выручка каждого продавца по минутам в PostgreSQL. Завтра они попросят такую же выручку по уровню риска. На DataStream API каждый новый срез означает окно, функцию агрегации, приёмник и ревью Java-кода. Flink SQL описывает эту задачу одним запросом, и работает он на том же рантайме, с теми же чекпоинтами и теми же бэкендами состояния.</p>
+<p>Запрос на потоке устроен иначе, чем запрос к базе, потому что он никогда не заканчивается. Отсюда три вопроса, из-за которых SQL-задания падают и разрастаются в проде. Что приходит в приёмник, когда уже отправленная строка результата изменилась? Где лежит состояние запроса и кто его чистит? Откуда кластер берёт коннекторы, если jar с кодом больше нет?</p>
+
+<h2>Турнирная таблица</h2>
+<p>Представь футбольный чемпионат. Матчи идут один за другим, это поток событий. Турнирная таблица это результат запроса над ними. После каждого матча её не считают заново с первого тура, к строке команды прибавляют новые очки.</p>
+<p>Сообщить читателям об изменении можно тремя способами. Газета печатает поправку из двух строк, «снять Ротор 10 очков» и «поставить Ротор 13 очков». Табло на стадионе находит строку по названию команды и перезаписывает её. Итоги тура публикуют один раз, когда все матчи сыграны, и правок к ним не бывает. Во Flink этим способам соответствуют три режима потока изменений.</p>
+
+<h2>Динамическая таблица и changelog</h2>
+<p>Каждая запись топика для Flink SQL это вставка в таблицу. Такая таблица называется динамической (dynamic table). Внутри она не материализована, это только взгляд на поток. Запрос над ней называется непрерывным (continuous query). В любой момент его результат по смыслу равен результату такого же пакетного запроса над снимком входа.</p>
+<p>Результат запроса тоже динамическая таблица. Наружу она выходит как changelog, то есть поток изменений, где каждая строка несёт пометку вида изменения. Этих пометок четыре.</p>
+<table>
+<thead><tr><th>Пометка</th><th>Значение в <code>RowKind</code></th><th>Что сообщает</th></tr></thead>
+<tbody>
+<tr><td><code>+I</code></td><td><code>INSERT</code></td><td>Появилась новая строка</td></tr>
+<tr><td><code>-U</code></td><td><code>UPDATE_BEFORE</code></td><td>Старое значение строки, которая сейчас изменится</td></tr>
+<tr><td><code>+U</code></td><td><code>UPDATE_AFTER</code></td><td>Новое значение строки</td></tr>
+<tr><td><code>-D</code></td><td><code>DELETE</code></td><td>Строка удалена</td></tr>
+</tbody>
+</table>
+<p>Прогони девять платежей через три варианта запроса. Посмотри, сколько записей уходит в приёмник на одни и те же данные и что происходит с состоянием. Водяной знак в модели отстаёт на 10 секунд и двигается с каждой записью, а платёж со временем 00:58 приходит с опозданием.</p>
+
+<div class="viz" id="viz-l14">
+  <p class="viz-title">Поток превращается в таблицу</p>
+  <div class="viz-controls">
+    <label>Запрос <select id="viz-l14-mode">
+      <option value="retract">GROUP BY, приёмник принимает все виды строк</option>
+      <option value="upsert">GROUP BY, приёмник пишет по ключу</option>
+      <option value="window">Окно TUMBLE на минуту</option>
+    </select></label>
+    <button class="primary" id="viz-l14-next" type="button">Следующий платёж</button>
+    <button id="viz-l14-reset" type="button">С начала</button>
+  </div>
+  <p class="viz-note"><code id="viz-l14-query"></code></p>
+  <div class="viz-columns">
+    <section><h4>Поток платежей</h4><div id="viz-l14-stream"></div></section>
+    <section><h4>Таблица результата</h4><div id="viz-l14-table"></div></section>
+    <section><h4>Changelog</h4><div id="viz-l14-log"></div></section>
+  </div>
+  <p class="viz-note" id="viz-l14-stats"></p>
+  <p class="viz-note" id="viz-l14-note" aria-live="polite"></p>
+</div>
+
+<p>Первый вариант похож на газету с поправками и называется retract. Изменение кодируется двумя записями, <code>-U</code> и <code>+U</code>. Второй похож на табло и называется upsert. Изменение занимает одну запись <code>+U</code>, зато приёмник обязан знать уникальный ключ. Третий вариант называется append-only, в нём есть только <code>+I</code>, как в итогах тура.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Четыре пометки это обычное перечисление в ядре Flink. Посмотри на комментарии к двум видам обновления, они объясняют, зачем нужен <code>-U</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/types/RowKind.java" data-lines="30-52" data-must="UPDATE_BEFORE"></div>
+<p>Запись <code>-U</code> нужна, когда строку нельзя однозначно найти по ключу. Если ключ есть, обновление идемпотентно, то есть его повтор не меняет результат, и хватает <code>+U</code>. Именно так определены готовые наборы видов строк.</p>
+<div data-src="flink:flink-table/flink-table-common/src/main/java/org/apache/flink/table/connector/ChangelogMode.java" data-lines="41-63" data-must="UPDATE_BEFORE"></div>
+<p>В наборе <code>UPSERT</code> нет <code>UPDATE_BEFORE</code>, в наборе <code>ALL</code> есть все четыре вида. Этим классом коннектор сообщает планировщику, какие строки он выдаёт или принимает.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/concepts/dynamic_tables/" target="_blank" rel="noopener">Dynamic Tables</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sourcessinks/" target="_blank" rel="noopener">User-defined Sources &amp; Sinks</a></p>
+</div>
+
+<p>Вид потока ты не выбираешь руками. Его выводит планировщик, и по этому выводу понятно, примет ли запрос твой приёмник. JDBC-коннектор с <code>PRIMARY KEY</code> в DDL работает в режиме upsert. Без первичного ключа он работает в режиме append и обновлений принять не может. Для приёмника в PostgreSQL первичный ключ полезен и при чистых вставках. Если после восстановления окно будет записано повторно, строка перезапишется и дубля не появится.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Программа вывода режимов обходит план и для каждого узла решает, какие изменения он производит. Сравни обычную агрегацию и оконную.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/scala/org/apache/flink/table/planner/plan/optimize/program/FlinkChangelogModeInferenceProgram.scala" data-lines="192-207" data-must="StreamPhysicalGroupAggregate"></div>
+<div data-src="flink:flink-table/flink-table-planner/src/main/scala/org/apache/flink/table/planner/plan/optimize/program/FlinkChangelogModeInferenceProgram.scala" data-lines="244-255" data-must="ModifyKindSet.INSERT_ONLY"></div>
+<p>Обычный <code>GROUP BY</code> всегда объявляет <code>INSERT</code> и <code>UPDATE</code>, а если на входе были обновления, то ещё и <code>DELETE</code>. Оконная агрегация и <code>WindowRank</code> объявляют только вставки. Комментарий <code>TODO</code> объясняет причину, в этом узле пока нет раннего и позднего срабатывания окна.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/table/jdbc/" target="_blank" rel="noopener">JDBC SQL Connector</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/group-agg/" target="_blank" rel="noopener">Group Aggregation</a></p>
+</div>
+
+<h2>Оконные TVF</h2>
+<p>TVF (table-valued function) это функция, которая принимает таблицу и возвращает таблицу. Функция <code>TUMBLE</code> добавляет к входным колонкам три новых, <code>window_start</code>, <code>window_end</code> и <code>window_time</code>. Есть ещё <code>HOP</code>, <code>CUMULATE</code> и <code>SESSION</code>. Запрос нашего проекта выглядит так.</p>
+<div data-code="lesson-14/sql/merchant_revenue.sql" data-lines="38-41"></div>
+<p>Окном этот запрос делает группировка. В <code>GROUP BY</code> обязаны стоять обе колонки, начало и конец окна. Тогда планировщик выбирает специальный оператор, который выдаёт один итог на окно и потом освобождает состояние.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверка группировки занимает несколько строк. Смотри на последнее выражение, оно требует и начало, и конец.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/scala/org/apache/flink/table/planner/plan/utils/WindowUtil.scala" data-lines="59-72" data-must="hasWindowStart &amp;&amp; hasWindowEnd"></div>
+<p>Если забыть <code>window_end</code>, проверка вернёт <code>false</code>. Запрос при этом останется законным и превратится в обычную агрегацию с обновлениями и состоянием без срока жизни. Ошибки при запуске не будет.</p>
+<p>Дальше узел плана собирает обычный оператор с состоянием по ключу. SQL здесь кончается, начинается тот же граф, что и в DataStream.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/java/org/apache/flink/table/planner/plan/nodes/exec/stream/StreamExecWindowAggregate.java" data-lines="224-240" data-must="setStateKeySelector"></div>
+<p>Ограничение оператора описано в комментарии к его классу.</p>
+<div data-src="flink:flink-table/flink-table-runtime/src/main/java/org/apache/flink/table/runtime/operators/window/tvf/common/WindowAggOperator.java" data-lines="89-101" data-must="late-arrival"></div>
+<p>Опоздавшая запись просто отбрасывается и увеличивает счётчик <code>numLateRecordsDropped</code>. В DataStream-задании проекта такие записи можно было поймать через <code>sideOutputLateData</code>, здесь этой возможности нет. Срабатывание таймера показывает, откуда берётся маленькое состояние окна.</p>
+<div data-src="flink:flink-table/flink-table-runtime/src/main/java/org/apache/flink/table/runtime/operators/window/tvf/common/WindowAggOperator.java" data-lines="258-265" data-must="clearWindow"></div>
+<p>Сразу за <code>fireWindow</code> идёт <code>clearWindow</code>. Итог вышел, состояние этого окна удалено.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/window-tvf/" target="_blank" rel="noopener">Windowing TVF</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/window-agg/" target="_blank" rel="noopener">Window Aggregation</a></p>
+</div>
+
+<h2>План задания, Local и Global</h2>
+<p>Текст запроса разбирает и оптимизирует планировщик, построенный на Apache Calcite. Результат это граф операторов, который виден в Web UI или в выводе команды <code>EXPLAIN</code>. Если ты читал вывод <code>explain()</code> в Spark, то видел там <code>partial_sum</code> перед обменом и финальную сумму после него. Во Flink оконная агрегация делится так же, вершины называются <code>LocalWindowAggregate</code> и <code>GlobalWindowAggregate</code>.</p>
+
+<svg viewBox="0 0 860 240" role="img" aria-label="Две подзадачи читают платежи и складывают их в локальный буфер. Через сеть по хешу ключа уходят только частичные суммы. Глобальная фаза объединяет их в состоянии и выдаёт итог окна." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l14" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="30" width="120" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="70" y="60">Source</text><text x="70" y="80" font-size="11">подзадача 1</text>
+    <rect x="10" y="140" width="120" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="70" y="170">Source</text><text x="70" y="190" font-size="11">подзадача 2</text>
+    <rect x="175" y="30" width="230" height="70" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="290" y="55" font-weight="700">LocalWindowAggregate</text><text x="290" y="77" font-size="11">буфер в managed memory, без обмена</text>
+    <rect x="175" y="140" width="230" height="70" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="290" y="165" font-weight="700">LocalWindowAggregate</text><text x="290" y="187" font-size="11">много записей m-0000, одна сумма</text>
+    <rect x="570" y="30" width="230" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="685" y="55" font-weight="700">GlobalWindowAggregate</text><text x="685" y="77" font-size="11">состояние окна по ключу, итог</text>
+    <rect x="570" y="140" width="230" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="685" y="165" font-weight="700">GlobalWindowAggregate</text><text x="685" y="187" font-size="11">состояние окна по ключу, итог</text>
+    <text x="487" y="18" font-size="12">сеть, хеш по ключу</text><text x="487" y="232" font-size="12">только частичные суммы</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l14)">
+    <path d="M130 65H173"/><path d="M130 175H173"/><path d="M405 65H568"/><path d="M405 175H568"/><path d="M405 75L568 165"/><path d="M405 165L568 75"/>
+  </g>
+</svg>
+
+<p>Выигрыш особенно заметен на перекосе. У нас продавец <code>m-0000</code> получает 30 % платежей. Без локальной фазы все его записи идут по сети в одну подзадачу, и каждая обращается к состоянию. С локальной фазой по сети идёт одна частичная сумма на ключ при каждом сбросе буфера.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Правило оптимизатора перечисляет условия разбиения на две фазы. Посмотри, что мешает ему сработать.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/java/org/apache/flink/table/planner/plan/rules/physical/stream/TwoStageOptimizedWindowAggregateRule.java" data-lines="86-108" data-must="doAllSupportPartialMerge"></div>
+<p>Две фазы отменяются при <code>ONE_PHASE</code>, для окон по времени обработки, для сессионных окон и для функций без операции слияния. <code>SUM</code> и <code>COUNT</code> из нашего запроса сливать можно. Значение <code>table.optimizer.agg-phase-strategy</code> по умолчанию равно <code>AUTO</code>, и на стенде запрос с окном разбился на две фазы без единой настройки.</p>
+<p>Локальный узел собирает оператор с буфером.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/java/org/apache/flink/table/planner/plan/nodes/exec/stream/StreamExecLocalWindowAggregate.java" data-lines="194-200" data-must="LocalSlicingWindowAggOperator"></div>
+<p>Сброс буфера происходит в методах этого оператора.</p>
+<div data-src="flink:flink-table/flink-table-runtime/src/main/java/org/apache/flink/table/runtime/operators/aggregate/window/LocalSlicingWindowAggOperator.java" data-lines="108-135" data-must="prepareSnapshotPreBarrier"></div>
+<p>Комментарий в <code>processElement</code> называет первую причину, буфер переполнился. Вторая причина это водяной знак, который дошёл до конца окна. Третья это барьер чекпоинта, перед ним буфер сбрасывается целиком, и хранить его содержимое в снимке незачем.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/tuning/" target="_blank" rel="noopener">Performance Tuning</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/explain/" target="_blank" rel="noopener">EXPLAIN</a></p>
+</div>
+
+<h2>Состояние, которого не видно в запросе</h2>
+<p>В DataStream ты сам объявляешь <code>ValueState</code> и сам ставишь таймер на его очистку. В SQL состояние заводит планировщик. Запрос <code>GROUP BY merchantId</code> помнит счётчик каждого продавца вечно, потому что новая запись может прийти в любой момент. Обычный <code>JOIN</code> двух потоков держит в состоянии обе таблицы целиком. Такие запросы выглядят безобидно и на карточках с миллионами значений заполняют диск.</p>
+<p>Ограничить рост помогает <code>table.exec.state.ttl</code>, время хранения ключа без обновлений. На оконные операторы и interval join эта настройка не влияет, их состояние очищается, когда время проходит границу окна.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотри на значение по умолчанию и на описание.</p>
+<div data-src="flink:flink-table/flink-table-api-java/src/main/java/org/apache/flink/table/api/config/ExecutionConfigOptions.java" data-lines="49-59" data-must="table.exec.state.ttl"></div>
+<p>Ноль означает, что состояние не очистится никогда. Если задать час, ключ проживёт без обновлений минимум час и будет удалён когда-то после этого.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/concepts/overview/" target="_blank" rel="noopener">Streaming Concepts</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/config/" target="_blank" rel="noopener">Configuration</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">TTL меняет результат, и savepoint не спасёт правку запроса</strong>
+    <p>После удаления состояния запрос забывает, что видел этот ключ. Счётчик продавца, молчавшего дольше TTL, начнётся заново с единицы и перезапишет строку в приёмнике. Отдельная проблема с обновлениями. Документация прямо говорит, что savepoint поддержан, только пока не меняются ни запрос, ни версия Flink. Новый фильтр может перестроить план, и состояние не найдёт своих операторов. Механизмы эволюции из урока 13 к SQL-заданиям не переносятся.</p>
+  </div>
+</div>
+
+<h2>Mini-batch</h2>
+<p>Обычная агрегация обрабатывает записи по одной, то есть читает аккумулятор из состояния, обновляет и записывает обратно. На RocksDB это дорого, особенно на перекосе. Режим mini-batch копит пачку записей в буфере и обращается к состоянию один раз на ключ. Цена этого выигрыша равна допустимой задержке.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Три настройки включаются вместе. Обрати внимание на примечание у размера.</p>
+<div data-src="flink:flink-table/flink-table-api-java/src/main/java/org/apache/flink/table/api/config/ExecutionConfigOptions.java" data-lines="645-680" data-must="MiniBatch only works for non-windowed aggregations"></div>
+<p>Эти настройки относятся к агрегации без окна. У оконных TVF свой буфер работает всегда, он расположен в managed memory, поэтому не создаёт нагрузки на сборщик мусора. Это написано в разделе о настройке производительности. Для обычного <code>GROUP BY</code> от mini-batch зависит ещё и разбиение на две фазы.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/java/org/apache/flink/table/planner/plan/rules/physical/stream/TwoStageOptimizedAggregateRule.java" data-lines="85-94" data-must="isMiniBatchEnabled"></div>
+<p>Сравни с правилом для окон выше, там этого условия нет.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/tuning/" target="_blank" rel="noopener">Performance Tuning</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/config/" target="_blank" rel="noopener">Configuration</a></p>
+</div>
+
+<h2>Почему коннекторы SQL лежат в lib</h2>
+<p>У запроса из файла нет jar с зависимостями. Строку <code>'connector' = 'kafka'</code> планировщик превращает в класс через поиск фабрик на classpath. Поэтому коннектор надо либо передать клиенту флагом <code>--jar</code> или <code>--library</code>, либо положить толстый SQL-jar в <code>/lib</code> дистрибутива. Второй способ удобен тем, что версия коннектора управляется в одном месте для всех заданий кластера.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Фабрики находятся через стандартный механизм Java, <code>ServiceLoader</code>. Именно он читает файлы <code>META-INF/services</code>, которые мы склеивали в уроке 1.</p>
+<div data-src="flink:flink-table/flink-table-common/src/main/java/org/apache/flink/table/factories/FactoryUtil.java" data-lines="789-802" data-must="ServiceLoader.load"></div>
+<p>Дальше среди найденных выбирается фабрика с нужным именем. Если её нет, ты увидишь сообщение со списком всех доступных имён.</p>
+<div data-src="flink:flink-table/flink-table-common/src/main/java/org/apache/flink/table/factories/FactoryUtil.java" data-lines="544-562" data-must="Could not find any factory for identifier"></div>
+<p>У <code>/lib</code> есть цена. Классы оттуда попадают в родительский загрузчик, а для пакета <code>org.apache.flink.</code> родитель всегда главнее jar задания.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/CoreOptions.java" data-lines="107-126" data-must="org.apache.flink."></div>
+<p>В SQL-jar Kafka перепакована в другой пакет.</p>
+<div data-src="kafka:flink-sql-connector-kafka/pom.xml" data-lines="99-104" data-must="org.apache.flink.kafka.shaded.org.apache.kafka"></div>
+<p>Сам <code>OffsetsInitializer</code> перепакованным не становится, он остаётся в <code>org.apache.flink.connector.kafka</code>. Меняется только тип аргумента его метода.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/enumerator/initializer/OffsetsInitializer.java" data-lines="111-123" data-must="committedOffsets(OffsetResetStrategy offsetResetStrategy)"></div>
+<p>А наше DataStream-задание скомпилировано с обычным <code>org.apache.kafka.clients.consumer.OffsetResetStrategy</code>.</p>
+<div data-code="lesson-14/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="196-196"></div>
+<p>Если SQL-jar лежит в <code>/lib</code>, загрузчик отдаёт заданию класс <code>OffsetsInitializer</code> из него, и метода с такой сигнатурой там нет. На практике это выглядит как <code>NoSuchMethodError</code>, разберём его на вкладке «Практика».</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/configuration/connector/" target="_blank" rel="noopener">Connectors and Formats</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/debugging/debugging_classloading/" target="_blank" rel="noopener">Debugging Classloading</a></p>
+</div>
+
+<h2>Сравнение со Spark SQL</h2>
+<p>Многое покажется знакомым. <a href="https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html" target="_blank" rel="noopener">Structured Streaming</a> тоже описывает поток как растущую таблицу. Разница в том, что происходит на выходе.</p>
+<table>
+<thead><tr><th>Вопрос</th><th>Spark Structured Streaming</th><th>Flink SQL</th></tr></thead>
+<tbody>
+<tr><td>Как описан вывод</td><td>Режим Append, Update или Complete задаётся на весь запрос</td><td>Вид изменения записан в каждой строке changelog</td></tr>
+<tr><td>Откуда режим</td><td>Выбираешь сам в <code>outputMode</code></td><td>Выводит планировщик по операторам и приёмнику</td></tr>
+<tr><td>Окно</td><td>Функция <code>window()</code> в группировке</td><td>TVF в <code>FROM</code>, начало и конец окна в <code>GROUP BY</code></td></tr>
+<tr><td>Водяной знак</td><td><code>withWatermark</code> в запросе</td><td><code>WATERMARK FOR</code> в DDL таблицы</td></tr>
+<tr><td>Две фазы агрегации</td><td><code>partial_sum</code> и финальная сумма</td><td><code>LocalWindowAggregate</code> и <code>GlobalWindowAggregate</code></td></tr>
+<tr><td>Оптимизатор</td><td>Catalyst</td><td>Основан на Apache Calcite</td></tr>
+<tr><td>Подключение коннектора</td><td><code>--packages</code> или <code>--jars</code> при запуске</td><td><code>/lib</code> кластера, <code>--jar</code> у клиента или jar задания</td></tr>
+</tbody>
+</table>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l14">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Без window_end группировка не проходит проверку groupingContainsWindowStartEnd, и планировщик строит обычную агрегацию. Она выдаёт обновления на каждую запись и хранит состояние без срока."
+       data-explanation-wrong="Сравни запрос с требованием к группировке. Какие две колонки должны стоять в GROUP BY, чтобы планировщик выбрал оконный оператор?">
+    <h3 class="quiz-question">Коллега написал TUMBLE на минуту и GROUP BY merchantId, window_start. Задание работает, но строки в приёмнике обновляются на каждый платёж, а состояние растёт сутки за сутками. В чём дело?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Водяной знак слишком большой, окна не успевают закрыться</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>В группировке нет window_end, и запрос стал обычной агрегацией</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>JDBC-приёмник с первичным ключом всегда превращает окно в поток обновлений</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Удаление по TTL стирает память о ключе. Следующая запись считается первой, и upsert перезаписывает строку в PostgreSQL маленьким значением."
+       data-explanation-wrong="Вспомни, что документация пишет об удалённом ключе. Запрос помнит о нём что-нибудь после очистки?">
+    <h3 class="quiz-question">Запрос GROUP BY merchantId считает платежи с нарастающим итогом, table.exec.state.ttl равен часу. Продавец молчал два часа и получил платёж. Что окажется в строке приёмника?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Прежний итог плюс один, потому что итог лежит в PostgreSQL</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Ничего, запись будет отброшена как опоздавшая</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Значение 1, потому что состояние ключа удалено и подсчёт начался заново</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Пакет org.apache.flink загружается через родителя, поэтому OffsetsInitializer приходит из SQL-jar, где тип аргумента лежит в перепакованном пакете. Сигнатура не совпала с той, что скомпилирована в задании."
+       data-explanation-wrong="Подумай, какой загрузчик отдаёт классы org.apache.flink и что сделал с Kafka плагин shade в SQL-jar.">
+    <h3 class="quiz-question">Ради SQL-задания в /lib общего кластера положили flink-sql-connector-kafka. После этого старое DataStream-задание с коннектором в своём jar падает с NoSuchMethodError на committedOffsets. Как починить надёжнее всего?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Вынести SQL-задания на отдельный кластер со своим образом</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Поднять версию Kafka-клиента в build.gradle.kts</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Увеличить метаспейс TaskManager, класс не поместился в память</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

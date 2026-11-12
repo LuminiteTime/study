@@ -1,0 +1,21 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Утилита вызывает <code>KeyGroupRangeAssignment.assignKeyToParallelOperator</code>. Это тот же метод, что вызывает <code>KeyGroupStreamPartitioner</code> на ребре, поэтому расчёт совпадает с кластером до записи. Вес передаётся функцией, так один класс считает и число ключей, и поток платежей.</p>
+<div data-code="lesson-04/src/main/java/dev/study/payguard/job/KeyDistribution.java"></div>
+<p>Подзадачи, на которые не попал ни один ключ, в карту не попадут. Поэтому среднее в <code>skew</code> делится на переданный параллелизм, размер карты для этого не годится.</p>
+<div data-code="lesson-04/src/test/java/dev/study/payguard/job/KeyDistributionTest.java"></div>
+<p>Во втором тесте вес горячего ключа взят с большим запасом, 21 × 49 против 1. Это больше 95 % потока, и порог 2,0 выполняется надёжно. С реальными 30 % при параллелизме 4 перекос получается 1,6, и такой тест упал бы. Мы прогнали класс с весами генератора, 21 у <code>m-0000</code> и 1 у остальных.</p>
+<table>
+<thead><tr><th>Параллелизм</th><th>Ключей по подзадачам</th><th>Нагрузка по подзадачам, в семидесятых долях</th><th><code>skew</code></th></tr></thead>
+<tbody>
+<tr><td>2</td><td>22, 28</td><td>42, 28</td><td>1,20</td></tr>
+<tr><td>4</td><td>8, 14, 11, 17</td><td>28, 14, 11, 17</td><td>1,60</td></tr>
+<tr><td>8</td><td>3, 5, 7, 7, 6, 5, 6, 11</td><td>3, 25, 7, 7, 6, 5, 6, 11</td><td>2,86</td></tr>
+</tbody>
+</table>
+<p>Таблица подтверждает подсказку из теории. С ростом параллелизма перекос растёт, потому что горячая подзадача всё равно получает 30 %, а средняя доля падает. При параллелизме 4 разница между самой нагруженной и самой свободной подзадачей 28 / 11 ≈ 2,5. В замере урока 18 на четырёх подзадачах получилось 11476 против 29551, это 2,6 раза.</p>
+<p>Проверить решение можно так.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test --tests 'dev.study.payguard.job.KeyDistributionTest'</pre>
+<p>Флаг <code>--tests</code> запускает только указанный класс. Отчёт Gradle лежит в <code>build/reports/tests/test/index.html</code>.</p>
+</div>

@@ -1,0 +1,131 @@
+<h2>REPLICA IDENTITY и поле before</h2>
+<p>Настройка таблицы <code>REPLICA IDENTITY</code> решает, какие старые значения PostgreSQL кладёт в журнал при <code>UPDATE</code> и <code>DELETE</code>.</p>
+<table>
+<thead><tr><th>Значение</th><th>Что попадает в журнал</th></tr></thead>
+<tbody>
+<tr><td><code>DEFAULT</code></td><td>Старые значения колонок первичного ключа. Режим по умолчанию для обычных таблиц</td></tr>
+<tr><td><code>USING INDEX</code></td><td>Старые значения колонок указанного уникального индекса</td></tr>
+<tr><td><code>FULL</code></td><td>Старые значения всех колонок строки</td></tr>
+<tr><td><code>NOTHING</code></td><td>Ничего про старую строку</td></tr>
+</tbody>
+</table>
+<p>Документация добавляет важную оговорку. Обычно старое значение колонки пишется, только если оно отличается от нового. Первичный ключ при смене уровня риска не меняется, поэтому в режиме <code>DEFAULT</code> старой строки в журнале нет совсем. А коннектору в режиме <code>changelog-mode = all</code> она нужна, потому что он обязан выдать пару записей <code>-U</code> и <code>+U</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотрим, как событие Debezium превращается в строки Flink. Записи снимка приходят с операцией <code>READ</code> и становятся <code>INSERT</code>. На обновление в режиме <code>ALL</code> сначала извлекается поле <code>before</code>, и оно сразу уходит в проверку.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-debezium/src/main/java/org/apache/flink/cdc/debezium/table/RowDataDebeziumDeserializeSchema.java" data-lines="129-151" data-must="DebeziumChangelogMode.ALL"></div>
+<p>Проверка для PostgreSQL падает с исключением на пустой строке. Текст исключения это и есть та ошибка, которую ты увидишь в логе.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/table/PostgresValueValidator.java" data-lines="29-46" data-must="REPLICA IDENTITY to FULL level"></div>
+<p>Условие <code>changelogMode == ALL</code> показывает и запасной выход. Если <code>FULL</code> на таблице включить нельзя, у коннектора есть <code>changelog-mode = upsert</code>, в котором поле <code>before</code> не запрашивается. Этому режиму нужен первичный ключ. Наш курс использует <code>FULL</code>, а его цена следует из определения выше, на каждое обновление в журнал пишется вся старая строка.</p>
+<p class="doc-links">Документация: <a href="https://www.postgresql.org/docs/17/sql-altertable.html" target="_blank" rel="noopener">ALTER TABLE, REPLICA IDENTITY</a>, <a href="https://nightlies.apache.org/flink/flink-cdc-docs-release-3.7/docs/connectors/flink-sources/postgres-cdc/" target="_blank" rel="noopener">changelog-mode</a></p>
+</div>
+
+<p>Коннектор доступен и из DataStream API через <code>PostgresSourceBuilder</code>, и SQL-таблица в режиме параллельного чтения использует тот же класс. Различие есть в обязательности имени слота. В построителе у него указано значение по умолчанию <code>flink</code>, а SQL-фабрика требует задать <code>slot.name</code> явно.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первый фрагмент из построителя, второй из SQL-фабрики. Запомни, что значение по умолчанию у построителя опасно. Два задания без явного имени полезут в один слот.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/PostgresSourceBuilder.java" data-lines="128-141" data-must="Default is &quot;flink&quot;"></div>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/table/PostgreSQLTableFactory.java" data-lines="202-212" data-must="options.add(SLOT_NAME)"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-cdc-docs-release-3.7/docs/connectors/flink-sources/postgres-cdc/" target="_blank" rel="noopener">slot.name</a></p>
+</div>
+
+<h2>Upsert-kafka и компактируемый топик</h2>
+<p>Коннектор <code>upsert-kafka</code> пишет changelog в Kafka с такой логикой. Первичный ключ таблицы становится ключом сообщения Kafka, новая версия строки становится значением, а удаление превращается в сообщение с пустым значением (tombstone). Все изменения одного ключа попадают в одну партицию, поэтому их порядок сохраняется.</p>
+<p>Топик с настройкой <code>cleanup.policy=compact</code> хранит для каждого ключа как минимум последнее значение, старые версии брокер со временем вычищает. Такой топик работает как таблица. Новый потребитель читает его с начала и получает весь справочник без обращения к PostgreSQL. Компактирование не трогает активный сегмент, поэтому только что записанные версии какое-то время лежат рядом, и ты увидишь это в практике.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Без первичного ключа таблица не создастся, потому что ключ сообщения брать неоткуда. Сразу под этой проверкой в файле объявлен режим приёмника. В нём нет <code>UPDATE_BEFORE</code>, поэтому на один <code>UPDATE</code> в базе в топик уходит одна запись.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/streaming/connectors/kafka/table/UpsertKafkaDynamicTableFactory.java" data-lines="306-313" data-must="require to define a PRIMARY KEY"></div>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/streaming/connectors/kafka/table/UpsertKafkaDynamicTableFactory.java" data-lines="395-400" data-must="SINK_CHANGELOG_MODE"></div>
+<p>Сериализация показывает, как рождается tombstone. Для <code>DELETE</code> и <code>UPDATE_BEFORE</code> значение становится <code>null</code>, остальные записи пишутся как обычные <code>INSERT</code>, чтобы их принял формат вроде JSON, понимающий только вставки. До ветки с <code>UPDATE_BEFORE</code> наши записи не доходят, потому что режим приёмника таких строк не объявляет. Это видно и в замере из практики, один <code>UPDATE</code> дал одну запись без tombstone.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/streaming/connectors/kafka/table/DynamicKafkaRecordSerializationSchema.java" data-lines="144-155" data-must="tombstone"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/table/upsert-kafka/" target="_blank" rel="noopener">Upsert Kafka</a>, <a href="https://kafka.apache.org/43/design/design/" target="_blank" rel="noopener">Kafka, Log Compaction</a></p>
+</div>
+
+<h2>Lakehouse и Paimon</h2>
+<p>Алерты в Kafka нужны для реакции, а аналитикам нужен SQL по истории за месяцы. Lakehouse закрывает это файлами в дешёвом хранилище, поверх которых лежат метаданные таблицы. Метаданные дают то, чего нет у папки с Parquet, это атомарную публикацию изменений и обновление строк по ключу. Apache Paimon как раз такой формат таблиц, и читать его можно разными движками, в том числе Spark.</p>
+<p>Устройство таблицы с первичным ключом удобно смотреть сверху вниз. Партиция делит данные по значению колонки, у нас по дню. Внутри партиции бакеты, каждый со своим LSM-деревом (log-structured merge-tree). Писатель накапливает записи, сортирует их и сбрасывает новым файлом, а compaction потом сливает файлы, чтобы чтению не приходилось перебирать много версий одного ключа.</p>
+
+<svg viewBox="0 0 860 245" role="img" aria-label="Каталог таблицы Paimon. Снимок указывает на списки манифестов, они указывают на файлы данных в бакетах партиции." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l15b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="30" width="170" height="60" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="95" y="55">snapshot/snapshot-8</text><text x="95" y="74" font-size="11">видимое состояние таблицы</text>
+    <rect x="10" y="130" width="170" height="60" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="95" y="155">schema/</text><text x="95" y="174" font-size="11">версии схемы</text>
+    <rect x="240" y="30" width="170" height="60" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="325" y="55">manifest/</text><text x="325" y="74" font-size="11">какие файлы добавлены и убраны</text>
+    <rect x="470" y="10" width="380" height="225" rx="10" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="660" y="32" font-weight="700">event_day=2026-11-07/</text>
+    <rect x="485" y="45" width="170" height="175" rx="6" fill="var(--color-bg-warm)" stroke="var(--color-border)"/><text x="570" y="66">bucket-0</text>
+    <rect x="665" y="45" width="170" height="175" rx="6" fill="var(--color-bg-warm)" stroke="var(--color-border)"/><text x="750" y="66">bucket-1</text>
+    <g font-size="11">
+      <rect x="497" y="78" width="146" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="570" y="95">data-*.parquet</text>
+      <rect x="497" y="110" width="146" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="570" y="127">data-*.parquet</text>
+      <rect x="497" y="142" width="146" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="570" y="159">changelog-*.parquet</text>
+      <text x="570" y="195">своё LSM-дерево</text>
+      <rect x="677" y="78" width="146" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="750" y="95">data-*.parquet</text>
+      <rect x="677" y="110" width="146" height="26" rx="4" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="750" y="127">changelog-*.parquet</text>
+      <text x="750" y="195">своё LSM-дерево</text>
+    </g>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l15b)">
+    <path d="M180 60H238"/><path d="M410 60H468"/><path d="M95 90V128"/>
+  </g>
+</svg>
+
+<p>Изменения становятся видимыми, когда опубликован снимок таблицы. Снимок ссылается на схему и списки манифестов, а манифесты перечисляют живые файлы. Потоковая запись публикует изменения на чекпоинтах Flink, поэтому документация Paimon требует их включить. Интервал чекпоинта у нас 15 с, значит, столько же примерно ждать свежих алертов в отчёте.</p>
+<p>Механизм слияния (merge engine) задаёт, как записи с одним ключом складываются в одну логическую строку. По умолчанию это <code>deduplicate</code>, он оставляет последнюю. Идентификатор нашего алерта детерминирован, он собран из правила и платежа, поэтому повторная обработка даёт тот же ключ, и строка останется одна.</p>
+<p>Настройка <code>bucket</code> выбирает режим распределения. Положительное число включает фиксированные бакеты, номер считается как хеш ключа бакета по модулю их числа. Без настройки таблица работает с динамическими бакетами (<code>-1</code>), и тогда в одну партицию может писать только одно задание. Ключом бакета по умолчанию служит первичный ключ без колонок партиции, поэтому при ключе <code>(event_day, alert_id)</code> хеш считается от <code>alert_id</code>.</p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Три разных снимка в одном уроке</strong>
+    <p>Чекпоинт Flink это снимок состояния задания. Снимок CDC это начальное чтение таблицы PostgreSQL. Снимок Paimon это опубликованная версия таблицы, файл <code>snapshot/snapshot-N</code>. Связь между ними одна, публикация снимка Paimon при потоковой записи привязана к чекпоинту Flink.</p>
+  </div>
+</div>
+
+<h3>Почему Paimon в этом курсе</h3>
+<p>Документация Paimon называет таблицы с первичным ключом основным инструментом для CDC и upsert-потоков, а сборка <code>paimon-flink-2.2</code> версии 2.1.0 проверена на нашем стенде. Рантайм Iceberg под Flink 2.2 появился только в Iceberg 1.12.0, линия 1.11.0 заканчивалась на Flink 2.1, и на стенде курса Iceberg не запускался.</p>
+
+<h3>Та же таблица в пакетном режиме</h3>
+<p>Писатель работает непрерывно, а читателю это не мешает. Запрос в режиме <code>execution.runtime-mode = batch</code> читает один снимок и завершается, писатель в этот момент продолжает работать. Повтори запрос, и он прочитает снимок поновее. Тот же <code>SELECT</code> в режиме <code>streaming</code> сначала прочитает текущее содержимое, потом продолжит следить за изменениями и сам не завершится. Для запроса к старой версии есть подсказка <code>/*+ OPTIONS('scan.snapshot-id' = '1') */</code>, это чтение в прошлое (time travel).</p>
+<p class="doc-links">Документация: <a href="https://paimon.apache.org/docs/2.1/concepts/basic-concepts/" target="_blank" rel="noopener">Paimon, Basic Concepts</a>, <a href="https://paimon.apache.org/docs/2.1/primary-key-table/" target="_blank" rel="noopener">Primary-Key Tables</a>, <a href="https://paimon.apache.org/docs/2.1/primary-key-table/data-distribution/" target="_blank" rel="noopener">Data Distribution</a>, <a href="https://paimon.apache.org/docs/2.1/primary-key-table/merge-engine/" target="_blank" rel="noopener">Merge Engine</a>, <a href="https://paimon.apache.org/docs/2.1/flink/sql-write/" target="_blank" rel="noopener">SQL Write</a>, <a href="https://paimon.apache.org/docs/2.1/flink/sql-query/" target="_blank" rel="noopener">SQL Query</a>, <a href="https://iceberg.apache.org/multi-engine-support/" target="_blank" rel="noopener">Iceberg, Multi-Engine Support</a></p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l15">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Слот живёт отдельно от подключения и запрещает удалять журнал после своей позиции. Отмена задания его не удаляет, а лимит по умолчанию равен -1."
+       data-explanation-wrong="Вспомни, что коннектор делает со слотом основного чтения при остановке и какое значение у max_slot_wal_keep_size по умолчанию.">
+    <h3 class="quiz-question">Задание CDC отменили месяц назад и забыли. Таблицу никто больше не читает, но диск базы продолжает заполняться каталогом pg_wal. Что делать в первую очередь?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Выполнить REPLICA IDENTITY NOTHING на таблице, чтобы журнал стал меньше</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Найти неактивный слот в pg_replication_slots и удалить его через pg_drop_replication_slot</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Удалить топик merchants.changelog в Kafka</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Изменение без старых значений уже лежит в журнале, и ALTER его не перепишет. Перезапуск со старой позиции слота встретит ту же запись. Нужен чистый запуск со снимка после ALTER."
+       data-explanation-wrong="Подумай, откуда задание читает после перезапуска и что лежит в журнале на этой позиции.">
+    <h3 class="quiz-question">После первого UPDATE задание ушло в цикл RESTARTING с ошибкой про поле before. Коллега выполнил ALTER TABLE merchants REPLICA IDENTITY FULL, но цикл продолжается. Почему и что дальше?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>ALTER применится только после перезапуска PostgreSQL, надо его перезапустить</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Надо поднять параллелизм задания, чтобы снимок успел прочитаться</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Плохая запись уже в журнале и перечитывается. Надо отменить задание, удалить слот и запустить заново со снимка</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Потоковая запись в Paimon публикует снимки на чекпоинтах. Без чекпоинтов писатель работает, файлы могут появляться, но новых видимых снимков таблицы нет."
+       data-explanation-wrong="Что делает записанное видимым для читателя таблицы Paimon, и какое событие Flink его публикует?">
+    <h3 class="quiz-question">Потоковое задание пишет в таблицу Paimon уже десять минут, в Web UI оно RUNNING и записи идут. Пакетный запрос возвращает ноль строк. В конфиге кластера нет execution.checkpointing.interval. В чём дело?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Без чекпоинтов нет коммитов, поэтому снимок таблицы не опубликован</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Пакетный режим читает только партицию прошлого дня</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>В таблице с двумя бакетами нужно два читателя</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

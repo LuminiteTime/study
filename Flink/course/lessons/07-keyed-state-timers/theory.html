@@ -1,0 +1,193 @@
+<h2>Карта, которую надо помнить</h2>
+<p>Мошенник проверяет украденную карту серией из двадцати мелких платежей за полминуты. Правило частоты должно сказать «стоп» на одиннадцатом. Для этого оператору нужно знать, сколько платежей эта карта сделала за последнюю минуту. Окна из урока 6 выдают итог в конце интервала, а здесь ответ нужен на каждом платеже.</p>
+<p>Вторая беда в дубликатах. Продюсер Kafka после таймаута может отправить платёж повторно, и без защиты один платёж посчитается дважды во всех итогах. Чтобы выбросить повтор, надо помнить идентификаторы уже виденных платежей. За час при 200 платежах в секунду это 720 000 идентификаторов.</p>
+<p>Первая мысль Java-разработчика здесь в том, чтобы положить счётчики в Redis. Тогда каждый платёж превращается в сетевой запрос, а после падения задания счётчики в Redis уже учли платежи, которые Flink прочитает из Kafka заново. Flink решает задачу иначе. Он хранит состояние рядом с оператором, раскладывает его по ключам и включает в снимок вместе с позицией чтения источника. Снимкам посвящён урок 11, а сегодня разберём, как это состояние устроено и как не дать ему расти бесконечно.</p>
+
+<h2>Стойка регистрации в гостинице</h2>
+<p>Представь стойку регистрации большой гостиницы. За ней картотека, в которой на каждого гостя заведена своя карточка. Когда гость подходит к стойке, администратор достаёт именно его карточку и видит только её. Записать что-то в чужую карточку, пока перед ним стоит этот гость, он не может.</p>
+<p>Рядом висит доска побудок. Гость из 412 номера просит разбудить его в 7:00, администратор пишет на доске «412, 7:00». Если гость попросит о том же ещё раз, вторая запись не появится, на доске уже есть ровно такая. Когда часы показывают 7:00, администратор берёт карточку гостя из 412 номера и звонит ему.</p>
+<p>Раз в сутки архивариус выбрасывает карточки гостей, которые не появлялись дольше года. Он смотрит на настенные часы и на дату последней записи в карточке, ему всё равно, о каких событиях в ней идёт речь.</p>
+<p>Во Flink картотека это состояние с ключом (keyed state), гость это ключ, администратор это твоя функция, которая в каждый момент видит состояние только текущего ключа. Доска побудок это таймеры, а архивариус это TTL. Дальше разберём каждую часть по коду.</p>
+
+<h2>Четыре вида состояния</h2>
+<p>Состояние с ключом доступно только после <code>keyBy</code>. Функция получает его через дескриптор, в котором записаны имя состояния и тип значения. Имя должно быть уникальным внутри оператора, по нему Flink находит состояние при восстановлении из снимка.</p>
+<table>
+<thead><tr><th>Вид</th><th>Что хранит для одного ключа</th><th>Где пригодится в PayGuard</th></tr></thead>
+<tbody>
+<tr><td><code>ValueState&lt;T&gt;</code></td><td>Одно значение, методы <code>value()</code> и <code>update()</code></td><td>Флаг «этот платёж уже был», время последнего алерта</td></tr>
+<tr><td><code>MapState&lt;K, V&gt;</code></td><td>Словарь, методы <code>get</code>, <code>put</code>, <code>entries</code>, <code>keys</code></td><td>Счётчики платежей по корзинам времени</td></tr>
+<tr><td><code>ListState&lt;T&gt;</code></td><td>Список, методы <code>add</code> и <code>get</code></td><td>Последние N платежей карты, если нужны сами платежи</td></tr>
+<tr><td><code>ReducingState&lt;T&gt;</code></td><td>Одно значение, которое <code>ReduceFunction</code> сворачивает при каждом <code>add</code></td><td>Сумма платежей карты за всё время</td></tr>
+</tbody>
+</table>
+<p>Есть и пятый вид, <code>AggregatingState</code>. Он устроен как <code>ReducingState</code>, но тип накопленного значения может отличаться от типа входа, как у <code>AggregateFunction</code> из урока 6. У каждого ключа может быть сколько угодно состояний разных видов, в правиле частоты их два.</p>
+
+<h2>Откуда состояние знает ключ</h2>
+<p>В коде функции нет ни одного упоминания карты. Ты пишешь <code>seen.value()</code>, и Flink сам возвращает значение для того платежа, который сейчас обрабатывается. Это работает потому, что перед каждым вызовом функции оператор запоминает текущий ключ.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Задача берёт обработчик записи у этой утилиты. Если у оператора есть ключ, обработчик сначала вызывает <code>setKeyContextElement</code> и только потом <code>processElement</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/io/RecordProcessorUtils.java" data-lines="56-66" data-must="input.setKeyContextElement(record);"></div>
+<p>Сам <code>setKeyContextElement</code> применяет к записи тот же селектор ключа, что ты передал в <code>keyBy</code>, и делает результат текущим ключом бэкенда состояния.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/AbstractStreamOperator.java" data-lines="575-585" data-must="selector.getKey(record.getValue())"></div>
+<p>Отсюда следует правило, о котором часто забывают. Ключ вычисляется заново в принимающем операторе, поэтому селектор обязан быть детерминированным. Если он вернёт для того же платежа другое значение, запись придёт в одну подзадачу, а искать состояние будет по чужому ключу.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/state/" target="_blank" rel="noopener">Working with State</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/stateful-stream-processing/" target="_blank" rel="noopener">Stateful Stream Processing</a></p>
+</div>
+
+<h2>Где лежат значения</h2>
+<p>Объект <code>ValueState</code> в твоей функции ничего не хранит, это окно в бэкенд состояния (state backend). Бэкенд выбирается настройкой <code>state.backend.type</code>, и если её нет, работает <code>HashMapStateBackend</code>. В нашем <code>docker-compose.yml</code> настройки нет, значит, всё состояние PayGuard сейчас живёт в куче JVM TaskManager.</p>
+
+<svg viewBox="0 0 860 230" role="img" aria-label="Два бэкенда состояния. Слева HashMapStateBackend хранит Java-объекты в таблицах по группам ключей. Справа RocksDB хранит пары байтов, где ключ склеен из группы ключей, ключа и namespace." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <g font-size="13" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="10" width="410" height="210" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/>
+    <text x="215" y="34" text-anchor="middle" font-weight="700">HashMapStateBackend, куча JVM</text>
+    <rect x="30" y="52" width="110" height="34" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="85" y="74" text-anchor="middle">группа 17</text>
+    <rect x="30" y="96" width="110" height="34" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="85" y="118" text-anchor="middle">группа 18</text>
+    <rect x="30" y="140" width="110" height="34" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="85" y="162" text-anchor="middle">группа 19</text>
+    <rect x="180" y="52" width="220" height="78" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="192" y="74" font-size="12">(c-1764, VoidNamespace)</text><text x="192" y="92" font-size="12" fill="var(--color-text-secondary)">→ HashMap&lt;Long, Long&gt;</text>
+    <text x="192" y="114" font-size="12">(c-4262, VoidNamespace)</text>
+    <text x="215" y="204" text-anchor="middle" font-size="12">чтение без сериализации, размер ограничен кучей</text>
+    <rect x="440" y="10" width="410" height="210" rx="10" fill="var(--color-surface)" stroke="var(--color-border)"/>
+    <text x="645" y="34" text-anchor="middle" font-weight="700">RocksDB, локальный диск</text>
+    <rect x="460" y="56" width="230" height="40" rx="6" fill="var(--color-bg-code)" stroke="var(--color-border)"/>
+    <text x="472" y="81" font-size="12">[группа | c-1764 | namespace]</text>
+    <rect x="700" y="56" width="130" height="40" rx="6" fill="var(--color-bg-code)" stroke="var(--color-border)"/><text x="765" y="81" text-anchor="middle" font-size="12">байты значения</text>
+    <rect x="460" y="106" width="230" height="40" rx="6" fill="var(--color-bg-code)" stroke="var(--color-border)"/>
+    <text x="472" y="131" font-size="12">[группа | c-4262 | namespace]</text>
+    <rect x="700" y="106" width="130" height="40" rx="6" fill="var(--color-bg-code)" stroke="var(--color-border)"/><text x="765" y="131" text-anchor="middle" font-size="12">байты значения</text>
+    <text x="645" y="204" text-anchor="middle" font-size="12">каждое чтение сериализует ключ и разбирает байты</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none"><path d="M140 69H178"/><path d="M140 113H178"/></g>
+</svg>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>У <code>HashMapStateBackend</code> состояние лежит в <code>StateTable</code>. Комментарий к полю говорит, что внешний массив разбит по группам ключей. Группы ключей ты знаешь по уроку 4, это единица, которую Flink переносит между подзадачами при смене параллелизма.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/StateTable.java" data-lines="74-78" data-must="The outer array represents the key-groups"></div>
+<p>Метод <code>value()</code> обращается к таблице только по namespace. Ключ и его группу таблица берёт из контекста, то есть из того самого текущего ключа.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/HeapValueState.java" data-lines="70-90" data-must="stateTable.get(currentNamespace)"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/StateTable.java" data-lines="138-147" data-must="keyContext.getCurrentKey(), keyContext.getCurrentKeyGroupIndex()"></div>
+<p>У RocksDB то же самое сделано байтами. Текущий ключ, его группа и namespace сериализуются в ключ RocksDB, а значение каждый раз разбирается сериализатором. Поэтому чтение из RocksDB дороже, зато состояние может быть больше памяти.</p>
+<div data-src="flink:flink-state-backends/flink-statebackend-rocksdb/src/main/java/org/apache/flink/state/rocksdb/RocksDBValueState.java" data-lines="78-92" data-must="serializeCurrentKeyWithGroupAndNamespace()"></div>
+<p>Namespace в правилах этого урока всегда пустой, <code>VoidNamespace</code>. Окна из урока 6 кладут туда само окно, поэтому у одного ключа может быть несколько окон с отдельным состоянием.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/state_backends/" target="_blank" rel="noopener">State Backends</a></p>
+</div>
+
+<p>Для сравнения бэкендов в документации есть простое правило. <code>HashMapStateBackend</code> быстрее, потому что работает с объектами в куче, но всё состояние должно поместиться в память кластера. RocksDB медленнее на каждом обращении и держит столько, сколько влезет на диск. Ещё одно следствие из кода. В куче лежат живые объекты, поэтому менять объект, полученный из <code>value()</code>, без <code>update()</code> опасно. На heap он изменится в состоянии, на RocksDB нет, и задание поведёт себя по-разному на разных бэкендах.</p>
+
+<h2>KeyedProcessFunction и таймеры</h2>
+<p><code>KeyedProcessFunction</code> это самый низкий уровень DataStream API. У неё два метода. <code>processElement</code> вызывается на каждую запись, <code>onTimer</code> вызывается, когда срабатывает таймер. Оба видят состояние текущего ключа и могут выдавать результат через <code>Collector</code>.</p>
+<p>Таймер регистрируется через <code>context.timerService()</code> на конкретный момент. Таймер по времени события срабатывает, когда watermark дошёл до его времени или прошёл дальше. Таймер по времени обработки срабатывает по настенным часам TaskManager. Правило частоты PayGuard использует время события, потому что минута должна считаться по времени платежа.</p>
+<p>Ниже одна подзадача правила частоты. Каждый платёж добавляется в корзину своих 10 секунд и регистрирует таймер на конец корзины плюс минуту. Сделай серию по c-1, потом несколько раз нажми «Прошло 10 с» и заплати картой c-2.</p>
+
+<div class="viz" id="viz-l07">
+  <p class="viz-title">Корзины и таймеры двух карт в одной подзадаче</p>
+  <div class="viz-controls">
+    <button class="primary" id="viz-l07-burst" type="button">Серия из 12 по c-1</button>
+    <button id="viz-l07-pay1" type="button">Платёж c-1</button>
+    <button id="viz-l07-pay2" type="button">Платёж c-2</button>
+    <button id="viz-l07-tick" type="button">Прошло 10 с</button>
+    <button id="viz-l07-reset" type="button">Сначала</button>
+  </div>
+  <svg id="viz-l07-svg" role="img" aria-label="Ось времени события для двух карт. На ней корзины по 10 секунд с числом платежей, треугольники таймеров, вертикальные линии текущего времени и watermark."></svg>
+  <p class="viz-note" id="viz-l07-result"></p>
+</div>
+
+<p>Обрати внимание на две вещи. Двенадцать платежей серии создали один таймер, потому что все они попали в одну корзину. И таймеры карты c-1 срабатывают от платежа карты c-2. Watermark один на всю подзадачу, он не принадлежит ключу, и любая запись может продвинуть его и разбудить таймеры всех ключей.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Таймер запоминает текущий ключ в момент регистрации. Время, ключ и namespace вместе образуют таймер.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/InternalTimerServiceImpl.java" data-lines="248-252" data-must="keyContext.getCurrentKey(), namespace"></div>
+<p>Очередь таймеров в куче устроена как множество. Повторное добавление такого же таймера ничего не меняет, именно поэтому серия дала один таймер.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/HeapPriorityQueueSet.java" data-lines="121-124" data-must="putIfAbsent(element, element) == null"></div>
+<p>Когда приходит watermark, сервис достаёт таймеры по порядку, пока их время не больше watermark. Перед каждым вызовом он делает ключ таймера текущим, поэтому в <code>onTimer</code> состояние снова принадлежит нужной карте.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/InternalTimerServiceImpl.java" data-lines="328-347" data-must="triggerTarget.onEventTime(timer);"></div>
+<p>Оператор, в который Flink оборачивает твою функцию, получает этот вызов и передаёт его в <code>onTimer</code>. Рядом видно, что <code>processElement</code> вызывается прямо в потоке задачи. Методы никогда не работают одновременно, и синхронизация состояния не нужна.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/KeyedProcessOperator.java" data-lines="67-96" data-must="userFunction.onTimer(timer.getTimestamp(), onTimerContext, collector);"></div>
+<p>Документация называет приём с корзиной «timer coalescing». Таймер один на ключ и момент, поэтому округление времени таймера уменьшает их число. Таймеры тоже входят в снимок, и миллион лишних таймеров удлиняет чекпоинт.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/process_function/" target="_blank" rel="noopener">Process Function</a></p>
+</div>
+
+<h2>TTL, срок хранения</h2>
+<p>Таймер нужен, когда момент очистки зависит от логики, например от времени события. Если достаточно «забыть ключ через час после записи», проще включить TTL. Это настройка дескриптора, а Flink сам перестанет отдавать просроченное значение и со временем удалит его.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первое, что видно в <code>StateTtlConfig</code>, это единственная временная шкала. TTL считается только по времени обработки.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/state/StateTtlConfig.java" data-lines="84-89" data-must="ProcessingTime"></div>
+<p>Значения по умолчанию в построителе. Срок продлевается при создании и при записи, чтение его не продлевает. Просроченное значение не возвращается никогда, даже если физически ещё лежит в бэкенде. Фоновая очистка включена.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/state/StateTtlConfig.java" data-lines="153-165" data-must="private UpdateType updateType = OnCreateAndWrite;"></div>
+<p>При чтении обёртка TTL проверяет метку времени. Просроченное значение удаляется прямо здесь, и функция получает <code>null</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/ttl/AbstractTtlDecorator.java" data-lines="92-110" data-must="stateClear.run();"></div>
+<p>Документация добавляет то, чего не видно в этих строках. Фоновая очистка в куче по умолчанию проверяет 5 записей при каждом обращении к состоянию, у RocksDB её делает фильтр компакции. Если к состоянию никто не обращается, просроченные значения так и лежат. Цена TTL в памяти это дополнительный объект с меткой времени на каждое значение в куче и 8 байт на значение в RocksDB.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/state/" target="_blank" rel="noopener">Working with State, раздел State Time-To-Live</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">TTL живёт по настенным часам</strong>
+    <p>Если задание отстало на два часа и догоняет Kafka, платежи двухчасовой давности пролетают за минуты. Для TTL между ними прошли минуты, и дубликат будет пойман. В обратную сторону это тоже работает. Повтор, который пришёл через 61 минуту по часам TaskManager, пройдёт, даже если по времени события он рядом с оригиналом. Когда логика привязана к времени события, используй таймер.</p>
+  </div>
+</div>
+
+<h2>Кардинальность ключей</h2>
+<p>Размер состояния с ключом равен числу ключей, умноженному на размер состояния одного ключа. Оба множителя растут незаметно.</p>
+<p>Первый множитель задаёт поле в <code>keyBy</code>. Карт в генераторе 5000, и состояние правила частоты ограничено этим числом. Дедупликация разложена по <code>paymentId</code>, и каждый платёж там новый ключ. Без TTL состояние дедупликации растёт вечно, с TTL в час оно держится около «скорость умножить на час», то есть 720 000 ключей при 200 платежах в секунду. Прежде чем писать <code>keyBy</code>, спроси себя, сколько разных значений будет у поля через месяц.</p>
+<p>Второй множитель зависит от того, что ты хранишь на ключ. Самое простое правило частоты держит в <code>ListState</code> все платежи карты за минуту и на каждом платеже пересчитывает список. Под атакой это сотни объектов на карту. PayGuard хранит корзины, то есть в <code>MapState</code> лежит «начало 10-секундного интервала → число платежей». Корзин на карту не больше семи, сколько бы платежей ни было.</p>
+<p>У корзин есть цена, это точность. Правило берёт корзину целиком, если её конец позже начала минуты. Платёж, сделанный 65 секунд назад, может попасть в счёт, и окно фактически плавает от 60 до 70 секунд. Для антифрода это нормально. Если нужна точность до секунды, уменьши корзину, и таймеров станет больше.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Деталь, которая влияет на кардинальность в куче. <code>MapState.remove</code> у <code>HeapMapState</code> удаляет запись ключа целиком, когда словарь опустел.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/HeapMapState.java" data-lines="124-136" data-must="if (userMap.isEmpty()) {"></div>
+<p>А <code>keys()</code> отдаёт представление самого словаря. Удаление через его итератор убирает элемент, но пустой <code>HashMap</code> остаётся в таблице состояния.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/heap/HeapMapState.java" data-lines="151-154" data-must="userMap.keySet()"></div>
+<p>Наш <code>BucketedSum</code> удаляет корзины именно итератором. Для 5000 карт пустые словари ничего не стоят. При миллионах ключей после очистки стоит проверить <code>isEmpty()</code> и вызвать <code>clear()</code>.</p>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming похожую задачу решают <code>mapGroupsWithState</code> и <code>flatMapGroupsWithState</code>. У каждой группы там один объект состояния <code>GroupState</code> и один тайм-аут, по времени обработки или по watermark. Функция вызывается раз в micro-batch со всеми новыми записями группы, и тайм-аут тоже обрабатывается внутри очередного micro-batch. В Spark 4.0 появился <code>transformWithState</code> с несколькими переменными состояния, таймерами и TTL, он ближе к модели Flink.</p>
+<p>Во Flink у ключа сколько угодно именованных состояний и таймеров. Функция вызывается на каждую запись сразу, таймер срабатывает в момент, когда watermark прошёл его время. Цена этой свободы в том, что очистку ты проектируешь сам, и забытая очистка превращается в состояние, которое растёт месяцами.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l07">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Ключ дедупликации это paymentId, и каждый новый платёж создаёт новый ключ. Число карт тут ни при чём. Без TTL или таймера записи не удаляются никогда."
+       data-explanation-wrong="Посмотри, по какому полю сделан keyBy перед DeduplicateFunction. Сколько разных значений у этого поля через месяц работы?">
+    <h3 class="quiz-question">Коллега убрал TTL из DeduplicateFunction со словами «карт всего 5000, состояние маленькое». Что будет через месяц при 200 платежах в секунду?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Ничего, в состоянии 5000 флагов, по одному на карту</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>В состоянии около полумиллиарда флагов, потому что ключ это идентификатор платежа</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Flink сам удалит флаги после чекпоинта</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Корзина от 0 до 10 с кончается позже начала минуты, 5 с, и учитывается целиком. 6 + 5 = 11, это больше лимита 10. Окно с корзинами плавает от 60 до 70 секунд."
+       data-explanation-wrong="Посчитай, как sumSince проверяет корзину. Условие entry.getKey() + bucketMs &gt; fromMs. Для платежа в 65 с начало минуты равно 5 с.">
+    <h3 class="quiz-question">По карте прошло 6 платежей на 2-й секунде и 5 платежей на 65-й. Корзина 10 с, окно минута, лимит 10. Будет ли алерт на последнем платеже?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Да, корзина первых 10 секунд ещё считается</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Нет, между платежами больше минуты</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Нет, потому что таймер уже удалил первую корзину</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. TTL считается по времени обработки. Оригинал и повтор обработаны с разницей в минуты по часам TaskManager, флаг ещё жив, повтор выброшен."
+       data-explanation-wrong="Вспомни TtlTimeCharacteristic. Какая временная шкала у TTL есть во Flink 2.2?">
+    <h3 class="quiz-question">Задание два часа стояло под backpressure и теперь догоняет Kafka. Повтор платежа лежит в топике через 70 минут после оригинала по времени события. TTL дедупликации 1 час. Что произойдёт?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Повтор пройдёт, ведь между событиями больше часа</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Задание упадёт, потому что TTL нельзя сочетать с отставанием</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Повтор будет выброшен, если оба платежа обработаны в пределах часа по часам TaskManager</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

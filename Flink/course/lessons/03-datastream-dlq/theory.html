@@ -1,0 +1,236 @@
+<h2>Одна битая запись против целого задания</h2>
+<p>Ночью партнёр выкатывает новую версию сервиса, и в топик платежей попадает строка с обрезанным JSON. Парсер в задании бросает исключение. Дальше всё зависит от настроек, и ни один из вариантов по умолчанию тебя не обрадует.</p>
+<p>Без чекпоинтов (периодических снимков задания) задание переходит в состояние <code>FAILED</code> и перестаёт читать платежи, пока кто-то не запустит его заново. С чекпоинтами Flink перезапускает его и возвращается к смещениям из последнего снимка. Та же запись приезжает снова, и всё повторяется. Такую запись называют ядовитой (poison pill).</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверим три звена этой цепочки. Контракт функции прямо говорит, что исключение роняет операцию.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/functions/ProcessFunction.java" data-lines="62-70" data-must="Throwing an exception will cause the"></div>
+<p>Оператор вокруг твоей функции исключение не перехватывает. Никакого пропуска плохих записей на этом уровне нет.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/ProcessOperator.java" data-lines="60-66" data-must="userFunction.processElement"></div>
+<p>Что будет после падения, решает стратегия перезапуска (restart strategy). Её значение по умолчанию зависит от чекпоинтов. У <code>exponential-delay</code> число попыток по умолчанию равно <code>Integer.MAX_VALUE</code>, в документации оно обозначено как бесконечное.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/RestartStrategyOptions.java" data-lines="151-156" data-must="If checkpointing is disabled"></div>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/RestartStrategyOptions.java" data-lines="301-306" data-must="restart-strategy.exponential-delay.attempts-before-reset-backoff"></div>
+<p>В нашем <code>docker-compose.yml</code> стратегия не задана. Чекпоинты появятся только в уроке 11. Значит, сегодня одна брошенная наружу ошибка остановила бы задание насовсем.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/task_failure_recovery/" target="_blank" rel="noopener">Task Failure Recovery</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/" target="_blank" rel="noopener">Kafka connector</a></p>
+</div>
+
+<h2>Линия розлива</h2>
+<p>Представь завод лимонада. Бутылки едут по ленте, автомат клеит этикетки. Бутылка со сколом может заклинить автомат, и тогда встанет вся линия. После ремонта на ленту приедет та же бутылка, потому что с неё и начали.</p>
+<p>Поэтому перед автоматом ставят отбраковщик. Он сбрасывает плохую бутылку на боковой лоток и вешает бирку с причиной. Лента едет дальше, а контролёр смены разбирает лоток, когда дойдут руки.</p>
+<p>В Flink лента называется основным потоком, лоток называется побочным выходом (side output), а ящик с бирками это топик для отбракованных записей, dead letter queue или DLQ. Выбери вариант и посмотри на судьбу задания. Модель упрощённая, в ней 16 записей и две из них битые.</p>
+
+<div class="viz" id="viz-l03">
+  <p class="viz-title">Что делает одна битая запись</p>
+  <div class="viz-controls">
+    <label>Обработка ошибки
+      <select id="viz-l03-mode">
+        <option value="none">Исключение наружу, чекпоинтов нет</option>
+        <option value="restart">Исключение наружу, чекпоинты есть</option>
+        <option value="dlq">Побочный выход и DLQ</option>
+      </select>
+    </label>
+    <button class="primary" id="viz-l03-run" type="button">Запустить поток</button>
+  </div>
+  <svg id="viz-l03-svg" role="img" aria-label="Записи идут из Kafka через парсер. Хорошие попадают на выход, битые либо роняют задание, либо уходят в топик payments.dlq."></svg>
+  <p class="viz-note" id="viz-l03-result" aria-live="polite">Нажми кнопку. Зелёные точки это нормальные платежи, красные битые.</p>
+</div>
+
+<p>Такой же цикл есть в реальных замерах курса. В уроке 15 задание с CDC после первого <code>UPDATE</code> уходит в цикл <code>RESTARTING</code> из-за одной и той же ошибки, и само оттуда не выходит.</p>
+
+<h2>DataStream это план</h2>
+<p>Прежде чем чинить, разберёмся, из чего строится задание. <code>DataStream&lt;T&gt;</code> внешне похож на <code>Dataset&lt;T&gt;</code> в Spark. Это неизменяемое описание потока с известным типом, и каждый вызов вроде <code>map</code> или <code>process</code> возвращает новый объект. Ни одна запись при этом никуда не едет.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотри на метод, через который проходят преобразования с одним входом. Он создаёт узел плана <code>OneInputTransformation</code>, запоминает его в окружении и заворачивает в новый поток. Запуска операторов здесь нет.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/datastream/DataStream.java" data-lines="823-847" data-must="getExecutionEnvironment().addOperator(resultTransform)"></div>
+<p>Обрати внимание на аргумент <code>outTypeInfo</code>. Тип выхода Flink должен знать уже на этапе описания плана, к этому мы вернёмся ниже.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/overview/" target="_blank" rel="noopener">DataStream overview</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/overview/" target="_blank" rel="noopener">Operators</a></p>
+</div>
+
+<p>Основные преобразования, которые встретятся в курсе.</p>
+<table>
+<thead><tr><th>Вызов</th><th>Что делает</th><th>Где встретится</th></tr></thead>
+<tbody>
+<tr><td><code>map</code></td><td>Одна запись на входе, одна на выходе</td><td>Простые преобразования полей</td></tr>
+<tr><td><code>filter</code></td><td>Оставляет запись или выбрасывает её</td><td><code>drop-blank</code> из урока 2</td></tr>
+<tr><td><code>flatMap</code></td><td>Ноль или больше записей на одну входную</td><td>Разбиение пачки на отдельные события</td></tr>
+<tr><td><code>process</code></td><td>Как <code>flatMap</code>, плюс контекст с временем и побочными выходами, на потоке с ключом ещё таймеры и состояние</td><td><code>parse-payment</code> сегодня, урок 7</td></tr>
+<tr><td><code>keyBy</code></td><td>Разбивает поток по ключу, отдельного оператора не создаёт</td><td>Урок 4</td></tr>
+<tr><td><code>union</code>, <code>connect</code></td><td>Объединяют два потока</td><td>Уроки 8 и 9</td></tr>
+<tr><td><code>getSideOutput</code></td><td>Даёт поток из побочного выхода оператора</td><td><code>dlq-sink</code> сегодня</td></tr>
+<tr><td><code>sinkTo</code></td><td>Добавляет приёмник</td><td>Запись в Kafka сегодня</td></tr>
+</tbody>
+</table>
+<p>Ленивость тебе знакома по Spark, там план тоже начинает работать после <code>start()</code>. Разница в том, что происходит дальше. Spark в обычном режиме исполняет план заново на каждой порции. Flink один раз разворачивает его в операторы, и они живут, пока живёт задание.</p>
+
+<h2>Побочный выход</h2>
+<p>Разделить поток на хорошие и плохие записи можно двумя фильтрами, но тогда каждую запись придётся разбирать дважды, причём оба фильтра должны согласованно решать, что считать ошибкой. Побочный выход решает это за один проход. Функция один раз разбирает строку и отправляет результат либо в обычный <code>Collector</code>, либо в выход с меткой <code>OutputTag</code>. Типы двух выходов могут различаться. У нас основной поток содержит <code>PaymentEvent</code>, а побочный <code>RejectedRecord</code>.</p>
+
+<svg viewBox="0 0 860 200" role="img" aria-label="Схема задания. Kafka payments.raw, затем в одной вершине источник, parse-payment и два приёмника. Основной выход идёт в stdout, побочный через dlq-sink в Kafka payments.dlq." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l03" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="75" width="110" height="50" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="65" y="97">Kafka</text><text x="65" y="114" font-size="11">payments.raw</text>
+    <rect x="160" y="10" width="530" height="180" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="425" y="32" font-weight="700">Одна вершина, parallelism 2</text>
+    <rect x="175" y="75" width="110" height="50" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="230" y="97">Source</text><text x="230" y="114" font-size="11">payments-raw</text>
+    <rect x="325" y="75" width="120" height="50" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="385" y="97">process</text><text x="385" y="114" font-size="11">parse-payment</text>
+    <rect x="530" y="45" width="140" height="44" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="600" y="72">Sink: stdout</text>
+    <rect x="530" y="125" width="140" height="44" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="600" y="152">dlq-sink</text>
+    <text x="490" y="62" font-size="11">PaymentEvent</text>
+    <text x="490" y="168" font-size="11">RejectedRecord</text>
+    <rect x="730" y="122" width="120" height="50" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="790" y="144">Kafka</text><text x="790" y="161" font-size="11">payments.dlq</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l03)">
+    <path d="M120 100H173"/><path d="M285 100H323"/><path d="M445 90L528 68"/><path d="M445 110L528 146"/><path d="M670 147H728"/>
+  </g>
+</svg>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Метка обязана быть анонимным подклассом. Из-за стирания типов обычный <code>new OutputTag&lt;RejectedRecord&gt;("x")</code> не знает свой параметр. У анонимного подкласса он записан в метаданных класса. Без фигурных скобок конструктор бросит <code>InvalidTypesException</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/util/OutputTag.java" data-lines="60-74" data-must="forgetting to make the OutputTag an anonymous inner class"></div>
+<p>Вызов <code>context.output</code> передаёт запись тому же объекту <code>output</code>, что и обычный <code>collect</code>, только с меткой. Время записи сохраняется.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/ProcessOperator.java" data-lines="96-102" data-must="output.collect(outputTag"></div>
+<p>Дальше каждый следующий оператор в цепочке подключён через свой выход, и этот выход сравнивает метки. Чужую запись он просто игнорирует.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/CopyingChainingOutput.java" data-lines="53-62" data-must="this.outputTag.equals(outputTag)"></div>
+<p>На стороне плана <code>getSideOutput</code> создаёт отдельное преобразование и заодно проверяет, что под одним именем не просят два разных типа. Метки сравниваются только по строке с именем, поэтому имя в пределах оператора должно быть уникальным.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/datastream/SingleOutputStreamOperator.java" data-lines="416-435" data-must="new SideOutputTransformation"></div>
+<p>Это преобразование не порождает оператора. При переводе плана в граф оно становится виртуальным узлом, поэтому лишнего шага обработки побочный выход не добавляет.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/translators/SideOutputTransformationTranslator.java" data-lines="69-76" data-must="addVirtualSideOutputNode"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/side_output/" target="_blank" rel="noopener">Side Outputs</a></p>
+</div>
+
+<p>Писать в побочный выход можно из <code>ProcessFunction</code> и родственных функций, полный список есть в документации по ссылке выше. У <code>MapFunction</code> и <code>FlatMapFunction</code> контекста с методом <code>output</code> нет, поэтому парсер у нас написан на <code>ProcessFunction</code>.</p>
+<p>В Spark встроенного побочного выхода нет. Обычно строку разбирают через <code>from_json</code>, который на битых данных даёт <code>null</code>, и затем фильтруют результат на два направления внутри <code>foreachBatch</code>. Во Flink разделение происходит внутри одного оператора и на каждой записи.</p>
+
+<h2>Что класть в DLQ и что с ним делать</h2>
+<p>DLQ стоит проектировать как данные, которые придётся разбирать. Мы кладём три поля. Исходный текст нужен, чтобы после исправления парсера отправить запись обратно в <code>payments.raw</code>. Код причины позволяет считать отказы по видам. Время отказа показывает, когда началась проблема.</p>
+<p>Лог TaskManager эту задачу не решает, потому что из него неудобно переигрывать записи. Топик Kafka хранит их заданное время и читается любым потребителем. Цена в том, что теперь задание зависит от записи в этот топик. Если продюсер получит ошибку, она дойдёт до задачи и уронит её.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотрим, что значит <code>AT_LEAST_ONCE</code> у приёмника Kafka. Метод <code>flush</code> дожидается отправки всего накопленного и затем проверяет ошибки продюсера.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaWriter.java" data-lines="180-188" data-must="currentProducer.flush()"></div>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/KafkaWriter.java" data-lines="290-300" data-must="One or more Kafka Producer send requests have encountered exception"></div>
+<p>Вызывает его оператор приёмника непосредственно перед барьером чекпоинта.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/sink/SinkWriterOperator.java" data-lines="187-193" data-must="sinkWriter.flush(false)"></div>
+<p>Отсюда следует важное ограничение. Гарантия держится на чекпоинтах, а их у нас пока нет. Записи в DLQ всё равно доходят, потому что продюсер отправляет свои пачки сам, но обещать отсутствие потерь при падении мы сможем с урока 11.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/" target="_blank" rel="noopener">Kafka connector</a></p>
+</div>
+
+<h2>Зачем Flink знать твои типы</h2>
+<p>Тот же завод объясняет систему типов. Захваты автомата подогнаны под известную форму бутылки и работают быстро. Бутылку незнакомой формы приходится класть в универсальную коробку с пенопластом. Поместится почти всё, но коробка тяжелее, и без вскрытия не видно, что внутри.</p>
+<p>Flink описывает каждый тип объектом <code>TypeInformation</code>, а тот создаёт <code>TypeSerializer</code>, который переводит объект в байты и умеет его копировать. Сериализатор работает при передаче по сети между TaskManager (урок 4) и при записи в состояние (урок 7). Он нужен и внутри одной цепочки операторов, где сети нет вовсе.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Между операторами цепочки запись передаётся вызовом метода, но перед этим копируется сериализатором. Так оператор не сможет испортить объект, который держит его сосед.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/CopyingChainingOutput.java" data-lines="69-75" data-must="serializer.copy"></div>
+<p>Такая обёртка выбирается всегда, если не включено повторное использование объектов (<code>pipeline.object-reuse</code>, по умолчанию выключено).</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/OperatorChain.java" data-lines="910-924" data-must="new CopyingChainingOutput"></div>
+<p>Теперь о том, как Flink выбирает описание типа. Последние шаги <code>TypeExtractor</code> такие. Интерфейс сразу становится generic-типом, затем идёт попытка разобрать класс как POJO, а если она не удалась, снова generic.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/TypeExtractor.java" data-lines="2017-2039" data-must="return a generic type"></div>
+<p>Первая проверка внутри разбора POJO касается видимости класса. Она срабатывает и для record, поэтому record без <code>public</code> тоже уедет в Kryo.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/TypeExtractor.java" data-lines="2127-2136" data-must="is not public so it cannot be used as a POJO type"></div>
+<p>Классу нужен конструктор без аргументов, а для record эта проверка пропущена. Объекты record Flink создаёт через канонический конструктор, об этом написано в описании <code>PojoTypeInfo</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/TypeExtractor.java" data-lines="2221-2245" data-must="no default constructor extraction needs to be applied for Java records"></div>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/PojoTypeInfo.java" data-lines="63-65" data-must="record canonical constructor"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/types_serialization/#rules-for-pojo-types" target="_blank" rel="noopener">Rules for POJO types</a></p>
+</div>
+
+<p>Правила легко проверить на практике. Таблицу ниже мы получили вызовом <code>TypeInformation.of</code> на Flink 2.2.1 в обычном тесте, кластер для этого не нужен. Некоторые строки удивляют.</p>
+<table>
+<thead><tr><th>Тип</th><th>Что выбрал Flink</th><th>Комментарий</th></tr></thead>
+<tbody>
+<tr><td><code>public record PaymentEvent</code></td><td><code>PojoTypeInfo</code></td><td>Наш случай, все поля свои</td></tr>
+<tr><td>record без <code>public</code></td><td><code>GenericTypeInfo</code></td><td>Весь объект уходит в Kryo</td></tr>
+<tr><td>public record с полем <code>UUID</code></td><td><code>PojoTypeInfo</code>, поле <code>GenericType</code></td><td>Kryo спрятан внутри хорошего на вид типа</td></tr>
+<tr><td>Поле <code>LocalDate</code></td><td><code>GenericType</code></td><td>При этом <code>Instant</code> и <code>BigDecimal</code> получают свои сериализаторы</td></tr>
+<tr><td>Поле <code>List&lt;String&gt;</code></td><td><code>NullableList</code></td><td>Встроенная поддержка, нужен интерфейс и конкретный параметр</td></tr>
+<tr><td>Поле <code>ArrayList&lt;String&gt;</code> или просто <code>List</code></td><td><code>GenericType</code></td><td>Те же данные, но условие не выполнено</td></tr>
+<tr><td>Поле <code>Optional&lt;String&gt;</code></td><td><code>GenericType</code></td><td>Отдельного сериализатора нет</td></tr>
+<tr><td>Класс без конструктора без аргументов</td><td><code>GenericTypeInfo</code></td><td>Причина видна только в логе уровня INFO</td></tr>
+<tr><td>Класс с приватным полем без сеттера</td><td><code>GenericTypeInfo</code></td><td>Там же</td></tr>
+</tbody>
+</table>
+
+<h2>Kryo как ловушка</h2>
+<p>Kryo это универсальная библиотека сериализации, через которую Flink пропускает всё, что не распознал. Задание при этом работает, поэтому проблема долго остаётся незаметной. Документация называет такие типы чёрными ящиками и прямо говорит, что с POJO Flink работает эффективнее. Для состояния есть цена посерьёзнее. Схему типа, который хранится через Kryo, нельзя менять при восстановлении из savepoint, а для POJO такая возможность есть. В уроке 13 мы добавим поле в record и поднимем задание из старого savepoint, и это сработает.</p>
+<p>Поэтому в задании стоит <code>PipelineOptions.GENERIC_TYPES = false</code>, то есть настройка <code>pipeline.generic-types</code>. Любой тип, который пошёл бы через Kryo, теперь вызывает ошибку.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Запрет проверяется в одном месте, когда у generic-типа просят сериализатор. Флаг читается из конфигурации, которую мы передаём окружению.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/GenericTypeInfo.java" data-lines="82-93" data-must="Generic types have been disabled in the ExecutionConfig"></div>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/serialization/SerializerConfigImpl.java" data-lines="245-251" data-must="hasGenericTypesDisabled"></div>
+<p>Для POJO сериализаторы создаются для каждого поля. Вот почему поле <code>UUID</code> внутри record тоже будет поймано, хотя сам record получил <code>PojoTypeInfo</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/PojoTypeInfo.java" data-lines="350-360" data-must="fields[i].getTypeInformation().createSerializer(config)"></div>
+<p>Теперь важно, когда это происходит. Сериализаторы создаются при сборке графа, и <code>env.execute</code> собирает граф перед отправкой. Мы проверили это отдельным тестом с полем <code>UUID</code>. Описание потока прошло без ошибок, а <code>getStreamGraph</code> бросил исключение из <code>StreamGraph.addOperator</code>. Значит, ошибка типа вылезет при запуске задания, а записи в этот момент ещё не пошли.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraph.java" data-lines="1183-1187" data-must="typeInfo.createSerializer"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/environment/StreamExecutionEnvironment.java" data-lines="1838-1846" data-must="getStreamGraph()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/types_serialization/#disabling-kryo-fallback" target="_blank" rel="noopener">Disabling Kryo Fallback</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/schema_evolution/" target="_blank" rel="noopener">State Schema Evolution</a></p>
+</div>
+
+<p>В Spark роль <code>TypeInformation</code> играет <code>Encoder</code>. В Java-коде его передают явно, например <code>Encoders.bean</code> или <code>Encoders.kryo</code>, поэтому выбор Kryo виден в строке вызова. Во Flink тип определяется отражением, и переход на Kryo случается молча. Настройка <code>GENERIC_TYPES=false</code> делает этот переход видимым.</p>
+
+<h2>Где побочный выход не поможет</h2>
+<p>Наш <code>try/catch</code> защищает только код внутри <code>processElement</code>. До него запись уже прошла источник, а там своя обработка ошибок.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Источник превращает байты в строку через <code>SimpleStringSchema</code>. Сообщение Kafka с пустым значением (tombstone) приходит сюда как <code>null</code>, и конструктор <code>String</code> бросает <code>NullPointerException</code>. Мы проверили это отдельным вызовом метода.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/serialization/SimpleStringSchema.java" data-lines="74-79" data-must="new String(message, charset)"></div>
+<p>Обёртка коннектора передаёт значение как есть, а эмиттер оборачивает любую ошибку и не сдвигает смещение. Смещение обновляется только после успешного разбора.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/reader/deserializer/KafkaValueOnlyDeserializationSchemaWrapper.java" data-lines="48-52" data-must="message.value()"></div>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/reader/KafkaRecordEmitter.java" data-lines="50-57" data-must="Failed to deserialize consumer record"></div>
+<p>Способ обойти это есть в самом контракте схемы. Если <code>deserialize</code> вернул <code>null</code>, запись молча пропускается, поэтому своя схема с проверкой на <code>null</code> решит вопрос.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/serialization/DeserializationSchema.java" data-lines="81-86" data-must="if (deserialize != null)"></div>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Узкий catch и текст null</strong>
+    <p>Парсер ловит только <code>JsonProcessingException</code>. Строка из четырёх букв <code>null</code> это корректный JSON, Jackson возвращает Java <code>null</code> без исключения, и следующая строка падает с <code>NullPointerException</code>. Мы проверили это на тестовом стенде функции. Как закрыть этот случай, разобрано на вкладке с ответом.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l03">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Перезапуск вернёт задание к той же записи, и она снова его уронит. Запись надо вывести из основного пути, тогда смещение пойдёт дальше, а причина останется для разбора."
+       data-explanation-wrong="Посмотри, что меняется при перезапуске. Смещение восстанавливается из чекпоинта, значит, первой снова приедет та же запись, какие бы настройки времени ни стояли.">
+    <h3 class="quiz-question">Задание с чекпоинтами после релиза партнёра циклится в RESTARTING. В списке исключений одна и та же ошибка разбора JSON. Что исправит ситуацию?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Поднять задержку и число попыток в стратегии перезапуска</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Ловить ошибку разбора в функции и отправлять запись в побочный выход</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Сократить интервал чекпоинтов, чтобы терять меньше работы</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Для поля UUID Flink не нашёл своего сериализатора, поэтому его тип generic. Сериализатор record собирается из сериализаторов полей, и запрет срабатывает при сборке графа внутри env.execute."
+       data-explanation-wrong="Record действительно получит PojoTypeInfo, но сериализатор создаётся для каждого поля отдельно. Вспомни createPojoSerializer и момент, когда его вызывают.">
+    <h3 class="quiz-question">Коллега добавил в public record PaymentEvent поле UUID traceId. В задании стоит GENERIC_TYPES=false. Что произойдёт?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Всё заработает, record всегда считается POJO</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Исключение при запуске задания, ещё до обработки записей</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Задание запустится и упадёт на первом же платеже</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. ObjectMapper по умолчанию считает неизвестное поле ошибкой. Это JsonProcessingException, поэтому задание живёт, но все платежи уходят в DLQ с причиной bad-json. Именно для таких случаев нужна сигнализация на рост DLQ. Лечится настройкой FAIL_ON_UNKNOWN_PROPERTIES."
+       data-explanation-wrong="Открой ParsePaymentFunction и посмотри, как создан ObjectMapper. Дополнительных настроек там нет, а у Jackson по умолчанию включён FAIL_ON_UNKNOWN_PROPERTIES.">
+    <h3 class="quiz-question">Партнёр добавил в JSON платежа новое поле merchantName. ParsePaymentFunction использует ObjectMapper без настроек. Что ты увидишь?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Ничего, лишнее поле будет проигнорировано</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Задание упадёт при запуске из-за несовпадения схемы</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Задание работает, а все такие платежи уходят в DLQ</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

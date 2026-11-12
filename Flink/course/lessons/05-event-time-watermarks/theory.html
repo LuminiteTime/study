@@ -1,0 +1,176 @@
+<h2>Платёж из метро</h2>
+<p>Терминал в вагоне метро провёл оплату в 12:00:05 и отправил её только на станции, в 12:00:40. Правило PayGuard считает платежи карты за минуту. Если брать время прихода записи, платёж попадёт в чужую минуту, и счётчик карты окажется неверным.</p>
+<p>Вторая беда опаснее. Задание упало ночью, утром его подняли, и оно за пять минут дочитывает из Kafka два часа накопленных платежей. Если считать по часам сервера, двухчасовой поток уместится в несколько минут, и правило «больше 10 платежей за минуту» сработает на тысячах честных карт. Чтобы повторный прогон дал тот же ответ, что и живой, считать надо по времени, записанному в самом платеже.</p>
+
+<h2>Два времени одного платежа</h2>
+<p>У каждой записи есть время события (event time), момент, когда платёж случился. В нашем <code>PaymentEvent</code> это поле <code>eventTimeMs</code>, его ставит терминал. Есть и время обработки (processing time), это показания часов машины, на которой оператор Flink видит запись.</p>
+<p>Время обработки удобно, потому что ничего не нужно ждать. Результат при этом зависит от скорости сети, нагрузки и перезапусков, поэтому повторить его нельзя. Время события даёт воспроизводимый результат, но порождает вопрос, сколько ждать отставших. Платёж из метро пришёл на 35 секунд позже соседей, и система должна как-то решить, когда минута 12:00 закрыта.</p>
+
+<h2>Чеки в семейном бюджете</h2>
+<p>Представь, что ты ведёшь семейный бюджет по неделям. На каждом чеке напечатана дата покупки, это время события. Домашние отдают чеки, когда вспомнят, это время обработки. Сын носит чеки в кармане день-два, жена отдаёт сразу.</p>
+<p>Закрыть неделю, получив первый чек понедельника, нельзя, ведь сын ещё не вывернул карманы. Ты вводишь правило. Если самый свежий чек, который ты видел, датирован средой 18:00, а чеки задерживаются не больше двух суток, то всё до понедельника 18:00 уже пришло. Эта отметка и есть watermark. Чек, датированный раньше отметки, который всё-таки пришёл, называется поздним.</p>
+<p>Отметку ведёшь по каждому члену семьи отдельно, а неделю закрываешь по самому медленному. Если сын уехал в лагерь и чеков не приносит вовсе, неделя не закроется никогда. Тогда ты решаешь, что молчащего больше не ждёшь. Дальше по уроку каждое из этих правил найдётся в коде Flink.</p>
+
+<h2>Watermark как обещание</h2>
+<p>Watermark это служебный элемент потока с одним числом T. Он идёт по графу вместе с записями и сообщает операторам, что событий со временем T и раньше больше не ожидается. Получив его, оператор передвигает своё время события на T. Окна из урока 6 по этому сигналу закрываются и отдают результат.</p>
+<p>Позднее событие это запись, чья метка времени не больше текущего watermark оператора. Watermark только обещание, и оно бывает ложным. В цепочке этого урока поздние платежи проходят дальше, потому что ни один оператор их не отбрасывает. Как с ними поступает окно, разберём в уроке 6.</p>
+
+<h2>forBoundedOutOfOrderness изнутри</h2>
+<p>Стратегию watermark описывает <code>WatermarkStrategy</code>. Она создаёт два объекта. TimestampAssigner достаёт метку времени из записи. Генератор watermark (WatermarkGenerator) смотрит на метки и решает, какое обещание можно дать. Самый частый генератор задаётся методом <code>forBoundedOutOfOrderness(B)</code>, где B это допуск беспорядка, то есть насколько, по твоему предположению, запись может отстать от самой свежей.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Весь генератор помещается в два метода. На каждую запись он только запоминает наибольшую метку. Watermark выпускается в отдельном методе, который зовут периодически.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/eventtime/BoundedOutOfOrdernessWatermarks.java" data-lines="56-70" data-must="maxTimestamp - outOfOrdernessMillis - 1"></div>
+<p>Формула watermark получается такой. Это наибольшая увиденная метка минус B и ещё минус одна миллисекунда. Вычитание единицы делает обещание строгим, ведь событие с меткой ровно <code>max - B</code> ещё допустимо. Начальное значение подобрано так, чтобы до первой записи watermark был равен <code>Long.MIN_VALUE</code>.</p>
+<p>Как часто зовут <code>onPeriodicEmit</code>, задаёт настройка конвейера.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/PipelineOptions.java" data-lines="90-97" data-must="pipeline.auto-watermark-interval"></div>
+<p>По умолчанию раз в 200 мс. Значит, watermark отстаёт от самого свежего события на B плюс до 200 мс, об этом же говорит комментарий в <code>WatermarkStrategy</code>.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/event-time/generating_watermarks/" target="_blank" rel="noopener">Generating Watermarks</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/event-time/built_in/" target="_blank" rel="noopener">Builtin Watermark Generators</a></p>
+</div>
+
+<p>Разберём на числах при B, равном 10 секундам. Приходят платежи с метками 12:00:05, 12:00:12 и 12:00:09. После второго максимум равен 12:00:12, и ближайший периодический выпуск даст watermark 12:00:01.999. Третий платёж старше максимума, но новее watermark, поэтому он не поздний. Если следом придёт платёж с меткой 12:00:01, он окажется поздним.</p>
+<p>Выбор B это сделка. Большой допуск ловит почти все опоздания, зато каждое окно закрывается на B позже. Маленький даёт быстрый ответ и больше поздних событий. Наш генератор делает 5 % платежей опоздавшими на случайную величину до 30 секунд, а в проекте стоит B, равный 10 секундам. По расчёту около двух третей опоздавших отстанут сильнее допуска, это примерно 3 % потока. Настоящую долю покажет проба, которую ты напишешь в задании.</p>
+
+<p>Поиграй с моделью. Три партиции Kafka читает один источник. Кружки стоят на оси времени события, красные оказались поздними. Голубая черта на дорожке показывает watermark партиции, пунктир показывает общий watermark источника, а серая зона слева от него считается закрытой.</p>
+
+<div class="viz" id="viz-l05">
+  <p class="viz-title">Симулятор watermark</p>
+  <div class="viz-controls">
+    <label>Допуск беспорядка B <input type="range" id="viz-l05-bound" min="0" max="10" value="3"> <span id="viz-l05-bound-value">3 с</span></label>
+    <label>Наибольшее опоздание событий <input type="range" id="viz-l05-delay" min="0" max="10" value="5"> <span id="viz-l05-delay-value">5 с</span></label>
+  </div>
+  <div class="viz-controls">
+    <label><input type="checkbox" id="viz-l05-outage"> Партиция 2 молчит с 10-й по 20-ю секунду</label>
+    <label><input type="checkbox" id="viz-l05-idle"> withIdleness, 4 с</label>
+    <button class="primary" id="viz-l05-run" type="button">Запустить время</button>
+  </div>
+  <svg id="viz-l05-svg" role="img" aria-label="Три дорожки партиций с событиями на оси времени события, watermark каждой партиции и общий watermark источника."></svg>
+  <p class="viz-note" id="viz-l05-result">Нажми кнопку, и 30 секунд модельного времени пройдут за 10 настоящих.</p>
+</div>
+
+<p>Модель упрощена. Watermark здесь выпускается каждые 0,1 с модельного времени, а событие проверяется по watermark, выпущенному до его прихода. Попробуй три опыта. Поставь B больше наибольшего опоздания, и красных не останется. Включи молчание партиции без <code>withIdleness</code> и посмотри, где застрянет пунктир. Потом добавь <code>withIdleness</code> и посмотри, что станет с событиями вернувшейся партиции.</p>
+
+<h2>Почему разбор переехал в schema</h2>
+<p>Потребитель Kafka отдаёт записи пачками из разных партиций вперемешку. Внутри одной партиции порядок почти правильный, а смесь двух партиций, одна из которых отстала на минуту, выглядит как сплошной беспорядок. Flink умеет вести watermark отдельно для каждой партиции прямо в источнике. Для этого метка времени должна быть известна в момент, когда источник отдаёт запись.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Источник Kafka превращает байты в объект сразу после чтения. Обрати внимание на <code>consumerRecord.timestamp()</code>, это метка записи в Kafka, она уходит в выход вместе с объектом.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/source/reader/KafkaRecordEmitter.java" data-lines="50-58" data-must="consumerRecord.timestamp()"></div>
+<p>Выход, в который пишет эмиттер, создан для конкретного сплита. Сплит это кусок работы источника, у Kafka один сплит равен одной партиции. На каждую запись выход вызывает TimestampAssigner, а потом генератор watermark этого сплита.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/source/SourceOutputWithWatermarks.java" data-lines="104-111" data-must="timestampAssigner.extractTimestamp(record, timestamp)"></div>
+<p>Генератор создаётся отдельно на каждый сплит, поэтому у каждой партиции свой максимум.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/source/ProgressiveTimestampsAndWatermarks.java" data-lines="286-291" data-must="watermarksFactory.createWatermarkGenerator"></div>
+<p>Отсюда следует решение проекта. TimestampAssigner получает объект, который вернула схема десериализации. Если схема отдаёт сырую строку, достать <code>eventTimeMs</code> можно только повторным разбором JSON на каждой записи. Поэтому разбор переехал из отдельного оператора в <code>ParsedRecordSchema</code>.</p>
+<p>Можно было оставить разбор после источника и вызвать <code>assignTimestampsAndWatermarks</code>. В этом операторе один генератор на подзадачу, и партиции к нему приходят уже перемешанными.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/TimestampsAndWatermarksOperator.java" data-lines="95-111" data-must="watermarkGenerator ="></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/event-time/generating_watermarks/#watermark-strategies-and-the-kafka-connector" target="_blank" rel="noopener">Watermark Strategies and the Kafka Connector</a></p>
+</div>
+
+<h2>Минимум по входам</h2>
+<p>Как только у источника несколько партиций, нужно правило слияния. Оно одно на весь Flink. Общий watermark равен минимуму по входам, потому что обещание «ничего старше T» верно, только если его дал каждый вход. Так работает источник по своим сплитам, и так работает любой оператор, получающий данные от нескольких подзадач, например после <code>keyBy</code>.</p>
+
+<svg viewBox="0 0 860 230" role="img" aria-label="Четыре партиции Kafka с разными watermark. Каждая подзадача источника берёт минимум по двум своим партициям, а каждая подзадача после keyBy берёт минимум по двум подзадачам источника." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l05" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-size="12" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <rect x="10" y="10" width="140" height="40" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="80" y="35">P0 · 12:00:20</text>
+    <rect x="10" y="60" width="140" height="40" rx="6" fill="var(--color-surface)" stroke="var(--color-error)"/><text x="80" y="85">P1 · 12:00:14</text>
+    <rect x="10" y="130" width="140" height="40" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="80" y="155">P2 · 12:00:18</text>
+    <rect x="10" y="180" width="140" height="40" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="80" y="205">P3 · 12:00:25</text>
+    <rect x="220" y="20" width="230" height="70" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="335" y="48" font-weight="700">Источник, подзадача 0</text><text x="335" y="70">min(:20, :14) = 12:00:14</text>
+    <rect x="220" y="140" width="230" height="70" rx="8" fill="var(--color-accent-light)" stroke="var(--color-accent)"/><text x="335" y="168" font-weight="700">Источник, подзадача 1</text><text x="335" y="190">min(:18, :25) = 12:00:18</text>
+    <rect x="610" y="20" width="240" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-info)"/><text x="730" y="48" font-weight="700">После keyBy, подзадача 0</text><text x="730" y="70">min(:14, :18) = 12:00:14</text>
+    <rect x="610" y="140" width="240" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-info)"/><text x="730" y="168" font-weight="700">После keyBy, подзадача 1</text><text x="730" y="190">min(:14, :18) = 12:00:14</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l05)">
+    <path d="M150 30L218 48"/><path d="M150 80L218 62"/><path d="M150 150L218 168"/><path d="M150 200L218 182"/>
+    <path d="M450 50L608 50"/><path d="M450 65L608 165"/><path d="M450 165L608 65"/><path d="M450 180L608 180"/>
+  </g>
+</svg>
+<p>Одна отставшая партиция P1 задаёт время всего задания. Обе подзадачи после <code>keyBy</code> видят одинаковый watermark, потому что получают данные от одних и тех же подзадач источника. Это пригодится в практике, когда ты увидишь два одинаковых числа в REST.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Внутри источника watermark сплитов сливает <code>CombinedWatermarkStatus</code>. Берётся минимум по активным сплитам. Если активных не осталось, берётся максимум, и комментарий объясняет почему.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/eventtime/CombinedWatermarkStatus.java" data-lines="71-99" data-must="minimumOverAllActiveOutputs = Math.min"></div>
+<p>Между подзадачами то же делает <code>StatusWatermarkValve</code>, клапан на входе каждой задачи. Он хранит последний watermark каждого канала и держит каналы в куче, упорядоченной по watermark.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/watermarkstatus/StatusWatermarkValve.java" data-lines="165-186" data-must="watermarkMillis &gt; subpartitionStatus.watermark"></div>
+<p>Наружу уходит вершина кучи, то есть минимум, и только если он вырос.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/watermarkstatus/StatusWatermarkValve.java" data-lines="273-285" data-must="alignedSubpartitionStatuses.peek().watermark &gt; lastOutputWatermark"></div>
+<p>Из кода видны два свойства. Watermark канала, который пришёл меньше предыдущего, отбрасывается. Выходной watermark только растёт, поэтому время оператора никогда не идёт назад.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/time/" target="_blank" rel="noopener">Timely Stream Processing</a></p>
+</div>
+
+<h2>Тихая партиция и зависшее время</h2>
+<p>Минимум безжалостен к молчунам. В топике четыре партиции, генератор пишет в них без ключа, и сегодня все получают данные. В проде часто бывает иначе. Партицию читают, но в неё ночью никто не пишет, её watermark стоит, а вместе с ним стоит время всего задания. Окна не закрываются, состояние растёт, алертов нет, и при этом ни одной ошибки в логе.</p>
+<p>Лекарство это <code>withIdleness(timeout)</code>. Если по входу нет записей дольше таймаута, вход объявляется простаивающим (idle), и минимум считается без него.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Обёртка над любым генератором. Каждая запись сбрасывает таймер. При периодическом выпуске, если таймер истёк, вместо watermark выдаётся признак простоя.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/eventtime/WatermarksWithIdleness.java" data-lines="66-83" data-must="output.markIdle()"></div>
+<p>Таймер считает по часам машины, время событий здесь ни при чём. Источник даёт каждому сплиту свои часы и ставит их на паузу при обратном давлении, об этом комментарий в <code>ProgressiveTimestampsAndWatermarks</code>, поэтому перегруженный источник не объявит партицию простаивающей. Когда в партицию снова приходят записи, она становится активной, но общий watermark уже ушёл вперёд и обратно не вернётся.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/common/eventtime/CombinedWatermarkStatus.java" data-lines="101-106" data-must="combinedWatermark &gt; this.combinedWatermark"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/event-time/generating_watermarks/#dealing-with-idle-sources" target="_blank" rel="noopener">Dealing With Idle Sources</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Idleness меняет поздние события на быстрые окна</strong>
+    <p>Партиция, которая молчала из-за сбоя продюсера, потом выдаёт накопленное со старыми метками. Пока она считалась простаивающей, общее время ушло вперёд, и её платежи станут поздними. Таймаут выбирай больше обычных пауз в данных. В проекте стоит одна минута.</p>
+  </div>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming watermark задаётся вызовом <code>withWatermark("timestamp", "10 minutes")</code>. Движок берёт наибольшее время события, увиденное запросом по всем партициям сразу, вычитает порог и применяет результат с начала следующего micro-batch. Если запрос объединяет несколько потоков, по умолчанию берётся минимум их watermark, это задаёт <code>spark.sql.streaming.multipleWatermarkPolicy</code>.</p>
+<p>Во Flink watermark считается по каждой партиции отдельно, сливается минимумом на каждом шаге графа и выходит каждые 200 мс. Отставшая партиция во Flink сдерживает время. В Spark её данные рискуют оказаться за порогом, потому что максимум задают быстрые партиции. Простой во Flink объявляется явно через <code>withIdleness</code>.</p>
+<p class="doc-links">Документация: <a href="https://spark.apache.org/docs/latest/streaming/apis-on-dataframes-and-datasets.html#handling-late-data-and-watermarking" target="_blank" rel="noopener">Spark, Handling Late Data and Watermarking</a></p>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Одно место для правил времени</strong>
+    <p>Стратегия watermark часть контракта задания, как схема данных. В проекте она живёт в одном классе <code>PaymentWatermarks</code>. Когда допуск понадобится поменять по метрикам, правка будет в одной строке.</p>
+  </div>
+</div>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l05">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Метки платежей не зависят от того, когда их прочитали, поэтому окна по времени события получат тот же состав, что и в живом прогоне. Watermark просто быстрее пройдёт по старым часам."
+       data-explanation-wrong="Подумай, что меняется при догоняющем чтении. Часы машины бегут как обычно, а записей за минуту приходит в десятки раз больше. Метки внутри платежей остаются прежними.">
+    <h3 class="quiz-question">Задание лежало два часа и теперь дочитывает накопленное в 20 раз быстрее обычного. Правило считает платежи карты за минуту. Что произойдёт?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>По времени обработки и по времени события результат будет одинаково верным</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>По времени события счётчики совпадут с живым прогоном, по времени обработки правило сработает на честных картах</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Watermark остановится, пока задание не догонит конец топика</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Ночью одна партиция пустая, её watermark стоит, а общий равен минимуму. withIdleness убирает её из минимума, пока она молчит."
+       data-explanation-wrong="Ошибок нет, а время задания стоит. Вспомни, как сливаются watermark партиций и что бывает с минимумом, если один вход замолчал.">
+    <h3 class="quiz-question">Топик с 12 партициями. В одну пишут только платежи из маленькой страны, ночью их нет. Каждую ночь окна перестают закрываться, ошибок в логе нет. Что делать?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Увеличить допуск беспорядка до часа</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Поднять параллелизм источника до 12</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Добавить withIdleness с таймаутом больше обычных пауз</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Проба показывает, что поздние отстают от watermark до 20 секунд, а watermark сам отстаёт от максимума на B. Допуск около 30 секунд накроет 99 %, ценой более позднего закрытия окон."
+       data-explanation-wrong="Idleness касается молчащих входов, а интервал выпуска добавляет к задержке лишь доли секунды. Поздние события лечатся только допуском, подобранным по их распределению.">
+    <h3 class="quiz-question">B равен 10 с. Проба из задания показывает 4 % поздних платежей, а 99-й перцентиль их отставания от watermark равен 20 000 мс. Бизнес согласен ждать результат дольше. Что поменять?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Поднять B примерно до 30 секунд</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Уменьшить таймаут withIdleness до 10 секунд</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Выпускать watermark каждые 50 мс вместо 200</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

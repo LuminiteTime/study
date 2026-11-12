@@ -1,0 +1,29 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Правило повторяет <code>VelocityRule</code>. Окно 10 минут, корзина минута, поэтому корзин на карту не больше одиннадцати. В корзину добавляется сумма платежа вместо единицы. Таймер стоит на конце корзины плюс окно, и все платежи одной минуты делят его.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/pipeline/AmountSpikeRule.java"></div>
+<p>Имя <code>last-alert-at</code> совпадает с именем в правиле частоты, и конфликта здесь нет. Состояние принадлежит оператору, у каждого правила свой оператор со своим uid.</p>
+<p>Тест проверяет обе стороны окна. Платежи на 1 с и на 300 с лежат в пределах 10 минут, сумма 1200 больше лимита. Платёж на 700 с отстоит от первого больше чем на 10 минут, а корзина от 0 до 60 с кончается раньше начала окна, 100 с, и не учитывается.</p>
+<div data-code="lesson-07/src/test/java/dev/study/payguard/pipeline/AmountSpikeRuleTest.java"></div>
+<p>В задании оба правила подключены к одному разложению по карте, их алерты сливаются через <code>union</code> и идут в общий приёмник.</p>
+<div data-code="lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="90-109"></div>
+<p>Полная разница задания с прошлым уроком.</p>
+<div data-diff="lesson-06/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-07/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<p>Итог прогона всех тестов снапшота на стенде курса.</p>
+<pre data-lang="text" data-title="итог прогона" data-output>RESULT tests 26 fail 0
+jar bytes 24362847</pre>
+<p>Граф задания после отправки.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:8081/jobs/$JOB | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rule-velocity","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Вершин семь. Дедупликация стоит отдельно, потому что перед ней <code>keyBy</code> по платежу. Правила используют один <code>KeyedStream</code>, но у каждого свой вход через сеть, и сцепить их нельзя. Приёмник алертов тоже отдельная вершина, хотя рёбра к нему прямые. У него два входа, а сцепление требует ровно одного.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первое условие сцепления в генераторе графа задания проверяет число входящих рёбер у принимающего оператора.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamingJobGraphGenerator.java" data-lines="1711-1717" data-must="downStreamVertex.getInEdges().size() == 1"></div>
+<p>После <code>union</code> у приёмника два ребра, от <code>rule-velocity</code> и от <code>rule-amount-spike</code>, поэтому он начинает собственную цепочку.</p>
+</div>
+<p>На нашем стенде вершина <code>rule-amount-spike</code> получила 17264 платежа и выдала 0 алертов. Это ожидаемо. При 200 платежах в секунду на одну из 5000 карт приходится 2,4 платежа в минуту, то есть около 24 за 10 минут. Обычный платёж генератора стоит от 100 до 50 099 минимальных единиц, в среднем около 25 000, и за 10 минут карта тратит порядка 600 000. Серия из 25 мелких платежей добавляет меньше 130 000. До лимита 2 000 000 далеко. Чтобы увидеть правило в работе, отправь задание с заниженным лимитом, параметры <code>submit.sh</code> передаёт заданию как есть.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh --amount-spike-limit-minor 300000</pre>
+<p>Перед этим отмени текущее задание. В <code>fraud.alerts</code> должны появиться записи с <code>"ruleId":"amount-spike"</code> и текстом «потрачено ... за 10 минут». У каждой карты такой алерт будет не чаще раза в 10 минут.</p>
+</div>

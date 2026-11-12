@@ -1,0 +1,30 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="Total Process Memory|process.size|размер процесса">Total Process Memory</dt><dd>Вся память процесса TaskManager, ключ <code>taskmanager.memory.process.size</code>. В контейнере равна его лимиту.</dd>
+<dt data-match="Total Flink Memory|Total Flink">Total Flink Memory</dt><dd>Память процесса без JVM Metaspace и JVM Overhead. Из неё выделяются кучи, off-heap, сетевая и managed memory.</dd>
+<dt data-match="managed memory|managed">Managed memory</dt><dd>Нативная память вне кучи, которую распределяет сам Flink. В потоковых заданиях её получает RocksDB или ForSt, по умолчанию 0,4 от Total Flink Memory.</dd>
+<dt data-match="Task Heap|куча задач|кучи задач|куче задач|кучу задач">Task Heap</dt><dd>Куча JVM для операторов и пользовательского кода. Получает остаток Total Flink Memory после всех остальных областей.</dd>
+<dt data-match="Framework Heap|Framework Off-Heap|память фреймворка">Память фреймворка (framework memory)</dt><dd>Куча и off-heap память под внутренние нужды TaskManager, по 128 МиБ. В слоты не раздаётся.</dd>
+<dt data-match="сетевая память|сетевой памяти|сетевую память|Network memory">Сетевая память (network memory)</dt><dd>Direct-память под сетевые буферы между подзадачами. Доля 0,1 от Total Flink Memory, не меньше 64 МиБ.</dd>
+<dt data-match="JVM Overhead|Overhead">JVM Overhead</dt><dd>Запас нативной памяти под стеки потоков, кэш JIT и внутренние структуры JVM. Доля 0,1 от процесса в границах 192 МиБ и 1 ГиБ.</dd>
+<dt data-match="Metaspace">JVM Metaspace</dt><dd>Область JVM под метаданные загруженных классов, по умолчанию 256 МиБ, ограничена флагом <code>-XX:MaxMetaspaceSize</code>.</dd>
+<dt data-match="direct-памят|direct-буфер|off-heap">Off-heap и direct-память</dt><dd>Память вне кучи JVM. Direct-буферы Java ограничены флагом <code>-XX:MaxDirectMemorySize</code>, прочая нативная память ничем внутри JVM не ограничена.</dd>
+<dt data-match="OOMKilled">OOMKilled</dt><dd>Статус контейнера Kubernetes, который убило ядро Linux за превышение лимита памяти. Исключения в JVM при этом не возникает.</dd>
+<dt data-match="Kubernetes">Kubernetes</dt><dd>Система запуска контейнеров на кластере машин. Каждому контейнеру задаётся лимит памяти. Подробно в уроке 20.</dd>
+<dt data-match="RocksDB">RocksDB</dt><dd>Встраиваемое хранилище ключей и значений на диске, устроенное как LSM-дерево. Во Flink служит бэкендом состояния для больших объёмов.</dd>
+<dt data-match="LSM">LSM-дерево (log-structured merge tree)</dt><dd>Устройство хранилища, где записи копятся в памяти и сбрасываются на диск неизменяемыми файлами, а фоновые слияния поддерживают порядок.</dd>
+<dt data-match="memtable">Memtable</dt><dd>Отсортированная таблица RocksDB в памяти, куда попадают свежие записи. Заполненная memtable сбрасывается на диск SST-файлом.</dd>
+<dt data-match="SST">SST-файл (Sorted String Table)</dt><dd>Неизменяемый файл RocksDB с отсортированными парами ключ и значение.</dd>
+<dt data-match="компакци|compaction">Компакция (compaction)</dt><dd>Фоновое слияние SST-файлов RocksDB. Убирает перезаписанные версии и удалённые ключи, на этом шаге работает очистка по TTL.</dd>
+<dt data-match="блочн[а-я]* кэш|block cache|block_cache">Блочный кэш (block cache)</dt><dd>Кэш RocksDB в памяти для блоков данных, индексов и фильтров из SST-файлов. Во Flink общий для всех состояний слота.</dd>
+<dt data-match="write buffer manager|менеджер буферов записи|менеджера буферов записи|менеджер буферов">Менеджер буферов записи (write buffer manager)</dt><dd>Компонент RocksDB, ограничивающий общую память всех memtable. Во Flink учитывает её в блочном кэше слота.</dd>
+<dt data-match="Блума|Bloom">Фильтр Блума (Bloom filter)</dt><dd>Компактная структура, которая быстро отвечает, что ключа в файле точно нет. Позволяет RocksDB не читать лишние SST-файлы.</dd>
+<dt data-match="семейство колонок|column family">Семейство колонок (column family)</dt><dd>Отдельное пространство ключей внутри RocksDB со своими memtable. Во Flink каждое состояние оператора это своё семейство колонок.</dd>
+<dt data-match="ForSt">ForSt</dt><dd>Бэкенд состояния Flink 2.x, устроенный почти так же, как RocksDB. Умеет держать SST-файлы во внешнем хранилище и работает с асинхронным доступом. Экспериментальный.</dd>
+<dt data-match="disaggregated|разделённое хранение">Разделённое хранение состояния (disaggregated state)</dt><dd>Режим Flink 2.x, в котором основная копия состояния лежит во внешнем хранилище вроде S3, а локальный диск служит кэшем.</dd>
+<dt data-match="State V2|асинхронный API">State V2</dt><dd>Новый API состояния Flink 2.x с асинхронными методами, которые возвращают <code>StateFuture</code>. Включается вызовом <code>enableAsyncState()</code>.</dd>
+<dt data-match="StateFuture">StateFuture</dt><dd>Результат асинхронного обращения к состоянию. Продолжение обработки задаётся методами <code>thenAccept</code>, <code>thenApply</code>, <code>thenCompose</code>.</dd>
+<dt data-match="capacity planning|расчёт ресурсов">Capacity planning</dt><dd>Расчёт ресурсов задания заранее, по размеру состояния, скорости потока и запасу на восстановление.</dd>
+<dt data-match="Prometheus">Prometheus</dt><dd>Система сбора метрик. Периодически опрашивает процессы Flink и хранит временные ряды, подробно в уроке 17.</dd>
+<dt data-match="memoryOverhead|spark.executor">Память экзекутора Spark</dt><dd><code>spark.executor.memory</code> задаёт кучу экзекутора, <code>spark.executor.memoryOverhead</code> память вне кучи. Вместе они дают размер контейнера.</dd>
+</dl>

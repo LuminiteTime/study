@@ -1,0 +1,20 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Валидатор не знает о Flink и не бросает исключений. Отказ здесь это обычный результат, поэтому он возвращается как значение. Класс закрыт от других пакетов, потому что пользуется им только <code>ParsePaymentFunction</code>. Сериализатор ему не нужен, по потоку объекты этого класса не ходят.</p>
+<div data-code="lesson-03/src/main/java/dev/study/payguard/pipeline/PaymentValidator.java"></div>
+<p>Условия написаны как <code>&lt;= 0</code> из-за поведения Jackson. Отсутствующее поле типа <code>long</code> он заполняет нулём, а <code>String</code> значением <code>null</code>. Мы проверили это прогоном. Платёж без <code>amountMinor</code> уходит в DLQ с причиной <code>non-positive-amount</code>. Отличить отсутствие суммы от нулевой суммы при таких типах нельзя, для этого поле должно быть <code>Long</code>.</p>
+<div data-code="lesson-03/src/test/java/dev/study/payguard/pipeline/PaymentValidatorTest.java"></div>
+<p>Тест обходится без тестового стенда и выполняется за миллисекунды. Функцию проверяем отдельно, там интересна только маршрутизация. Итог прогона всего снапшота на стенде курса выглядит так. В нём 11 тестов, это 4 из генератора, 2 из функции и 5 из валидатора.</p>
+<pre data-lang="text" data-title="итог прогона" data-output>RESULT tests 11 fail 0
+jar bytes 24333158</pre>
+
+<h3>Что снапшот пока не закрывает</h3>
+<p>Эти случаи в код курса не вошли, поэтому реши сам, закрывать ли их у себя. Все проверены прогоном на тестовом стенде и отдельными вызовами.</p>
+<ul>
+  <li>Текст <code>null</code>. Jackson возвращает Java <code>null</code>, и валидатор падает с <code>NullPointerException</code>, которое никто не ловит. В отличие от остальных битых записей, эта уронит задание. Добавь в функцию проверку <code>payment == null</code> перед вызовом валидатора и отправляй такую запись в DLQ с <code>bad-json</code>.</li>
+  <li>Лишние поля. Если новые поля партнёра не считаются ошибкой, настрой <code>mapper</code> через <code>configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)</code> в <code>open</code>.</li>
+  <li>Tombstone в <code>payments.raw</code>. <code>SimpleStringSchema</code> падает раньше функции. Нужна своя схема, которая возвращает <code>null</code> для <code>null</code>, контракт такую запись пропускает.</li>
+</ul>
+<p>Заодно можно закрепить типы тестом. Вызов <code>PojoTestUtils.assertSerializedAsPojoWithoutKryo(PaymentEvent.class)</code> из <code>flink-test-utils</code> проходит для наших record и падает, если в них появится поле <code>UUID</code>. Ошибка всплывёт при обычной сборке.</p>
+</div>

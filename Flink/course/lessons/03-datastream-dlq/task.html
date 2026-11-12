@@ -1,0 +1,21 @@
+<h2>Задание. Напиши PaymentValidator</h2>
+<p>Сейчас вместо проверок стоит заглушка, и платёж с отрицательной суммой спокойно идёт дальше. Замени её настоящим валидатором и напиши для него тест.</p>
+<p>Класс <code>dev.study.payguard.pipeline.PaymentValidator</code> доступен только внутри пакета, экземпляры не создаются. Метод <code>static Optional&lt;String&gt; rejectionReason(PaymentEvent payment)</code> возвращает код причины или пустой <code>Optional</code>. Проверки идут в порядке из таблицы, срабатывает первая подходящая.</p>
+<table>
+<thead><tr><th>Условие</th><th>Код причины</th></tr></thead>
+<tbody>
+<tr><td>Пустой или отсутствующий <code>paymentId</code>, <code>cardId</code> или <code>merchantId</code></td><td><code>missing-id</code></td></tr>
+<tr><td>Сумма не больше нуля</td><td><code>non-positive-amount</code></td></tr>
+<tr><td>Валюта отсутствует или это не три заглавные латинские буквы</td><td><code>bad-currency</code></td></tr>
+<tr><td>Время события не больше нуля</td><td><code>missing-event-time</code></td></tr>
+</tbody>
+</table>
+<p>Тест <code>PaymentValidatorTest</code> лежит рядом с тестом функции. В нём должны быть проверка корректного платежа и по одному отказу на каждую причину.</p>
+<p>Готово, если выполнены все условия.</p>
+<ol>
+  <li><code>./gradlew test</code> проходит, и заглушки больше нет.</li>
+  <li>Новый тест обходится без Flink и без тестового стенда, это обычный JUnit.</li>
+  <li>После <code>./gradlew shadowJar</code> и нового запуска задания <code>payments.dlq</code> продолжает получать только <code>bad-json</code>, потому что генератор создаёт корректные платежи.</li>
+</ol>
+<p>Подсказка первая. Подумай, что сделает Jackson с record, если в JSON нет поля <code>amountMinor</code> типа <code>long</code>. Ответ объясняет формулировку некоторых условий.</p>
+<p>Подсказка вторая. Подумай, почему валидатор удобнее сделать обычной статической функцией от <code>PaymentEvent</code>, и что от этого выигрывает тест.</p>

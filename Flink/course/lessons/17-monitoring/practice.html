@@ -1,0 +1,135 @@
+<h2>Что будет в конце</h2>
+<p>Рядом с кластером работают Prometheus на порту 9090 и Grafana на порту 3000. Prometheus раз в 10 секунд опрашивает JobManager и TaskManager и проверяет пять правил алертов. В Grafana сам появляется дашборд PayGuard с девятью панелями, от входного потока до сборки мусора. В задании появился свой оператор, который считает алерты по каждому правилу антифрода.</p>
+<p>Правило <code>PayGuardKafkaLagHigh</code> и панель «Лаг Kafka» относятся к заданию урока, их пока не добавляй. Ниже файлы показаны без них.</p>
+
+<h2>Шаг 1. Счётчик алертов по правилам</h2>
+<p>Системные метрики Flink ничего не знают о бизнесе. Сколько алертов выдаёт правило <code>velocity</code> и не замолчало ли <code>card-testing</code>, может сказать только твой код. Создай <code>src/main/java/dev/study/payguard/pipeline/AlertMetrics.java</code>.</p>
+<div data-code="lesson-17/src/main/java/dev/study/payguard/pipeline/AlertMetrics.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-17/src/main/java/dev/study/payguard/pipeline/AlertMetrics.java" data-lines="11-29"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Обычный <code>map</code>, который возвращает запись без изменений. <code>RichMapFunction</code> нужна ради доступа к контексту выполнения, а через него к группе метрик.</p>
+      <p class="tl">Карта счётчиков помечена <code>transient</code>. Функцию Flink сериализует при отправке на кластер, а счётчики живут только внутри запущенной подзадачи.</p>
+      <p class="tl">В <code>open</code> карту создаём заново. Метод вызывается в каждой подзадаче перед первой записью.</p>
+      <p class="tl">На каждую запись берём счётчик правила и увеличиваем его. <code>computeIfAbsent</code> регистрирует счётчик при первом алерте этого правила, поэтому список правил коду знать не нужно.</p>
+      <p class="tl">Регистрация. <code>addGroup("rule", ruleId)</code> делает ключ частью имени, а значение меткой. В Prometheus получится <code>flink_taskmanager_job_task_operator_rule_alerts{rule="velocity"}</code>.</p>
+    </div>
+  </div>
+</div>
+<p>Правил в PayGuard пять, поэтому рядов будет пять на подзадачу. Счётчик считает алерты, прошедшие через оператор. Если чекпоинт не завершится и задание восстановится, часть алертов пройдёт через него второй раз, и счётчик их тоже учтёт. Для графика скорости это не важно, для точного учёта есть сам топик <code>fraud.alerts</code>.</p>
+<p>Вставь оператор перед приёмником алертов в <code>PayGuardJob</code>.</p>
+<div data-diff="lesson-16/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-17/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<p>Имя оператора попадёт в метку <code>operator_name</code>, а <code>uid</code> нужен, как и везде, чтобы savepoint нашёл состояние операторов после изменения графа. Своего состояния у <code>alert-metrics</code> нет.</p>
+
+<h2>Шаг 2. Включи репортер и добавь сервисы</h2>
+<p>Все изменения в <code>docker-compose.yml</code>.</p>
+<div data-diff="lesson-16/docker-compose.yml lesson-17/docker-compose.yml"></div>
+<ul>
+  <li><code>metrics.reporter.prom.factory.class</code> подключает репортер. Слово <code>prom</code> это произвольное имя репортера, по нему группируются остальные его настройки. Переменная <code>FLINK_PROPERTIES</code> общая для JobManager и TaskManager, поэтому HTTP-сервер поднимется в обоих.</li>
+  <li><code>metrics.reporter.prom.port: 9249</code> совпадает со значением по умолчанию. Мы пишем его явно, чтобы порт был виден рядом с <code>prometheus.yml</code>, где на него ссылаются.</li>
+  <li><code>metrics.latency.interval: 0</code> тоже значение по умолчанию. Строка напоминает, что latency tracking выключен сознательно. Маркеры задержки дают гистограммы между каждой парой подзадач, и документация советует включать их только для отладки.</li>
+  <li>Prometheus получает два файла только для чтения, конфигурацию и правила. Тома под данные нет, история метрик пропадёт при пересоздании контейнера, для учебного стенда это нормально.</li>
+  <li>Grafana пускает без логина с правами администратора. Это удобно на своей машине и недопустимо на общем сервере. Папка <code>provisioning</code> описывает источник данных и откуда брать дашборды, папка <code>dashboards</code> хранит сам JSON.</li>
+</ul>
+<p>Отдельный SQL-кластер из уроков 14 и 15 использует свой блок настроек, репортера в нём нет, и Prometheus его не опрашивает.</p>
+
+<h2>Шаг 3. Конфигурация Prometheus</h2>
+<p>Создай <code>monitoring/prometheus.yml</code>.</p>
+<div data-code="lesson-17/monitoring/prometheus.yml"></div>
+<p><code>scrape_interval</code> задаёт частоту опроса, <code>evaluation_interval</code> частоту проверки правил. Десять секунд дают Prometheus шесть точек в минуту, этого хватает для <code>rate</code> за минуту. В <code>targets</code> адреса внутри сети Compose, порт 9249 наружу не проброшен. Все ряды получат метку <code>job="flink"</code> по имени блока и метку <code>instance</code> с адресом цели. Не путай её с меткой <code>job_name</code>, которая пришла из Flink и содержит имя задания. Список <code>static_configs</code> знает ровно перечисленные адреса. Второй TaskManager в этот список сам не попадёт, в Kubernetes для этого используют обнаружение целей.</p>
+
+<h2>Шаг 4. Правила алертов</h2>
+<p>Создай <code>monitoring/alerts.yml</code> с пятью правилами. Шестое, на лаг, допишешь в задании.</p>
+<div data-code="lesson-17/monitoring/alerts.yml" data-lines="1-42"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-17/monitoring/alerts.yml" data-lines="4-24"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl"><code>increase(...[5m])</code> считает, на сколько вырос счётчик перезапусков за пять минут. Больше нуля значит, что задание падало. <code>for</code> нет, алерт загорается на первой же проверке и гаснет через пять минут после последнего перезапуска.</p>
+      <p class="tl">Метка <code>severity</code> пригодится Alertmanager для маршрутизации. В аннотации <code>summary</code> текст для человека.</p>
+      <p class="tl"><code>lastCheckpointCompletedTimestamp</code> хранит время в миллисекундах, а <code>time()</code> возвращает секунды, отсюда деление на 1000. Деление выполняется раньше вычитания. Правило срабатывает, если успешного чекпоинта нет больше двух минут, и это держится ещё минуту.</p>
+      <p class="tl">Критичность выше, потому что без чекпоинтов транзакции Kafka не фиксируются, и алерты не видны потребителям.</p>
+      <p class="tl">Серия неудач, больше двух за десять минут. Одиночный отказ после деплоя сюда не попадёт.</p>
+    </div>
+  </div>
+</div>
+<p>Правило <code>PayGuardBackpressure</code> берёт максимум по <code>task_name</code>, чтобы в алерте было видно, какая задача страдает, а подзадачи одной задачи схлопнулись в один ряд. Пять минут выдержки отсекают короткие всплески, например во время чекпоинта.</p>
+<p>Правило <code>PayGuardSourceSilent</code> появилось после аварийного сценария, который ты повторишь в шаге 8. Функция <code>absent</code> возвращает ряд со значением 1, если выражение внутри не нашло ни одного ряда, и пустой результат, если нашло. Так «нет данных» превращается в условие, на которое можно повесить алерт. Значение метки <code>operator_name</code> записано так, как его выдал фильтр репортера.</p>
+
+<h2>Шаг 5. Grafana из файлов</h2>
+<p>Grafana умеет при старте читать источники данных и дашборды из файлов. Это называется provisioning, и тогда дашборд живёт в git вместе с кодом. Создай источник данных <code>monitoring/grafana/provisioning/datasources/prometheus.yml</code>.</p>
+<div data-code="lesson-17/monitoring/grafana/provisioning/datasources/prometheus.yml"></div>
+<p>Адрес <code>http://prometheus:9090</code> внутренний, запросы делает сервер Grafana (<code>access: proxy</code>). <code>uid: prometheus</code> фиксирован, по нему на источник ссылается каждая панель. Без явного uid Grafana сгенерирует случайный, и JSON дашборда перестанет совпадать.</p>
+<p>Провайдер дашбордов <code>monitoring/grafana/provisioning/dashboards/payguard.yml</code> говорит, в какой папке лежат JSON-файлы.</p>
+<div data-code="lesson-17/monitoring/grafana/provisioning/dashboards/payguard.yml"></div>
+<p>Сам дашборд <code>monitoring/grafana/dashboards/payguard.json</code>. Начало файла и первая панель.</p>
+<div data-code="lesson-17/monitoring/grafana/dashboards/payguard.json" data-lines="1-39"></div>
+<p>Каждая панель устроена одинаково. <code>gridPos</code> задаёт место на сетке шириной 24 клетки, <code>datasource</code> ссылается на источник по uid, <code>unit</code> говорит Grafana, как подписывать ось, а в <code>targets</code> лежат запросы PromQL. Место справа от первой панели (<code>x</code> 12, <code>y</code> 0) оставлено под панель лага из задания. Остальные панели идут сразу за первой.</p>
+<div data-code="lesson-17/monitoring/grafana/dashboards/payguard.json" data-lines="68-313"></div>
+<p>Что в них стоит заметить.</p>
+<ul>
+  <li>Отставание по времени события берётся как максимум по подзадачам источника. Отстающая подзадача важнее средней.</li>
+  <li>На панели занятости два запроса, busy и backpressure, оба максимумом по задаче. Читать эту пару научимся в уроке 18.</li>
+  <li>Размер чекпоинта показан двумя рядами. <code>lastCheckpointSize</code> это сколько записано в последний раз, <code>lastCheckpointFullSize</code> это полный объём состояния. При инкрементальных чекпоинтах RocksDB первый заметно меньше второго.</li>
+  <li>Алерты в минуту считаются как <code>rate</code> за минуту, умноженный на 60, и складываются по метке <code>rule</code>. После перезапуска задачи счётчики начинают с нуля, и <code>rate</code> корректно принимает это за сброс.</li>
+  <li>Время GC берётся из <code>Status.JVM.GarbageCollector.All.Time</code>, суммы по всем сборщикам. Это растущий итог в миллисекундах, а <code>rate</code> превращает его в миллисекунды сборки на секунду работы.</li>
+</ul>
+
+<h2>Шаг 6. Собери, подними и отправь</h2>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+./scripts/submit.sh
+./gradlew loadgen --args="--rate 200"</pre>
+<p>Сначала сборка, потом <code>up</code>, иначе Docker смонтирует пустую <code>build/libs</code>. Это та же ловушка, что и раньше. Флаг <code>--wait</code> дожидается запуска всех контейнеров, включая новые Prometheus и Grafana. Генератор оставь работать в отдельном терминале.</p>
+<p>Проверь, что Prometheus видит обе цели. Его HTTP API отвечает на порту 9090.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:9090/api/v1/targets \
+  | jq -r '.data.activeTargets[] | "\(.scrapeUrl) \(.health)"'</pre>
+<p>Для каждой цели должно стоять <code>up</code>. Если у <code>taskmanager:9249</code> стоит <code>down</code>, посмотри лог TaskManager. При старте репортер пишет строку <code>Started PrometheusReporter HTTP server on port 9249</code>, это текст из кода, который мы читали в теории.</p>
+<p>Посчитай, сколько разных имён метрик Prometheus уже знает.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:9090/api/v1/label/__name__/values | jq '.data | length'</pre>
+<p>На нашем стенде при работающем задании было 374 имени. Точное число у тебя может отличаться, оно зависит от операторов в задании и версии клиента Kafka.</p>
+
+<h2>Шаг 7. Прочитай дашборд</h2>
+<p>Открой <code>http://localhost:3000</code>, логин не спросят, дашборд PayGuard уже в списке. Вот что показали панели на нашем стенде при 200 платежах в секунду.</p>
+<table>
+<thead><tr><th>Панель</th><th>Значение</th><th>Как читать</th></tr></thead>
+<tbody>
+<tr><td>Платежей в секунду на входе</td><td>193</td><td>Близко к заданным 200. Meter усредняет за минуту, поэтому за изменением нагрузки он следует с опозданием</td></tr>
+<tr><td>Отставание по времени события</td><td>минус 23 мс</td><td>Задание успевает за потоком. Минус означает расхождение часов генератора и контейнера</td></tr>
+<tr><td>Длительность чекпоинта</td><td>286 мс</td><td>Много меньше интервала 15 с, запас огромный</td></tr>
+<tr><td>Размер чекпоинта</td><td>записано 3475883 байт, полное состояние 12811127 байт</td><td>Инкрементальный чекпоинт записал около 27 % состояния</td></tr>
+<tr><td>Алерты по правилам</td><td>43 в минуту в сумме</td><td>Если линия одного правила упала в ноль, а платежи идут, правило сломано</td></tr>
+<tr><td>Куча TaskManager</td><td>431 МБ из 698 МБ</td><td>Запас есть. Как Flink делит память процесса, разберём в уроке 19</td></tr>
+</tbody>
+</table>
+<p>Лаг Kafka в этом прогоне был 0. Панель для него ты добавишь в задании.</p>
+<p>Любой запрос панели можно выполнить и без Grafana. Например, алерты по правилам за последнюю минуту.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:9090/api/v1/query \
+  --data-urlencode 'query=sum by (rule) (rate(flink_taskmanager_job_task_operator_rule_alerts{job_name="payguard"}[1m])) * 60' \
+  | jq -r '.data.result[] | "\(.metric.rule) \(.value[1])"'</pre>
+<p>Флаг <code>--data-urlencode</code> кодирует фигурные скобки и кавычки запроса. <code>curl</code> с этим флагом сам переключается на POST, и Prometheus принимает запрос в теле.</p>
+
+<h2>Шаг 8. Сломай задание и посмотри на алерты</h2>
+<p>Состояние правил удобно смотреть на странице <code>http://localhost:9090/alerts</code> или через API.</p>
+<pre data-lang="bash" data-title="терминал">curl -s localhost:9090/api/v1/alerts \
+  | jq -r '.data.alerts[] | "\(.labels.alertname) \(.state)"'</pre>
+<p>Пустой вывод значит, что ни одно правило не в pending и не в firing. Первый сценарий это внезапная смерть TaskManager. Скрипт из урока 11 убивает его сигналом SIGKILL, поднимает снова и ждёт восстановления из чекпоинта.</p>
+<pre data-lang="bash" data-title="терминал">./scripts/chaos-kill-tm.sh</pre>
+<p>На стенде задание восстановилось за 15 секунд, а <code>PayGuardJobRestarted</code> перешёл в firing через 25 секунд после убийства. Разница складывается из ожидания следующего опроса и следующей проверки правил, каждое до 10 секунд. Через пять минут без новых перезапусков алерт погаснет сам.</p>
+<p>Второй сценарий длиннее. TaskManager останавливается штатно и 100 секунд не возвращается. У сервиса в Compose стоит <code>restart: unless-stopped</code>, а ручная остановка этой политикой не перезапускается.</p>
+<pre data-lang="bash" data-title="терминал">docker compose stop taskmanager
+sleep 100
+docker compose start taskmanager</pre>
+<p>Во время простоя на стенде <code>PayGuardCheckpointsFailing</code> перешёл в firing. Задаче негде работать, и каждая попытка чекпоинта заканчивается отказом. Правило на лаг, которое ты напишешь в задании, в первом прогоне этого сценария уже было в <code>alerts.yml</code> и не сработало ни разу. Метрика лага живёт в TaskManager и исчезла вместе с ним. Именно после этого прогона мы добавили <code>PayGuardSourceSilent</code> на <code>absent</code>. По своему выражению оно загорается через минуту после того, как ряд источника пропал. Повтори сценарий и проверь это сам, на нашем стенде повторный прогон с этим правилом не записан.</p>
+<p>Через 60 секунд после возврата TaskManager лаг на стенде был 11220 записей, а правило на лаг стояло в pending и ждало свои две минуты. За время простоя в топике накопились платежи, и задание их догоняет. Если оно догонит быстрее, чем пройдёт выдержка, алерт не загорится. Это то же поведение, что ты видел в модели на вкладке теории.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Правило, которое ни разу не срабатывало, не проверено</strong>
+    <p>Ошибку в правиле на лаг мы нашли только потому, что сломали стенд нарочно. Опечатка в имени метрики или в значении метки даёт тот же эффект, выражение всегда пустое, и Prometheus молча считает, что всё хорошо. Каждое новое правило стоит один раз довести до firing руками.</p>
+  </div>
+</div>

@@ -1,0 +1,25 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="broadcast state|BroadcastState">Broadcast state</dt><dd>Состояние оператора, копия которого есть в каждой его подзадаче. Пишется только со стороны широковещательного потока, читается при обработке остальных записей. Устроено как словарь и живёт в куче JVM.</dd>
+<dt data-match="широковещательн|BroadcastStream">Широковещательный поток (BroadcastStream)</dt><dd>Поток, каждая запись которого доставляется во все подзадачи следующего оператора. Получается вызовом broadcast с дескрипторами состояния.</dd>
+<dt data-match="BroadcastPartitioner|BROADCAST">Разбиение BROADCAST</dt><dd>Способ раздачи записей, при котором каждая запись копируется во все каналы к следующему оператору. Его ставит BroadcastPartitioner.</dd>
+<dt data-match="KeyedBroadcastProcessFunction">KeyedBroadcastProcessFunction</dt><dd>Функция для потока с ключом, соединённого с широковещательным. processElement обрабатывает записи с ключом и читает broadcast state, processBroadcastElement обрабатывает правила и пишет в него.</dd>
+<dt data-match="дескриптор|MapStateDescriptor">Дескриптор состояния (MapStateDescriptor)</dt><dd>Описание состояния, имя и типы ключа и значения. По нему оператор находит состояние, поэтому один и тот же дескриптор передают в broadcast и в функцию.</dd>
+<dt data-match="двухвходов|два входа|двумя входами">Оператор с двумя входами (two-input operator)</dt><dd>Оператор, который читает два потока, например после connect. Его watermark равен минимуму watermark двух входов.</dd>
+<dt data-match="watermark">Watermark</dt><dd>Служебный элемент потока с меткой T. Обещает, что событий с меткой T и раньше больше не будет, и двигает время события операторов.</dd>
+<dt data-match="Long.MIN_VALUE|Long.MAX_VALUE">Long.MIN_VALUE и Long.MAX_VALUE</dt><dd>Наименьшее и наибольшее значения типа long в Java. Первое означает, что watermark ещё не было, второе обещает, что старых данных от входа не будет никогда.</dd>
+<dt data-match="простаива|idle">Простой входа (idleness)</dt><dd>Признак входа, по которому дольше таймаута нет записей. Простаивающий вход не участвует в минимуме watermark. Включается через withIdleness.</dd>
+<dt data-match="детерминир">Детерминированный код</dt><dd>Код, который при одинаковом входе всегда даёт одинаковый результат. Не читает часы, случайные числа и внешние системы.</dd>
+<dt data-match="состояние с ключом|состоянию с ключом|состоянии с ключом|keyed state">Состояние с ключом (keyed state)</dt><dd>Состояние, привязанное к ключу записи, у нас к карте. Каждая подзадача хранит только свои ключи. Тема урока 7.</dd>
+<dt data-match="таймер|timer">Таймер (timer)</dt><dd>Отложенный вызов onTimer для ключа. Таймер по времени события срабатывает, когда watermark оператора дошёл до его метки.</dd>
+<dt data-match="чекпоинт|checkpoint">Чекпоинт (checkpoint)</dt><dd>Согласованный снимок состояния всего задания, из которого оно восстанавливается после падения. Подробно в уроке 11.</dd>
+<dt data-match="Serializable|сериализаци">Сериализация Java (Serializable)</dt><dd>Встроенный в Java способ превратить объект в байты. Через неё функции задания уезжают с клиента на TaskManager, поэтому всё, на что ссылаются их поля, должно её поддерживать.</dd>
+<dt data-match="DeserializationSchema|схема десериализации|схему|схема">Схема десериализации (DeserializationSchema)</dt><dd>Класс, превращающий байты записи источника в объект Java. Если он вернул null, источник Kafka пропускает запись.</dd>
+<dt data-match="Jackson|ObjectMapper">Jackson</dt><dd>Библиотека Java для JSON. ObjectMapper из неё читает JSON в объекты и умеет создавать record через его конструктор.</dd>
+<dt data-match="консольн|kafka-console">Консольные клиенты Kafka</dt><dd>Скрипты kafka-console-producer.sh и kafka-console-consumer.sh из поставки Kafka. Первый отправляет каждую строку ввода сообщением, второй печатает сообщения топика.</dd>
+<dt data-match="партици|partition">Партиция (partition)</dt><dd>Часть топика Kafka со своим порядком записей. Порядок между разными партициями Kafka не гарантирует.</dd>
+<dt data-match="harness">Test harness</dt><dd>Обёртка из тестовых jar Flink, которая запускает один оператор в JVM теста. Записи, правила и watermark подаются вручную. Функцию по сети не отправляет.</dd>
+<dt data-match="broadcast variable">Broadcast variable в Spark</dt><dd>Значение, которое драйвер Spark один раз рассылает на экзекуторы для чтения. Поменять его можно только созданием новой переменной.</dd>
+<dt data-match="подзадач|subtask">Подзадача (subtask)</dt><dd>Один параллельный экземпляр оператора. При параллелизме 2 у rules-dynamic две подзадачи, и у каждой своя копия правил.</dd>
+<dt data-match="REST">REST-интерфейс</dt><dd>HTTP-интерфейс JobManager на порту 8081. Ресурс /jobs/.../vertices/.../watermarks отдаёт метрику currentInputWatermark подзадач вершины.</dd>
+</dl>

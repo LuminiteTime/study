@@ -1,0 +1,196 @@
+/* Записи и узлы: статусы, чипы, полосы групп ключей, этапы, слоты, пирамида тестов. */
+
+/* Плашка статуса задания над схемой. */
+.dg-status rect {
+  fill: var(--color-success-light);
+  stroke: var(--color-success-border);
+}
+
+.dg .dg-status text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--color-success);
+}
+
+.dg-status.is-error rect {
+  fill: var(--color-error-light);
+  stroke: var(--color-error-border);
+}
+
+.dg .dg-status.is-error text {
+  fill: var(--color-error);
+}
+
+/* Записи и барьеры на каналах. */
+.dg-chip rect {
+  fill: var(--color-actor-1-light);
+  stroke: var(--color-actor-1);
+}
+
+.dg-chip.tone-2 rect {
+  fill: var(--color-actor-2-light);
+  stroke: var(--color-actor-2);
+}
+
+.dg-chip.tone-3 rect {
+  fill: var(--color-actor-3-light);
+  stroke: var(--color-actor-3);
+}
+
+.dg .dg-chip text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.dg-chip.is-waiting rect {
+  fill: var(--color-surface);
+  stroke: var(--color-text-muted);
+  stroke-dasharray: 3 2;
+}
+
+.dg-chip.is-late rect {
+  fill: var(--color-error-light);
+  stroke: var(--color-error);
+}
+
+.dg-chip.is-barrier rect {
+  fill: var(--color-actor-4);
+  stroke: none;
+}
+
+.dg .dg-chip.is-barrier text,
+.dg .dg-blocked {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  fill: var(--color-error);
+}
+
+/* Полосы групп ключей и ленты между ними. */
+.dg-bar.is-pale {
+  opacity: 0.5;
+}
+
+.dg .dg-cell-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--color-surface);
+}
+
+.dg-bracket {
+  fill: none;
+  stroke: var(--color-border-strong);
+}
+
+.dg-strip {
+  shape-rendering: crispEdges;
+}
+
+.dg-moved {
+  fill: var(--color-text);
+  shape-rendering: crispEdges;
+}
+
+/* Шкала этапов и карточки фактов. */
+.dg-stage rect {
+  fill: var(--color-surface);
+  stroke: var(--color-border-strong);
+  transition: fill var(--duration-normal), stroke var(--duration-normal);
+}
+
+.dg .dg-stage text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  fill: var(--color-text-muted);
+}
+
+.dg-stage.is-done rect {
+  fill: var(--color-success-light);
+  stroke: var(--color-success-border);
+}
+
+.dg .dg-stage.is-done text {
+  fill: var(--color-success);
+}
+
+.dg-stage.is-active rect {
+  fill: var(--color-text);
+  stroke: var(--color-text);
+}
+
+.dg .dg-stage.is-active text {
+  fill: var(--color-bg);
+  font-weight: 600;
+}
+
+.dg-fact {
+  fill: var(--color-surface-warm);
+  stroke: var(--color-border);
+}
+
+.dg .dg-fact-value {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dg-group.is-active rect {
+  stroke: var(--color-text);
+  stroke-dasharray: none;
+}
+
+.dg-group.is-error rect {
+  fill: var(--color-error-light);
+  stroke: var(--color-error);
+}
+
+.dg-group.is-ok rect {
+  fill: var(--color-success-light);
+  stroke: var(--color-success);
+}
+
+/* Совпадения шаблона CEP. */
+.dg-dot.is-faint {
+  fill: var(--color-border-strong);
+}
+
+.dg-match-line {
+  fill: none;
+  stroke: var(--color-text);
+  stroke-width: 1.5;
+}
+
+/* Слоты TaskManager. */
+.dg-slot {
+  fill: var(--color-surface);
+  stroke: var(--color-border);
+  stroke-dasharray: 3 3;
+}
+
+.dg-slot.is-busy {
+  stroke: var(--color-border-strong);
+  stroke-dasharray: none;
+}
+
+/* Уровни пирамиды тестов. */
+.dg-tier polygon {
+  fill: var(--color-surface);
+  stroke: var(--color-border);
+  stroke-linejoin: round;
+  transition: fill var(--duration-normal), stroke var(--duration-normal);
+}
+
+.dg .dg-tier text {
+  font-size: 14px;
+  fill: var(--color-text-muted);
+}
+
+.dg-tier.is-caught polygon {
+  fill: var(--color-success-light);
+  stroke: var(--color-success-border);
+}
+
+.dg .dg-tier.is-caught text {
+  font-weight: 600;
+  fill: var(--color-success);
+}

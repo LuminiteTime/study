@@ -1,0 +1,38 @@
+# Старый flink-conf.yaml, переписанный на ключи Flink 2.x.
+jobmanager:
+  rpc:
+    address: jobmanager
+    port: 6123
+  bind-host: 0.0.0.0
+  memory:
+    process:
+      size: 1600m
+
+taskmanager:
+  bind-host: 0.0.0.0
+  numberOfTaskSlots: 4
+  memory:
+    process:
+      size: 1728m
+
+rest:
+  bind-address: 0.0.0.0
+  address: 0.0.0.0
+
+parallelism:
+  default: 2
+
+state:
+  backend:
+    type: hashmap
+
+execution:
+  checkpointing:
+    dir: file:///tmp/flink-checkpoints
+    savepoint-dir: file:///tmp/flink-savepoints
+
+web:
+  submit:
+    enable: true
+  cancel:
+    enable: true

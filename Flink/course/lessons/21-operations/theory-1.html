@@ -1,0 +1,143 @@
+<h2>Задание, которое чинит себя до бесконечности</h2>
+<p>В уроке 20 мы меняли параллелизм PayGuard в Kubernetes, и посреди апгрейда стенд сломался. Задание ушло в состояние RESTARTING и больше из него не вышло. Оно восстановилось 17 раз, 11 чекпоинтов закончились FAILED, и в истории исключений каждый раз стояла одна и та же пара строк.</p>
+<pre data-lang="text" data-title="исключение задания" data-output>java.lang.IllegalStateException: Failed to commit KafkaCommittable{producerId=31, epoch=2, transactionalId='payguard-alerts-0-11', producer=null}
+Caused by: org.apache.kafka.common.errors.InvalidPidMappingException: The producer attempted to use a producer id which is not currently assigned to its transactional id.</pre>
+<p>Обычные сбои Flink переживает сам, это мы проверяли в уроках 11 и 12. Этот не прошёл бы и через сутки. Причина лежала в сохранённом состоянии, и каждый рестарт аккуратно поднимал её обратно.</p>
+<p>Начнём с разбора этой аварии в том виде, в каком его пишут в продакшене. Такой документ называется постмортем (postmortem). В нём записывают, что случилось, почему, чем заплатили и что меняют, чтобы не повторилось. Виноватого человека в постмортеме не ищут, ищут слабое место системы.</p>
+
+<h2>Квитанция из часовой мастерской</h2>
+<p>Ты сдал часы в ремонт и получил квитанцию номер 31 на заказ 11. Мастерская записала в журнал, что заказ 11 оформлен по квитанции 31. Ночью мастерскую затопило, журнал размок, и утром приёмщица завела новый, пустой.</p>
+<p>Ты приходишь с квитанцией. Приёмщица смотрит в журнал и отвечает, что квитанция 31 к заказу 11 не относится. Человек пошёл бы выяснять. Робот с инструкцией «приходи с квитанцией, пока не отдадут часы» будет возвращаться каждый день с той же бумажкой и получать тот же ответ.</p>
+<p>В аварии квитанцией была пара producerId и эпоха, которую Flink сохранил в снимке состояния. Журналом мастерской был служебный топик Kafka <code>__transaction_state</code>. Роботом был цикл рестартов. А затопила мастерскую перезагрузка пода Kafka, у которого не было постоянного тома.</p>
+
+<h2>Хронология аварии</h2>
+<p>Пройди аварию по шагам. Переключатель показывает ту же последовательность для Kafka с томом. Такой вариант мы проверили в уроке 20 уже после лечения.</p>
+
+<div class="viz" id="viz-l21">
+  <p class="viz-title">Апгрейд, рестарт Kafka и цикл рестартов</p>
+  <div class="viz-controls">
+    <label>Kafka <select id="viz-l21-mode"><option value="novolume" selected>без тома, как в аварии</option><option value="volume">с PVC kafka-data</option></select></label>
+    <button id="viz-l21-back" type="button">Назад</button>
+    <button class="primary" id="viz-l21-next" type="button">Дальше</button>
+    <button id="viz-l21-reset" type="button">Сначала</button>
+    <span id="viz-l21-step"></span>
+  </div>
+  <svg id="viz-l21-svg" role="img" aria-label="Оператор, задание Flink с Committer, том со снимками и брокер Kafka с журналом транзакций. Шаги показывают, как связь транзакции с producerId теряется вместе с диском брокера."></svg>
+  <p class="viz-note" id="viz-l21-note"></p>
+</div>
+
+<h2>Что лежало в снимке</h2>
+<p>Двухфазную фиксацию приёмника Kafka мы разобрали в уроке 12, здесь нужна одна деталь. На чекпоинте Writer сбрасывает открытую транзакцию и передаёт Committer объект committable. В нём записаны имя транзакции <code>transactionalId</code>, номер продюсера <code>producerId</code> и эпоха. Эпоха это счётчик поколений продюсера, по ней брокер отличает живого продюсера от устаревшего. Когда чекпоинт завершён, Committer фиксирует транзакцию. Если задание упало раньше, committable восстанавливается из состояния и фиксируется после рестарта.</p>
+<p>Имя транзакции из исключения расшифровывается по коду коннектора.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Фабрика имён транзакций в коннекторе Kafka. Смотри на формат в комментарии и на порядок склейки.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/TransactionalIdFactory.java" data-lines="28-45" data-must="transactionalIdPrefix-subtaskId-checkpointOffset"></div>
+<p>Значит, <code>payguard-alerts-0-11</code> это префикс из настройки задания <code>alerts-transactional-id-prefix</code>, подзадача 0 и одиннадцатый номер чекпоинта у этой подзадачи. Одна подзадача приёмника, один конкретный снимок.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#fault-tolerance" target="_blank" rel="noopener">Kafka connector, Fault Tolerance</a></p>
+</div>
+
+<h2>Почему брокер не узнал транзакцию</h2>
+<p>У Kafka транзакции ведёт координатор транзакций, это роль внутри брокера. Он хранит, какому producerId и какой эпохе принадлежит каждый <code>transactional.id</code>, и пишет эти связи в <code>__transaction_state</code>. Обычный продюсер при старте спрашивает у координатора свой producerId. Восстановленный продюсер Flink этого не делает.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Как Committer получает продюсера для восстановленного committable. Если живого продюсера от Writer нет, а после рестарта его нет никогда, создаётся служебный и вызывается <code>resumeTransaction</code> с сохранёнными числами.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/KafkaCommitter.java" data-lines="211-224" data-must="committingProducer.resumeTransaction(committable.getProducerId(), committable.getEpoch());"></div>
+<p>А вот что делает сам <code>resumeTransaction</code>. Прочитай первую строку комментария.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/FlinkKafkaInternalProducer.java" data-lines="294-323" data-must="Instead of obtaining producerId and epoch from the transaction coordinator"></div>
+<p>Продюсер берёт пару из снимка и через рефлексию кладёт её в <code>TransactionManager</code> клиента Kafka, к координатору он не обращается. Брокер впервые видит эту пару в запросе на коммит. Пока журнал цел, он находит там связь <code>payguard-alerts-0-11</code> с producerId 31 и фиксирует транзакцию. После потери журнала связи нет, и брокер отвечает <code>InvalidPidMappingException</code>. Текст ошибки говорит ровно об этом. Продюсер использует producerId, который сейчас не назначен его transactional id.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#producerfencedexception" target="_blank" rel="noopener">Kafka connector, ProducerFencedException</a></p>
+</div>
+
+<h2>Почему Committer не пропустил ошибку</h2>
+<p>В уроке 12 мы видели, что список известных ошибок в <code>KafkaCommitter</code> заканчивается на <code>UnknownProducerIdException</code>. Теперь посмотрим, что каждая категория значит для задания. Это решает интерфейс Flink, коннектор только выбирает категорию.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первая ветка в <code>KafkaCommitter.commit</code>. Ошибку из семейства <code>RetriableException</code> коннектор просит повторить позже.</p>
+<div data-src="kafka:flink-connector-kafka/src/main/java/org/apache/flink/connector/kafka/sink/internal/KafkaCommitter.java" data-lines="101-112" data-must="request.retryLater();"></div>
+<p>Что Flink обещает для двух видов окончательного отказа. Описание в интерфейсе <code>Committer.CommitRequest</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/connector/sink2/Committer.java" data-lines="66-80" data-must="Currently calling this method fails the job."></div>
+<p>И как это реализовано в рантайме. Строку из исключения нашей аварии ты увидишь в последнем методе.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/operators/sink/committables/CommitRequestImpl.java" data-lines="75-88" data-must="throw new IllegalStateException("></div>
+<p>Получается три исхода. Повторяемая ошибка уходит на повтор без падения. Известная причина пишется в лог и выбрасывает committable, задание работает дальше, а эта транзакция пропадает. Всё остальное бросает <code>IllegalStateException</code> с текстом <code>Failed to commit</code>, и это первая строка нашего исключения.</p>
+<p>Логика у такого деления простая. Про известные ошибки коннектор знает, что транзакция уже отменена или вытеснена, и решает идти дальше с записью в лог. Про неизвестную ошибку он не может сказать, дошли данные до топика или нет. Молча выбросить такую транзакцию значит потерять алерты без следа, поэтому выбран громкий отказ.</p>
+<p>Коннектор 5.0.0 собран с клиентом Kafka 4.2.0, версия видна в его <code>pom.xml</code>.</p>
+<div data-src="kafka:pom.xml" data-lines="51-57" data-must="kafka.version&gt;4.2.0"></div>
+<p>В исходниках этого клиента <code>InvalidPidMappingException</code> наследует <code>ApplicationRecoverableException</code>. В описании этого класса сказано, что ошибка фатальна для продюсера и приложение должно его пересоздать. Повторяемой она не считается, в ветку <code>retryLater</code> не попадает и доходит до общего <code>catch</code>.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/connectors/datastream/kafka/#troubleshooting" target="_blank" rel="noopener">Kafka connector, Troubleshooting</a></p>
+</div>
+
+<h2>Почему рестарты не кончались</h2>
+<p>После отказа задачи в дело вступает стратегия перезапуска. В <code>k8s/payguard.yaml</code> из урока 20 задан только её тип <code>exponential-delay</code>, остальные параметры остались по умолчанию.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Значение по умолчанию для числа попыток. Обрати внимание на аннотацию, документация показывает его словом infinite.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/RestartStrategyOptions.java" data-lines="301-313" data-must="defaultValue(Integer.MAX_VALUE)"></div>
+<p>Как стратегия решает, можно ли перезапускать, и как считает попытки.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/executiongraph/failover/ExponentialDelayRestartBackoffTimeStrategy.java" data-lines="98-126" data-must="return currentRestartAttempt &lt;= attemptsBeforeResetBackoff;"></div>
+<p>При лимите <code>Integer.MAX_VALUE</code> метод <code>canRestart</code> отвечает true практически всегда. Счётчик к тому же обнуляется, если между отказами прошло больше порога сброса. Растёт только пауза между попытками.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/task_failure_recovery/#exponential-delay-restart-strategy" target="_blank" rel="noopener">Task Failure Recovery, Exponential Delay Restart Strategy</a></p>
+</div>
+
+<p>Бесконечные попытки хороши для сбоев окружения. Упал TaskManager, моргнула сеть, база ушла на минуту, и задание вернётся само без участия человека. Для ошибки в состоянии они бесполезны. Лимит попыток перевёл бы задание в FAILED, и это был бы более заметный сигнал, но данные он бы не спас. Поэтому цикл ловят алертом <code>PayGuardJobRestarted</code> из урока 17, а runbook объясняет дежурному, как отличить цикл от разового сбоя.</p>
+<p>В Spark упавшая задача повторяется <code>spark.task.maxFailures</code> раз, по умолчанию четыре, после чего запрос Structured Streaming останавливается с исключением, и перезапускать его должно приложение или планировщик. Во Flink с <code>exponential-delay</code> перезапусками занимается сам JobManager, и по умолчанию число попыток не ограничено.</p>
+
+<h2>Как вышли из цикла и чем заплатили</h2>
+<p>Лечение шло в два этапа. Первый убирает причину. Брокер Kafka в <code>k8s/infra.yaml</code> получил постоянный том (PersistentVolumeClaim, PVC) <code>kafka-data</code>, и каталог журналов теперь лежит на нём.</p>
+<div data-code="lesson-21/k8s/infra.yaml" data-lines="31-40"></div>
+<p>Второй этап выводит задание из цикла. Удалили ресурс FlinkDeployment и ConfigMap с метаданными HA. Без второго шага ничего не вышло бы. Из урока 20 ты помнишь, что новый JobManager берёт указатель на последний чекпоинт из этих ConfigMap, и задание снова подняло бы тот же committable. Новый FlinkDeployment без <code>initialSavepointPath</code> стартует с пустым состоянием, так описано в документации оператора.</p>
+<p>Цена оказалась заметной. Пропали профили карт, счётчики окон и незавершённые совпадения CEP, то есть всё, что задание узнало о картах с момента запуска. Правила, которым нужна история карты, первое время её не видят. Пропали позиции чтения, хотя здесь они уже ничего не стоили, топики исчезли вместе с диском брокера. Алерты из той подготовленной транзакции потеряны тоже, они существовали только в журнале брокера.</p>
+
+<h3>Путь аккуратнее, который мы не проверяли</h3>
+<p>Выбросить можно было только состояние приёмника. Flink сопоставляет состояние из снимка с операторами по uid, это урок 13. Приёмник Sink V2 разворачивается в два оператора, и uid у них выводятся из uid приёмника.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Как транслятор приёмника раздаёт uid своим частям.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/translators/SinkTransformationTranslator.java" data-lines="494-509" data-must="Sink Committer: %s"></div>
+<p>Writer получает uid самого приёмника, у нас <code>alerts-sink</code>, а Committer получает <code>Sink Committer: alerts-sink</code>. Если сменить uid приёмника, состояние обоих операторов в снимке останется без хозяина. Такой снимок Flink примет только с разрешением отбросить лишнее, это флаг allowNonRestoredState. В операторе Kubernetes для этого есть два поля спецификации задания.</p>
+<div data-src="operator:flink-kubernetes-operator-api/src/main/java/org/apache/flink/kubernetes/operator/api/spec/JobSpec.java" data-lines="70-91" data-must="private Boolean allowNonRestoredState;"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/savepoints/#allowing-non-restored-state" target="_blank" rel="noopener">Savepoints, Allowing Non-Restored State</a>, <a href="https://nightlies.apache.org/flink/flink-kubernetes-operator-docs-release-1.16/docs/managing/job-management/" target="_blank" rel="noopener">Operator, Job Management</a></p>
+</div>
+
+<p>План получается такой. Сменить uid приёмника алертов в коде, выпустить образ, задать в FlinkDeployment путь к последнему savepoint или сохранённому чекпоинту и <code>allowNonRestoredState: true</code>. Профили карт и окна восстановятся, приёмник начнёт с чистого листа. На стенде мы этот путь не проходили. В runbook он записан как вариант, который сначала прогоняют на копии. Отдельно в нём придётся проверить позиции источника, если топики пересоздавались.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Рестарт контейнера в Docker и в Kubernetes устроен по-разному</strong>
+    <p>В итоговом хаос-тесте мы перезапускаем Kafka командой <code>docker compose restart</code>, и задание это переживает. Docker запускает тот же контейнер, и его файловая система остаётся на месте. Kubernetes при перезапуске создаёт контейнер заново из образа, и всё, что лежало вне томов, пропадает. Поэтому в Compose эта авария не воспроизводится. В Kubernetes она случилась при первой же нехватке памяти. Любой сервис, который хранит данные, в Kubernetes живёт на постоянном томе.</p>
+  </div>
+</div>
+
+<h2>Постмортем на одну страницу</h2>
+<p>Вот как этот разбор выглядит в виде документа. Формат у команд разный, а разделы почти всегда одни и те же.</p>
+<table>
+<thead><tr><th>Раздел</th><th>Что записали</th></tr></thead>
+<tbody>
+<tr><td>Влияние</td><td>Пока шёл цикл, алерты не выходили в <code>fraud.alerts</code>. После лечения потеряны состояние карт и алерты незафиксированной транзакции</td></tr>
+<tr><td>Хронология</td><td>Patch parallelism, savepoint оператора, нехватка памяти в minikube, рестарт пода Kafka, восстановление из savepoint, 17 восстановлений и 11 неудачных чекпоинтов, удаление FlinkDeployment и ConfigMap HA, запуск без состояния</td></tr>
+<tr><td>Корневая причина</td><td>У Kafka не было постоянного тома, и брокер после рестарта потерял <code>__transaction_state</code></td></tr>
+<tr><td>Что усилило</td><td>Стенд работал на пределе памяти. <code>KafkaCommitter</code> относит <code>InvalidPidMappingException</code> к неизвестным ошибкам. Число рестартов не ограничено</td></tr>
+<tr><td>Как обнаружили</td><td>Состояние RESTARTING в <code>kubectl get flinkdep</code> и одинаковая запись в истории исключений</td></tr>
+<tr><td>Что сделали</td><td>PVC <code>kafka-data</code> для брокера. Проверка удаления пода Kafka под нагрузкой, через 90 с задание RUNNING, чекпоинты без отказов</td></tr>
+<tr><td>Что осталось</td><td>Раздел runbook про цикл рестартов. В проде Kafka с репликацией журнала транзакций, на стенде у него один экземпляр</td></tr>
+</tbody>
+</table>
+<p>Последний пункт про репликацию стоит раскрыть. В <code>docker-compose.yml</code> и <code>k8s/infra.yaml</code> переменная <code>KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR</code> равна 1, потому что брокер один. В кластере из нескольких брокеров у журнала транзакций несколько реплик, и потеря одного диска его не уничтожает.</p>
+
+<h2>Хаос-тест как привычка</h2>
+<p>Авария случилась на апгрейде, который мы не задумывали как проверку отказов. Хаос-тестирование (chaos testing) делает такие проверки плановыми. На работающей системе по очереди ломают по одному компоненту и сверяют, что обещания держатся. У PayGuard обещаний два. Задание возвращается само, и в <code>fraud.alerts</code> для потребителя с <code>read_committed</code> нет дублей.</p>
+<p>Скрипт <code>final-chaos.sh</code> из практики собран из инструментов прошлых уроков и проверяет три разных пути восстановления.</p>
+<ul>
+  <li>Убитый TaskManager. Задание восстанавливается из последнего чекпоинта, как в уроке 11.</li>
+  <li>Остановленный PostgreSQL. JDBC-приёмник из урока 12 не может открыться, задание перезапускается, пока база не вернётся.</li>
+  <li>Перезапуск Kafka. Клиенты переподключаются, и задание должно пережить это без рестарта.</li>
+</ul>
+<p>Падение JobManager в Compose не проверяется. HA на этом стенде нет, и задание пропало бы вместе с процессом. Этот сценарий мы прошли в Kubernetes в уроке 20.</p>
+<p>Пользу приносит регулярность. Тест стоит гонять после каждого изменения конфигурации, версии или топологии и периодически на стенде, похожем на прод. Сбой, найденный днём на стенде, стоит одного исправления. Тот же сбой ночью в проде стоит алертов, которые не дошли до банка.</p>
+

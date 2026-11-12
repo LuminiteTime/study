@@ -1,0 +1,48 @@
+# Надстройка над docker-compose.yml: брокер требует логин и пароль, анонимные клиенты получают отказ.
+# Пароли приходят из файла .env рядом с этим файлом, в репозиторий он не попадает.
+x-flink-kafka-auth: &flink-kafka-auth
+  PAYGUARD_KAFKA_USER: payguard
+  PAYGUARD_KAFKA_PASSWORD: ${KAFKA_PAYGUARD_PASSWORD}
+
+services:
+  kafka:
+    environment:
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:SASL_PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:SASL_PLAINTEXT
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: PLAIN
+      KAFKA_LISTENER_NAME_INTERNAL_PLAIN_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="admin" password="${KAFKA_ADMIN_PASSWORD}"
+        user_admin="${KAFKA_ADMIN_PASSWORD}" user_payguard="${KAFKA_PAYGUARD_PASSWORD}";
+      KAFKA_LISTENER_NAME_EXTERNAL_PLAIN_SASL_JAAS_CONFIG: >-
+        org.apache.kafka.common.security.plain.PlainLoginModule required
+        username="admin" password="${KAFKA_ADMIN_PASSWORD}"
+        user_admin="${KAFKA_ADMIN_PASSWORD}" user_payguard="${KAFKA_PAYGUARD_PASSWORD}";
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          printf 'security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\nsasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="%s";\n'
+          "$$KAFKA_ADMIN_PASSWORD" > /tmp/client.properties
+          && /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --command-config /tmp/client.properties --list
+
+  kafka-init:
+    environment:
+      KAFKA_ADMIN_PASSWORD: ${KAFKA_ADMIN_PASSWORD}
+    command:
+      - |
+        printf 'security.protocol=SASL_PLAINTEXT\nsasl.mechanism=PLAIN\nsasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="%s";\n' "$$KAFKA_ADMIN_PASSWORD" > /tmp/client.properties
+        for topic in payments.raw payments.dlq payments.late payments.confirmations payments.confirmed card.sessions card.profiles fraud.alerts rules.config; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/client.properties \
+            --create --if-not-exists --topic "$$topic" --partitions 4 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --command-config /tmp/client.properties \
+          --create --if-not-exists --topic merchants.changelog --partitions 4 --replication-factor 1 \
+          --config cleanup.policy=compact
+
+  jobmanager:
+    environment: *flink-kafka-auth
+
+  taskmanager:
+    environment: *flink-kafka-auth

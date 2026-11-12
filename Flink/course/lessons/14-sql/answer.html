@@ -1,0 +1,50 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Зависимость <code>flink-table-api-java</code> идёт через <code>flinkProvided</code>. Планировщик и рантайм таблиц уже лежат в образе, в толстом jar они не нужны.</p>
+<div data-diff="lesson-13/build.gradle.kts lesson-14/build.gradle.kts"></div>
+<p>Таблица в PostgreSQL. Ключ включает <code>top_rank</code>, потому что результат это занятые места в топе за окно.</p>
+<div data-code="lesson-14/sql/init.sql" data-lines="30-37"></div>
+<p>Скрипт целиком.</p>
+<div data-code="lesson-14/src/main/resources/sql/risk_revenue.sql"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-14/src/main/resources/sql/risk_revenue.sql" data-lines="53-69"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Временное представление <code>enriched</code> дописывает к платежу уровень риска. <code>FOR SYSTEM_TIME AS OF p.proc_time</code> означает lookup join, запрос к справочнику на момент обработки записи.</p>
+      <p class="tl"><code>LEFT JOIN</code> и <code>COALESCE</code> сохраняют платёж неизвестного продавца с уровнем <code>UNKNOWN</code>. С обычным <code>JOIN</code> он бы пропал из выручки.</p>
+      <p class="tl">Внутренний запрос считает выручку по паре уровень и продавец в минутном окне, как в практике.</p>
+      <p class="tl"><code>ROW_NUMBER</code> нумерует продавцов внутри уровня и окна. В <code>PARTITION BY</code> стоят оба конца окна, поэтому планировщик выбирает оконный Top-N, который выдаёт итог один раз и чистит состояние.</p>
+      <p class="tl"><code>WHERE top_rank &lt;= 3</code> оставляет три верхних места.</p>
+    </div>
+  </div>
+</div>
+<p>Кэш настроен тремя опциями <code>lookup.*</code> в DDL таблицы <code>merchants</code>. Он снижает нагрузку на PostgreSQL, но новый уровень риска применится только после истечения записи, в нашем случае через 5 минут. Результат lookup join при этом не пересчитывается задним числом, так описывает этот join документация.</p>
+<p>Запускающий класс.</p>
+<div data-code="lesson-14/src/main/java/dev/study/payguard/job/SqlJobRunner.java"></div>
+<p>Текст режется по точке с запятой в конце строки. Это простое решение со своим ограничением, точка с запятой в конце строки внутри литерала разрежет инструкцию. Для наших скриптов этого хватает. Метод <code>withoutComments</code> нужен, чтобы хвост из одних комментариев или пробелов не попал в <code>executeSql</code>. <code>TableEnvironment.create</code> со стриминговыми настройками работает без <code>StreamExecutionEnvironment</code>, потому что DataStream тут не нужен.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose --profile sql down
+docker compose --profile sql up -d --wait
+docker compose --profile sql exec sql-jobmanager flink run --detached \
+  -c dev.study.payguard.job.SqlJobRunner /jobs/payguard-1.0.0.jar --script risk_revenue.sql</pre>
+<p>Флаг <code>-c</code> задаёт главный класс вместо <code>Main-Class</code> из манифеста, а всё после пути к jar уходит аргументами в <code>main</code>. Команда <code>down</code> нужна только затем, чтобы PostgreSQL заново выполнил <code>init.sql</code> с новой таблицей. Она останавливает и задание из практики, запусти его снова, если оно нужно. Нагрузку даёт тот же <code>./gradlew loadgen --args="--rate 200"</code> в отдельном терминале.</p>
+<p>План нашего прогона выглядит так, те же имена ты увидишь в Web UI. Каждая строка это одна цепочка операторов, то есть одна вершина графа.</p>
+<pre data-lang="text" data-title="план SQL-задания" data-output>Source: payments[1] -> Calc[2] -> LookupJoin[3] -> Calc[4] -> LocalWindowAggregate[5]
+GlobalWindowAggregate[7] -> Calc[8]
+WindowRank[10] -> Calc[11] -> ConstraintEnforcer[12] -> Sink: risk_revenue[12]</pre>
+<p>Первая цепочка работает без обмена по сети, поэтому и lookup join, и локальная сумма выполняются в той же подзадаче, что читает Kafka. <code>Calc</code> это проекция и фильтр. Потом идёт обмен по ключу группировки, и <code>GlobalWindowAggregate</code> собирает частичные суммы. Следующий обмен ведёт в <code>WindowRank</code>, который строит топ.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Оператор <code>ConstraintEnforcer</code> в запросе никто не писал. Его добавляет сборка приёмника.</p>
+<div data-src="flink:flink-table/flink-table-planner/src/main/java/org/apache/flink/table/planner/plan/nodes/exec/common/CommonExecSink.java" data-lines="251-264" data-must="applyConstraintValidations"></div>
+<p>Это проверка ограничений приёмника, например <code>NOT NULL</code>. Какое действие выполнять при нарушении, определяет настройка, чьё значение передаётся здесь же.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/window-topn/" target="_blank" rel="noopener">Window Top-N</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/table/sql/queries/joins/" target="_blank" rel="noopener">Joins</a></p>
+</div>
+<p>Проверь результат запросом.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec postgres psql -U payguard -d payguard -c \
+  "SELECT risk_level, window_start, top_rank, merchant_id, amount_minor
+   FROM risk_revenue ORDER BY window_start DESC, risk_level, top_rank LIMIT 12"</pre>
+<p>В нашем прогоне на 100 с при 200 платежах в секунду для каждого уровня вышло три места, а на верхней строке уровня <code>HIGH</code> стоял <code>m-0000</code> с выручкой 86320099 в минимальных единицах. Этот продавец горячий, и в <code>init.sql</code> у него номер 0, поэтому уровень <code>HIGH</code>.</p>
+</div>

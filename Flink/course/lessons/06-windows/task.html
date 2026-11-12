@@ -1,0 +1,17 @@
+<h2>Задание. Сессии карты</h2>
+<p>Антифроду нужна картина поведения карты. Мошенник проверяет карту серией платежей подряд, а обычный покупатель платит редко. Собери платежи каждой карты в сессии. Сессия продолжается, пока паузы между платежами по времени события короче 30 секунд.</p>
+<ol>
+  <li>Создай record <code>model/CardSession</code> с полями <code>cardId</code>, <code>sessionStartMs</code>, <code>sessionEndMs</code>, <code>paymentCount</code>, <code>amountMinor</code>.</li>
+  <li>Создай <code>pipeline/CardSessionWindow</code> с публичной константой паузы и методом <code>attach(DataStream&lt;PaymentEvent&gt;)</code>, по образцу <code>MerchantStatsWindow</code>. Оператору дай имя и uid <code>card-sessions</code>.</li>
+  <li>В состоянии сессии не должны копиться сами платежи.</li>
+  <li>Подключи окно в <code>PayGuardJob</code> и пиши результат в топик <code>card.sessions</code> приёмником с именем и uid <code>card-sessions-sink</code>.</li>
+  <li>Напиши <code>CardSessionWindowTest</code> на MiniCluster. Два платежа одной карты с паузой меньше 30 с и третий после длинной паузы должны дать ровно две сессии.</li>
+</ol>
+<p>Готово, если выполнены все условия.</p>
+<ol>
+  <li><code>./gradlew test</code> проходит.</li>
+  <li>В графе задания на стенде появилась третья вершина <code>card-sessions</code>.</li>
+  <li>В <code>card.sessions</code> идут записи, и у сессии из одного платежа <code>sessionEndMs</code> больше <code>sessionStartMs</code> ровно на 30000.</li>
+</ol>
+<p>Подсказка первая. Посмотри, какой из классов практики можно взять без изменений, и вспомни, какой его метод впервые начнёт вызываться.</p>
+<p>Подсказка вторая. Прежде чем писать ожидания в тесте, посчитай границы сессий вручную. Каждый платёж открывает окно от своего времени до времени плюс пауза, а пересекающиеся окна сливаются.</p>

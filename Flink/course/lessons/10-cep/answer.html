@@ -1,0 +1,28 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Шаблон состоит из двух шагов. Первый без условия принимает любой платёж. Второй идёт через <code>next</code>, потому что сравнивать надо именно соседние платежи. С <code>followedBy</code> платёж из Германии нашёл бы пару в любом следующем платеже из другой страны в течение десяти минут, даже если между ними были обычные платежи из Германии.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="41-47"></div>
+<p>Условие получает из контекста события шага <code>first</code>. В этом шаблоне там всегда ровно один платёж, но цикл не ломается и на шаге с квантификатором. Контекст вызывается один раз на проверку.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="63-73"></div>
+<p>Стратегия <code>skipPastLastEvent</code> здесь тоже нужна. Каждый платёж начинает новую попытку в шаге <code>first</code>. Без стратегии на последовательности DE, ES, FR второй платёж стал бы и концом первого совпадения, и началом второго. С ней попытка, начатая на ES, выбрасывается после первого совпадения, и алерт будет один.</p>
+<p>Подключение повторяет правило из практики, отличаются только имя шага для алерта и текст.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="56-61"></div>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="155-159"></div>
+<p>Тесты. Первый проверяет, что пара DE, DE алерта не даёт. Пара DE, ES даёт ровно один алерт. Второй проверяет <code>within</code>. Разница 11 минут больше окна, попытка истекает при сдвиге времени, и совпадения нет.</p>
+<div data-code="lesson-10/src/test/java/dev/study/payguard/pipeline/FraudPatternsTest.java" data-lines="31-34"></div>
+<div data-code="lesson-10/src/test/java/dev/study/payguard/pipeline/FraudPatternsTest.java" data-lines="73-93"></div>
+<p>Итог прогона всех тестов снапшота на стенде курса. Jar вырос примерно на 3,4 МБ по сравнению с уроком 9.</p>
+<pre data-lang="text" data-title="итог прогона" data-output>RESULT tests 39 fail 0
+jar bytes 29440528</pre>
+<p>Метрики вершины <code>cep-impossible-travel</code> в том же прогоне, что и метрики из практики.</p>
+<pre data-lang="json" data-title="метрики cep-impossible-travel" data-output>[{"id":"numRecordsIn","min":8555.0,"max":8615.0,"sum":17170.0},{"id":"numRecordsOut","min":28.0,"max":38.0,"sum":66.0},{"id":"busyTimeMsPerSecond","min":4.0,"max":4.0,"sum":8.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]</pre>
+<p>66 совпадений. Обычные платежи карты идут из домашней страны, поэтому по коду генератора смена страны возможна только в атаке с <code>XX</code>. Значит, в этом прогоне генератор работал и с флагом <code>--travel</code>. Занятость 4 мс в секунду, вдвое больше, чем у проверки карты. Шаблон из двух шагов без условия на первом заводит попытку на каждый платёж, и условие второго шага ходит в общий буфер за первым платежом.</p>
+<p>Прочитай топик алертов той же командой, что в уроке 9.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic fraud.alerts --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"alertId":"velocity:4b54d966-cae3-9a4a-1f33-21b23bb6b90b","ruleId":"velocity","cardId":"c-4634","merchantId":"m-0045","paymentId":"4b54d966-cae3-9a4a-1f33-21b23bb6b90b","detail":"11 платежей за минуту","eventTimeMs":1794086108951,"merchantRisk":"MEDIUM"}
+{"alertId":"impossible-travel:0796f21d-8beb-f95b-03e3-422181aacf1c","ruleId":"impossible-travel","cardId":"c-0118","merchantId":"m-0028","paymentId":"0796f21d-8beb-f95b-03e3-422181aacf1c","detail":"платежи из разных стран за 10 минут","eventTimeMs":1794086100471,"merchantRisk":"LOW"}
+{"alertId":"impossible-travel:057820bd-dc96-372e-df7f-0ff77f242c3b","ruleId":"impossible-travel","cardId":"c-0475","merchantId":"m-0044","paymentId":"057820bd-dc96-372e-df7f-0ff77f242c3b","detail":"платежи из разных стран за 10 минут","eventTimeMs":1794086104352,"merchantRisk":"LOW"}</pre>
+<p>Алерты impossible travel идут вперемешку с алертами частоты и уже обогащены риском продавца. Обрати внимание на порядок меток. Второй алерт старше первого на 8 секунд. Алерт частоты выдаётся сразу на платеже, а CEP ждёт watermark. Вдобавок обогащение в режиме unordered выдаёт алерты по мере ответов базы. Поэтому порядок в топике не совпадает с порядком событий.</p>
+</div>

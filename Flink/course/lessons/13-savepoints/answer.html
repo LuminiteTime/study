@@ -1,0 +1,51 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Библиотека ложится в <code>implementation</code>, то есть внутрь толстого jar. В дистрибутиве Flink её jar кладётся в <code>opt/</code>, так написано в <code>flink-dist/src/main/assemblies/opt.xml</code>. Из <code>opt/</code> классы не загружаются, и с <code>flinkProvided</code> класс <code>SavepointReader</code> не нашёлся бы при запуске.</p>
+<div data-diff="lesson-12/build.gradle.kts lesson-13/build.gradle.kts"></div>
+<p>Сам инспектор.</p>
+<div data-code="lesson-13/src/main/java/dev/study/payguard/job/StateInspector.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-13/src/main/java/dev/study/payguard/job/StateInspector.java" data-lines="31-49"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Берём путь к снимку из аргументов. <code>getRequired</code> сразу падает с понятной ошибкой, если аргумент забыли.</p>
+      <p class="tl">Обычное окружение DataStream в режиме BATCH. Снимок конечен, и программа должна завершиться, когда прочитает его до конца.</p>
+      <p class="tl"><code>SavepointReader.read</code> загружает метаданные снимка. Третий аргумент задаёт бэкенд, через который читается состояние. Задание пишет состояние в RocksDB, но снимок в формате canonical, а этот формат одинаков для всех бэкендов. Поэтому подходит лёгкий <code>HashMapStateBackend</code>.</p>
+      <p class="tl"><code>readKeyedState</code> строит поток по состоянию оператора с данным <code>uid</code>. Каждый ключ пройдёт через <code>ProfileReader</code>. <code>executeAndCollect()</code> без аргументов запускает программу и отдаёт итератор, который подтягивает результаты по мере готовности. <code>try</code> с ресурсами закрывает итератор и освобождает ресурсы кластера.</p>
+      <p class="tl">Печатаем число карт, потом сортируем по числу платежей по убыванию и берём первые пять.</p>
+    </div>
+  </div>
+</div>
+<p>Читатель <code>ProfileReader</code> устроен как обычная функция с состоянием. В <code>open</code> он регистрирует тот же дескриптор, что <code>CardProfileFunction</code>, а <code>readKey</code> вызывается по одному разу на каждый ключ в снимке. Собирать все карты в список допустимо, их тысячи. Для миллионов ключей сортировку стоило бы делать в самой программе Flink, а в клиент забирать только топ.</p>
+<p>Инспектор тоже задание Flink, и ему нужен хотя бы один свободный слот. После шага 7 задание PayGuard занимает все 4 слота, поэтому сначала останови его со savepoint, прочитай этот снимок и верни задание командой из шага 7.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+SP=$(scripts/stop-with-savepoint.sh)
+docker compose exec -T jobmanager flink run \
+  -c dev.study.payguard.job.StateInspector \
+  /jobs/payguard-1.0.0.jar --savepoint "$SP"</pre>
+<p>Флаг <code>-c</code> указывает класс с <code>main</code>, иначе CLI возьмёт <code>PayGuardJob</code> из манифеста. Флага <code>--detached</code> нет, клиент должен дождаться результатов. Метод <code>main</code> выполняется в клиенте, поэтому печать идёт прямо в терминал. Аргументы после jar достаются программе. Ниже вывод с нашего стенда после полутора минут генератора на 200 платежей в секунду. Строк предупреждений JVM в нём больше, мы их убрали.</p>
+<pre data-lang="text" data-title="вывод" data-output>Job has been submitted with JobID a2e9fe5b387ee9bd5a5938070cde5d3f
+Карт в состоянии: 4826
+CardRow[cardId=c-4868, profile=CardProfile[paymentCount=12, totalAmountMinor=275240, lastCountry=FR]]
+CardRow[cardId=c-2932, profile=CardProfile[paymentCount=11, totalAmountMinor=188880, lastCountry=FR]]
+CardRow[cardId=c-1396, profile=CardProfile[paymentCount=11, totalAmountMinor=220030, lastCountry=NL]]
+CardRow[cardId=c-4796, profile=CardProfile[paymentCount=10, totalAmountMinor=228177, lastCountry=FR]]
+CardRow[cardId=c-3253, profile=CardProfile[paymentCount=10, totalAmountMinor=308041, lastCountry=ES]]</pre>
+<p>Инспектор сам стал заданием со своим JobID. Строки карт печатает стандартный <code>toString</code> у record. Генератор создаёт около пяти тысяч карт, поэтому почти все они уже попали в состояние.</p>
+
+<h2>Ловушка executeAndCollect с лимитом</h2>
+<p>Первая версия инспектора вызывала <code>executeAndCollect(Integer.MAX_VALUE)</code>. Казалось, что это значит «забери всё». Запуск упал раньше, чем прочиталась первая карта.</p>
+<pre data-lang="text" data-title="вывод" data-output>java.lang.OutOfMemoryError: Requested array size exceeds VM limit</pre>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Посмотри, что делает вариант с лимитом до того, как прочитать хотя бы одну запись.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/datastream/DataStream.java" data-lines="961-974" data-must="new ArrayList&lt;&gt;(limit)"></div>
+<p>Лимит уходит в начальную ёмкость <code>ArrayList</code>, и JVM пытается выделить массив на два миллиарда ссылок. Такой массив больше допустимого размера, отсюда ошибка. Вариант без аргументов возвращает CloseableIterator и ничего заранее не выделяет. Его комментарий требует закрыть итератор, чтобы освободить ресурсы кластера, поэтому он стоит в <code>try</code> с ресурсами.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/state_processor_api/" target="_blank" rel="noopener">State Processor API, Reading State</a></p>
+</div>
+
+<p>Что проверить ещё. Верни задание, дай ему поработать минуту, сними новый снимок и запусти инспектор снова. Число карт будет не меньше прежнего, и у карт из топа <code>paymentCount</code> только вырастет, ведь счётчик в состоянии не уменьшается. Если число упало, значит задание стартовало без снимка.</p>
+</div>

@@ -1,0 +1,30 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="обогащени|enrichment">Обогащение (enrichment)</dt><dd>Добавление к записи потока данных из внешнего источника, например уровня риска продавца из базы.</dd>
+<dt data-match="Async I/O|асинхронн">Async I/O</dt><dd>Механизм Flink для запросов во внешние системы без остановки подзадачи. Подзадача отправляет много запросов сразу и выдаёт результаты по мере ответов.</dd>
+<dt data-match="RichAsyncFunction|AsyncFunction|asyncInvoke">AsyncFunction</dt><dd>Интерфейс функции асинхронного оператора. Метод <code>asyncInvoke</code> запускает запрос и сразу возвращается, метод <code>timeout</code> решает, что делать с зависшим запросом. <code>RichAsyncFunction</code> добавляет <code>open</code>, <code>close</code> и доступ к метрикам.</dd>
+<dt data-match="ResultFuture">ResultFuture</dt><dd>Объект, через который асинхронная функция сообщает Flink результат записи. Вызов <code>complete</code> отдаёт результат, <code>completeExceptionally</code> роняет подзадачу.</dd>
+<dt data-match="capacity|ёмкост">Capacity</dt><dd>Наибольшее число записей в очереди асинхронного оператора. Когда очередь полна, оператор перестаёт брать записи со входа и включается backpressure.</dd>
+<dt data-match="timeout|таймаут">Timeout</dt><dd>Предельное время на запрос асинхронного оператора, отсчитывается от постановки записи в очередь. По умолчанию истечение перезапускает задание.</dd>
+<dt data-match="ordered|unordered|orderedWait|unorderedWait">Режимы ordered и unordered</dt><dd>Порядок выдачи результатов асинхронного оператора. Ordered выдаёт в порядке входа, unordered по мере готовности, но не через границу watermark.</dd>
+<dt data-match="head-of-line">Head-of-line blocking</dt><dd>Ситуация, когда медленный первый элемент очереди задерживает всех за ним, хотя их работа уже сделана.</dd>
+<dt data-match="mailbox">Mailbox</dt><dd>Очередь дел потока подзадачи Flink. Обработка записей, таймеры и результаты асинхронных запросов выполняются через неё в одном потоке.</dd>
+<dt data-match="backpressure">Backpressure</dt><dd>Обратное давление. Медленный оператор перестаёт принимать данные, буферы перед ним заполняются, и замедление доходит до источника.</dd>
+<dt data-match="состояние оператора|состоянии оператора|operator state">Состояние оператора (operator state)</dt><dd>Состояние, привязанное к подзадаче, без ключа. В нём асинхронный оператор хранит записи своей очереди для чекпоинта.</dd>
+<dt data-match="keyed state">Keyed state</dt><dd>Состояние, которое Flink хранит отдельно для каждого ключа. В нём interval join держит буферы обеих сторон.</dd>
+<dt data-match="interval join|intervalJoin">Interval join</dt><dd>Соединение двух потоков с ключом, при котором запись правого потока должна попасть во временной интервал вокруг записи левого. Работает во времени события и выдаёт только совпавшие пары.</dd>
+<dt data-match="inner join">Inner join</dt><dd>Соединение, которое выдаёт только пары с совпадением. Записи без пары не выдаются вовсе.</dd>
+<dt data-match="ProcessJoinFunction">ProcessJoinFunction</dt><dd>Функция, которую interval join вызывает на каждую найденную пару. Через контекст видны временные метки обеих записей.</dd>
+<dt data-match="KeyedCoProcessFunction">KeyedCoProcessFunction</dt><dd>Функция с двумя входами, разбитыми по одному ключу. Даёт keyed state и таймеры, на ней пишут соединения с любой логикой.</dd>
+<dt data-match="watermark">Watermark</dt><dd>Отметка времени события в потоке, после которой более ранних событий оператор не ждёт. У оператора с двумя входами равна минимуму по входам.</dd>
+<dt data-match="таймер|timer">Таймер (timer)</dt><dd>Отложенный вызов функции, привязанный к ключу. Таймер по времени события срабатывает, когда watermark дошёл до заданного момента.</dd>
+<dt data-match="кэш|cache">Кэш (cache)</dt><dd>Копия данных рядом с кодом, чтобы не ходить за ними каждый раз. Здесь это словарь в памяти подзадачи со сроком жизни записей.</dd>
+<dt data-match="идемпотентн">Идемпотентность</dt><dd>Свойство операции, при котором повтор не меняет результат. Повторное чтение идемпотентно, повторная отправка SMS нет.</dd>
+<dt data-match="PostgreSQL|Postgres">PostgreSQL</dt><dd>Реляционная база данных с открытым кодом. В PayGuard хранит справочник продавцов.</dd>
+<dt data-match="JDBC">JDBC</dt><dd>Стандартный интерфейс Java для работы с реляционными базами. Его вызовы блокируют поток до ответа базы.</dd>
+<dt data-match="HikariCP|пул соединени|пула соединени">HikariCP</dt><dd>Библиотека пула соединений для JDBC. Держит открытые соединения с базой и выдаёт их потокам по запросу.</dd>
+<dt data-match="CompletableFuture|supplyAsync">CompletableFuture</dt><dd>Класс Java для результата, который появится позже. <code>supplyAsync</code> запускает работу в заданном пуле потоков, <code>whenComplete</code> выполняет код по её окончании.</dd>
+<dt data-match="пул из|пул поток|пула поток|пуле поток|ExecutorService">Пул потоков (ExecutorService)</dt><dd>Набор рабочих потоков Java, которые по очереди выполняют переданные задачи. В <code>AlertEnrichment</code> он выполняет блокирующие запросы к базе.</dd>
+<dt data-match="healthcheck">Healthcheck</dt><dd>Команда в Docker Compose, по которой Docker решает, готов ли контейнер. Флаг <code>--wait</code> ждёт её успеха.</dd>
+<dt data-match="Structured Streaming|mapPartitions">Spark Structured Streaming</dt><dd>Потоковый движок Spark. Соединение двух потоков в нём держит обе стороны в хранилище состояния и чистит его по watermark и условию на время.</dd>
+</dl>

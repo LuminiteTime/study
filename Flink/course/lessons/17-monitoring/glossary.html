@@ -1,0 +1,33 @@
+<h2>Глоссарий урока</h2>
+<dl class="glossary">
+<dt data-match="метрик|metric">Метрика (metric)</dt><dd>Именованное числовое значение, которое Flink или твой код обновляет во время работы. Метрики собирают в системы мониторинга и строят по ним графики и алерты.</dd>
+<dt data-match="MetricGroup">Группа метрик (MetricGroup)</dt><dd>Узел дерева, в котором регистрируются метрики. Группы идут от процесса к заданию, задаче и оператору. Метод <code>addGroup</code> добавляет свои уровни.</dd>
+<dt data-match="Counter|счётчик">Counter</dt><dd>Тип метрики Flink, целое число с методами <code>inc</code> и <code>dec</code>. В Prometheus экспортируется как Gauge.</dd>
+<dt data-match="Gauge">Gauge</dt><dd>Метрика, значение которой вычисляется в момент чтения, например занятая куча. В Prometheus так же называется тип ряда, который может расти и падать.</dd>
+<dt data-match="Meter">Meter</dt><dd>Метрика Flink со скоростью событий в секунду. Реализация <code>MeterView</code> усредняет за 60 секунд. В Prometheus отдаётся как Gauge со значением скорости.</dd>
+<dt data-match="Histogram|гистограмм">Histogram</dt><dd>Метрика Flink с распределением значений. В Prometheus превращается в Summary с квантилями.</dd>
+<dt data-match="Summary">Summary</dt><dd>Тип метрики Prometheus с готовыми квантилями и числом наблюдений. Из гистограмм Flink приходит без ряда суммы.</dd>
+<dt data-match="област|scope">Область метрики (scope)</dt><dd>Путь группы в дереве метрик. Системную область задаёт Flink, пользовательскую ты добавляешь через <code>addGroup</code>. Репортер Prometheus строит имя по логической области, из названий уровней.</dd>
+<dt data-match="переменн|метк|label">Переменная группы и метка (label)</dt><dd>Пара ключ и значение, привязанная к группе метрик, например имя оператора. Репортер Prometheus превращает каждую переменную в метку ряда.</dd>
+<dt data-match="кардинальн">Кардинальность</dt><dd>Число разных временных рядов. Растёт с каждым новым значением метки и определяет, сколько памяти нужно Prometheus.</dd>
+<dt data-match="временной ряд|временного ряда|time series">Временной ряд (time series)</dt><dd>Последовательность значений одной метрики с одним набором меток во времени. Единица хранения в Prometheus.</dd>
+<dt data-match="репортер|reporter">Репортер (reporter)</dt><dd>Подключаемый модуль Flink, который выносит метрики во внешнюю систему. Создаётся в каждом JobManager и TaskManager при старте.</dd>
+<dt data-match="Prometheus">Prometheus</dt><dd>Система мониторинга, которая сама опрашивает цели по HTTP, хранит временные ряды и проверяет правила алертов.</dd>
+<dt data-match="опрос|scrape">Опрос (scrape)</dt><dd>Запрос Prometheus к HTTP-адресу цели за текущими значениями метрик. Частоту задаёт <code>scrape_interval</code>.</dd>
+<dt data-match="PromQL">PromQL</dt><dd>Язык запросов Prometheus. На нём пишут панели Grafana и выражения правил.</dd>
+<dt data-match="rate|increase">rate и increase</dt><dd>Функции PromQL для растущих счётчиков. <code>increase</code> даёт прирост за окно, <code>rate</code> прирост в секунду. Падение значения считают сбросом счётчика.</dd>
+<dt data-match="absent">absent</dt><dd>Функция PromQL, которая возвращает 1, когда выражение внутри не нашло ни одного ряда. Нужна для алертов на пропавшие метрики.</dd>
+<dt data-match="правило алерта|правила алертов|правил алертов|alerting rule">Правило алерта (alerting rule)</dt><dd>Выражение PromQL с именем, метками и выдержкой. Пока выражение возвращает ряды, алерт активен.</dd>
+<dt data-match="pending|firing|выдержк">Выдержка for, pending и firing</dt><dd>Состояния алерта в Prometheus. Pending означает, что условие выполнено, но держится меньше выдержки <code>for</code>. Firing означает, что выдержка пройдена.</dd>
+<dt data-match="Alertmanager">Alertmanager</dt><dd>Компонент экосистемы Prometheus, который группирует алерты и рассылает уведомления в почту, мессенджеры и системы дежурств. На учебном стенде не установлен.</dd>
+<dt data-match="Grafana">Grafana</dt><dd>Приложение для дашбордов. Берёт данные из Prometheus и рисует панели по запросам PromQL.</dd>
+<dt data-match="provisioning">Provisioning</dt><dd>Настройка Grafana из файлов при старте. Источники данных и дашборды описываются в YAML и JSON и хранятся в git.</dd>
+<dt data-match="дашборд|dashboard">Дашборд (dashboard)</dt><dd>Набор панелей Grafana на одном экране. У PayGuard он описан в <code>payguard.json</code>.</dd>
+<dt data-match="лаг|records_lag">Лаг Kafka (consumer lag)</dt><dd>Сколько записей в партиции ещё не прочитано потребителем. Метрика клиента Kafka, во Flink живёт в TaskManager вместе с источником.</dd>
+<dt data-match="currentEmitEventTimeLag|отставани">Отставание по времени события (currentEmitEventTimeLag)</dt><dd>Метрика источника, разница между часами TaskManager и временем события последней выданной записи.</dd>
+<dt data-match="busyTimeMsPerSecond|busy">busyTimeMsPerSecond</dt><dd>Сколько миллисекунд в секунду задача была занята обработкой. 1000 означает полную загрузку. Подробно в уроке 18.</dd>
+<dt data-match="backPressuredTimeMsPerSecond|backpressure">backPressuredTimeMsPerSecond</dt><dd>Сколько миллисекунд в секунду задача ждала свободного буфера у следующего оператора. Признак backpressure, разбирается в уроке 18.</dd>
+<dt data-match="RED|USE">RED и USE</dt><dd>Две схемы выбора метрик. RED для сервиса, скорость, ошибки и длительность. USE для ресурса, загрузка, насыщение и ошибки.</dd>
+<dt data-match="куч|heap">Куча (heap)</dt><dd>Область памяти JVM для объектов Java. Её заполнение и время сборки мусора показывает дашборд.</dd>
+<dt data-match="GC|сборка мусора|сборки мусора">Сборка мусора (GC)</dt><dd>Работа JVM по освобождению памяти от ненужных объектов. Долгие паузы GC останавливают обработку записей.</dd>
+</dl>

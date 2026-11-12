@@ -1,0 +1,117 @@
+<h2>Справочник живёт в чужой базе</h2>
+<p>Уровень риска продавца лежит в таблице <code>merchants</code> в PostgreSQL. Аналитик поднял продавцу риск до HIGH, и это нужно узнать сразу нескольким системам. Первое, что приходит в голову, это опрашивать таблицу запросом по <code>updated_at</code>.</p>
+<p>У опроса есть известные дыры. Удалённая строка в результат запроса не попадёт. Два изменения между опросами сольются в одно. В нашей таблице есть ещё и своя ловушка. В <code>sql/init.sql</code> у <code>updated_at</code> стоит только <code>DEFAULT now()</code>, триггера нет, поэтому <code>UPDATE</code> уровня риска колонку не трогает, и опрос такого изменения вообще не увидит.</p>
+<p>CDC (change data capture, захват изменений) решает задачу с другого конца. База и так записывает каждое изменение в свой журнал, и коннектор читает этот журнал как поток событий. В этом уроке мы построим две линии, которые показаны на схеме. Верхняя переносит <code>merchants</code> в топик Kafka. Нижняя складывает алерты в таблицу озера данных, чтобы по ним можно было строить отчёты.</p>
+
+<svg viewBox="0 0 860 250" role="img" aria-label="Две линии SQL-кластера. PostgreSQL через слот отдаёт журнал заданию CDC, оно пишет в топик merchants.changelog. Основное задание пишет fraud.alerts, задание озера переносит алерты в таблицу Paimon, откуда их читает пакетный отчёт." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l15" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <rect x="240" y="10" width="290" height="230" rx="10" fill="var(--color-accent-light)" stroke="var(--color-accent)"/>
+  <g font-size="13" text-anchor="middle" fill="var(--color-text)" font-family="var(--font-body)">
+    <text x="385" y="30" font-weight="700">SQL-кластер, порт 8082</text>
+    <rect x="10" y="45" width="180" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="100" y="68">PostgreSQL</text><text x="100" y="86" font-size="11">merchants, WAL</text><text x="100" y="102" font-size="11">слот payguard_merchants</text>
+    <rect x="265" y="50" width="240" height="60" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="385" y="75">payguard-cdc-merchants</text><text x="385" y="93" font-size="11">postgres-cdc, затем upsert-kafka</text>
+    <rect x="600" y="50" width="250" height="60" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="725" y="75">Kafka</text><text x="725" y="93" font-size="11">merchants.changelog, compact</text>
+    <rect x="10" y="150" width="180" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="100" y="178">Kafka</text><text x="100" y="196" font-size="11">fraud.alerts</text>
+    <rect x="265" y="155" width="240" height="60" rx="6" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="385" y="180">payguard-alerts-lake</text><text x="385" y="198" font-size="11">kafka, затем paimon</text>
+    <rect x="600" y="150" width="120" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="660" y="178">Paimon</text><text x="660" y="196" font-size="11">fraud_alerts</text>
+    <rect x="750" y="150" width="100" height="70" rx="8" fill="var(--color-surface)" stroke="var(--color-border)"/><text x="800" y="178">Пакетный</text><text x="800" y="196">отчёт</text>
+  </g>
+  <g stroke="var(--color-text-secondary)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l15)">
+    <path d="M190 80H263"/><path d="M505 80H598"/><path d="M190 185H263"/><path d="M505 185H598"/><path d="M720 185H748"/>
+  </g>
+</svg>
+
+<h2>WAL и логическое декодирование</h2>
+<p>WAL (write-ahead log) это журнал упреждающей записи PostgreSQL. Его правило простое. Изменение попадает в файлы данных только после того, как оно записано в журнал, поэтому после падения база может доиграть журнал и восстановиться. Каждая позиция в журнале имеет номер, он называется LSN (log sequence number).</p>
+<p>WAL рассчитан на восстановление самой базы и описывает изменения на физическом уровне. Логическое декодирование превращает его в поток понятных изменений строк. Чтобы журнал содержал нужные для этого данные, настройка <code>wal_level</code> должна быть равна <code>logical</code>. По умолчанию там <code>replica</code>, а поменять значение можно только при старте сервера.</p>
+<p>Формат потока определяет плагин вывода. Стандартный плагин PostgreSQL называется <code>pgoutput</code>, на нём работает встроенная логическая репликация. У коннектора значение по умолчанию другое, <code>decoderbufs</code>, и этот плагин должен быть установлен на сервере, поэтому мы явно указываем <code>pgoutput</code>.</p>
+<p class="doc-links">Документация: <a href="https://www.postgresql.org/docs/17/wal-intro.html" target="_blank" rel="noopener">Write-Ahead Logging</a>, <a href="https://www.postgresql.org/docs/17/runtime-config-wal.html" target="_blank" rel="noopener">wal_level</a>, <a href="https://www.postgresql.org/docs/17/protocol-logical-replication.html" target="_blank" rel="noopener">pgoutput</a></p>
+
+<h2>Слот как абонентский ящик</h2>
+<p>Представь абонентский ящик на почте. Письма складывают туда и хранят, пока абонент их не заберёт. Почта не знает, жив ли абонент. Если он переехал и забыл закрыть ящик, письма продолжат копиться, и однажды их негде станет хранить.</p>
+<p>Логический слот репликации устроен так же. Это объект на сервере, который помнит позицию своего читателя и запрещает удалять журнал после неё. Документация PostgreSQL прямо пишет, что слот живёт независимо от подключения, переживает падения и ничего не знает о состоянии получателя. Читать один слот в каждый момент может только один получатель, поэтому коннектор советует заводить отдельное имя на каждую таблицу, иначе ты увидишь ошибку <code>replication slot "flink" is active for PID</code>.</p>
+<p>В модели ниже одна клетка это журнал, накопившийся за один интервал чекпоинта. Позиция слота отстаёт на три интервала, как при настройке коннектора по умолчанию. Останови задание и нажимай на интервал, потом удали слот. Числа здесь условные, настоящий темп роста зависит от нагрузки на базу.</p>
+
+<div class="viz" id="viz-l15">
+  <p class="viz-title">Что держит журнал на диске</p>
+  <div class="viz-controls">
+    <button class="primary" id="viz-l15-tick" type="button">Прошёл интервал</button>
+    <button id="viz-l15-job" type="button">Остановить задание</button>
+    <button id="viz-l15-drop" type="button">Удалить слот</button>
+    <label><input type="checkbox" id="viz-l15-limit"> Лимит max_slot_wal_keep_size</label>
+    <button id="viz-l15-reset" type="button">Сначала</button>
+  </div>
+  <svg id="viz-l15-svg" role="img" aria-label="Лента сегментов журнала. Сегменты до позиции слота удалены, сегменты после неё заняты на диске."></svg>
+  <p class="viz-note" id="viz-l15-note">Задание работает. Слот двигается вслед за чекпоинтами, старые сегменты освобождаются.</p>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверим две вещи. Первая, что будет со слотом при остановке задания. Коннектор настраивает Debezium, встроенную библиотеку чтения журнала, отдельно для временного и для основного чтения. В первом фрагменте временный слот удаляется при остановке. Во втором основной слот сохраняется, комментарий говорит об этом прямо.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/fetch/PostgresSourceFetchTaskContext.java" data-lines="139-147" data-must="DROP_SLOT_ON_STOP.name(), true"></div>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/fetch/PostgresSourceFetchTaskContext.java" data-lines="164-169" data-must="never drop slot"></div>
+<p>Сам коннектор вызывает удаление основного слота в единственном месте. Условие срабатывает, когда задание запущено в режиме <code>snapshot</code>, то есть читает только снимок и не собирается идти дальше.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/reader/PostgresSourceReader.java" data-lines="161-168" data-must="removeSlot"></div>
+<p>Отсюда правило. Отмена или падение обычного потокового задания оставляет слот на сервере, и убирать его придётся тебе.</p>
+<p>Вторая вещь, когда слот сдвигается. Читатель подтверждает позицию в обработчике завершённого чекпоинта и придерживает несколько последних номеров, чтобы задание могло откатиться на недавний чекпоинт.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/reader/PostgresSourceReader.java" data-lines="132-152" data-must="lsnCommitCheckpointsDelay"></div>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/config/PostgresSourceOptions.java" data-lines="81-89" data-must="scan.lsn-commit.checkpoints-num-delay"></div>
+<p>При интервале 15 с из нашего Compose и задержке 3 слот держит журнал минимум за 45 с. Других вызовов подтверждения позиции в этом источнике нет, поэтому задание без чекпоинтов оставит слот на месте, хотя данные будет читать исправно.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-cdc-docs-release-3.7/docs/connectors/flink-sources/postgres-cdc/" target="_blank" rel="noopener">Postgres CDC Connector</a>, <a href="https://www.postgresql.org/docs/17/logicaldecoding-explanation.html" target="_blank" rel="noopener">Logical Decoding Concepts</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Забытый слот опаснее упавшего задания</strong>
+    <p>Слот мешает удалять и WAL, и строки системных каталогов, которые ему нужны, а значение <code>max_slot_wal_keep_size</code> по умолчанию равно <code>-1</code>, то есть журнал может расти без ограничений. В крайнем случае база остановится, защищаясь от переполнения счётчика транзакций. Поэтому за <code>pg_replication_slots</code> нужен отдельный алерт. Лимит спасает диск, но у него есть цена. Слот, отставший сильнее лимита, теряет журнал, получает <code>wal_status = lost</code> и больше не годится для чтения, так что задание придётся запускать заново со снимка.</p>
+    <p class="doc-links">Документация: <a href="https://www.postgresql.org/docs/17/runtime-config-replication.html" target="_blank" rel="noopener">max_slot_wal_keep_size</a>, <a href="https://www.postgresql.org/docs/17/view-pg-replication-slots.html" target="_blank" rel="noopener">pg_replication_slots</a></p>
+  </div>
+</div>
+
+<h2>Снимок плюс журнал</h2>
+<p>Журнал старше слота уже удалён, и начальное содержимое таблицы в нём взять неоткуда. Поэтому коннектор в режиме <code>initial</code> сначала читает таблицу, а потом переключается на журнал. Всё сложное здесь в стыке. Пока идёт чтение таблицы, строки продолжают меняться.</p>
+<p>Инкрементальный снимок (<code>scan.incremental.snapshot.enabled = true</code>) режет таблицу на чанки по первичному ключу и раздаёт их параллельным читателям. По документации он читает параллельно, делает чекпоинты между чанками и обходится без глобальной блокировки на чтение. По умолчанию этот режим выключен, поэтому в нашем SQL он включён явно.</p>
+<p>Каждый чанк читается по одной схеме. Слово watermark здесь означает позицию LSN и никак не связано с watermark времени события из урока 5. Пройди шаги.</p>
+
+<div class="flow-animation" data-steps='[
+  {"highlight":"flow-l15a-3","label":"Читатель запоминает текущий LSN. Это нижняя граница чанка (low watermark)."},
+  {"highlight":"flow-l15a-1","label":"Читатель выбирает строки чанка из таблицы обычным запросом.","packet":true,"from":"l15a-1","to":"l15a-3"},
+  {"highlight":"flow-l15a-3","label":"Читатель снова запоминает LSN. Это верхняя граница (high watermark). Всё, что изменилось во время запроса, лежит между границами."},
+  {"highlight":"flow-l15a-2","label":"Временный слот отдаёт журнал между границами, это дозаполнение (backfill). Если границы совпали, шаг пропускается.","packet":true,"from":"l15a-2","to":"l15a-3"},
+  {"highlight":"flow-l15a-4","label":"Изменения из журнала вливаются в прочитанные строки, и чанк уходит дальше как согласованная картинка на верхнюю границу.","packet":true,"from":"l15a-3","to":"l15a-4"},
+  {"highlight":"flow-l15a-2","label":"Когда все чанки готовы, запускается одно потоковое чтение через основной слот, и дальше работает только оно.","packet":true,"from":"l15a-2","to":"l15a-4"}
+]'>
+  <div class="flow-actors">
+    <div class="flow-actor" id="flow-l15a-1"><div class="flow-actor-icon">T</div><span>Таблица</span></div>
+    <div class="flow-actor" id="flow-l15a-2"><div class="flow-actor-icon">W</div><span>WAL и слот</span></div>
+    <div class="flow-actor" id="flow-l15a-3"><div class="flow-actor-icon">R</div><span>Читатель чанка</span></div>
+    <div class="flow-actor" id="flow-l15a-4"><div class="flow-actor-icon">F</div><span>Дальше в задание</span></div>
+  </div>
+  <div class="flow-packet"></div>
+  <div class="flow-step-label">Нажми «Следующий шаг»</div>
+  <div class="flow-controls">
+    <button class="btn flow-next-btn">Следующий шаг</button>
+    <button class="btn flow-reset-btn">Сначала</button>
+    <span class="flow-progress"></span>
+  </div>
+</div>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Базовый класс чтения чанка показывает ту же последовательность. Логи пронумерованы, смотри на них. Сначала нижняя граница и сам снимок.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-cdc-base/src/main/java/org/apache/flink/cdc/connectors/base/source/reader/external/AbstractScanFetchTask.java" data-lines="60-71" data-must="Determining low watermark"></div>
+<p>Затем верхняя граница. Если дозаполнение отключено настройкой, границы приравниваются, и комментарий предупреждает, что гарантия падает до at-least-once.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-cdc-base/src/main/java/org/apache/flink/cdc/connectors/base/source/reader/external/AbstractScanFetchTask.java" data-lines="83-91" data-must="Determining high watermark"></div>
+<p>Дозаполнение запускается только тогда, когда между границами что-то есть.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-cdc-base/src/main/java/org/apache/flink/cdc/connectors/base/source/reader/external/AbstractScanFetchTask.java" data-lines="104-113" data-must="executeBackfillTask"></div>
+<p>В PostgreSQL дозаполнению нужен собственный слот, потому что слот видит журнал только с момента создания. Он создаётся до снимка и удаляется после. Его имя собрано из <code>slot.name</code> и номера подзадачи, поэтому при параллелизме 2 у нас на время снимка появятся <code>payguard_merchants_0</code> и <code>payguard_merchants_1</code>. Держи это в уме, настройка <code>max_replication_slots</code> по умолчанию разрешает всего 10 слотов на сервер.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/fetch/PostgresScanFetchTask.java" data-lines="77-92" data-must="a slot can only read wal-log"></div>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-connector-postgres-cdc/src/main/java/org/apache/flink/cdc/connectors/postgres/source/config/PostgresSourceConfig.java" data-lines="140-147" data-must="getSlotNameForBackfillTask"></div>
+<p>Потоковое чтение выдаётся читателю, когда все чанки распределены и закончены. Причина указана в комментарии. Иначе записи из журнала могли бы обогнать записи снимка с тем же первичным ключом.</p>
+<div data-src="cdc:flink-cdc-connect/flink-cdc-source-connectors/flink-cdc-base/src/main/java/org/apache/flink/cdc/connectors/base/source/assigner/HybridSplitAssigner.java" data-lines="185-195" data-must="we need to wait snapshot-assigner"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-cdc-docs-release-3.7/docs/connectors/flink-sources/postgres-cdc/" target="_blank" rel="noopener">Incremental Snapshot Reading</a>, <a href="https://www.postgresql.org/docs/17/runtime-config-replication.html" target="_blank" rel="noopener">max_replication_slots</a></p>
+</div>
+
+<p>Со Spark разница здесь в числе компонентов. Там такую линию обычно собирают из отдельных частей. Debezium в Kafka Connect пишет в топик, Structured Streaming читает топик и через <code>foreachBatch</code> делает <code>MERGE</code> в таблицу озера. Flink CDC читает журнал внутри источника задания, и позиция в WAL попадает в тот же чекпоинт, что и состояние операторов.</p>
+

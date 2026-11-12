@@ -1,0 +1,11 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<div data-code="lesson-16/src/test/java/dev/study/payguard/pipeline/DeduplicateRestoreTest.java"></div>
+<p>Ключом служит <code>paymentId</code>, как в <code>PayGuardJob</code>. В первом экземпляре один платёж <code>p1</code>, его достаточно для снимка. Срок памяти о платеже равен часу, тест заканчивается намного раньше, поэтому TTL здесь не мешает.</p>
+<p>Проверка <code>containsExactly("p2")</code> закрывает сразу две поломки. Отсутствие <code>p1</code> доказывает, что память пережила рестарт. Присутствие <code>p2</code> доказывает, что оператор вообще работает и не выбрасывает всё подряд. Проверка на пустой выход без второго платежа прошла бы и на сломанной функции.</p>
+<p>Запусти тест и весь набор.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test --tests '*DeduplicateRestoreTest'
+./gradlew test</pre>
+<p>Теперь проверка поломкой. Замени поле <code>ValueState&lt;Boolean&gt;</code> на <code>Set&lt;String&gt;</code>, создай набор в <code>open</code> и отсекай повторы через <code>seen.add(payment.paymentId())</code>. Мы сделали это на копии снапшота. Твой тест упал, в выходе оказались <code>p1</code> и <code>p2</code>. Вместе с ним упал старый <code>DeduplicateFunctionTest.paymentIsForgottenAfterTtl</code>, потому что вместе с состоянием пропал и TTL. Верни код, и оба снова будут зелёными.</p>
+</div>

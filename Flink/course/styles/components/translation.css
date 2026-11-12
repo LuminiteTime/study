@@ -1,0 +1,75 @@
+/* Перевод кода: слева фрагмент, справа построчное объяснение. */
+.translation-block {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-md);
+  margin: var(--space-8) 0;
+}
+
+.translation-code {
+  position: relative;
+  padding: var(--space-6);
+  overflow-x: auto;
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-prose);
+}
+
+.translation-code::-webkit-scrollbar {
+  display: none;
+}
+
+.translation-code pre {
+  margin: 0;
+}
+
+.translation-english {
+  padding: var(--space-6);
+  background: var(--color-surface-warm);
+  border-left: 1px solid var(--color-border);
+  font-size: var(--text-sm);
+  line-height: var(--leading-prose);
+}
+
+.translation-label {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  opacity: 0.5;
+}
+
+.translation-english .translation-label {
+  position: static;
+  display: block;
+  margin-bottom: var(--space-3);
+  color: var(--color-text-muted);
+}
+
+.translation-lines .tl {
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--color-border-light);
+  color: var(--color-text-secondary);
+}
+
+.translation-lines .tl:last-child {
+  border-bottom: none;
+}
+
+@media (max-width: 768px) {
+  .translation-block {
+    grid-template-columns: 1fr;
+  }
+
+  .translation-english {
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+  }
+}

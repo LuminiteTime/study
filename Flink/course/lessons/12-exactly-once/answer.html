@@ -1,0 +1,39 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Зависимости. Версия JDBC-коннектора читается так же, как у Kafka, версия коннектора плюс версия Flink. Модуль <code>-postgres</code> добавляет диалект PostgreSQL.</p>
+<div data-diff="lesson-11/build.gradle.kts lesson-12/build.gradle.kts"></div>
+<p>Таблица. Первичный ключ из продавца и начала окна. Конец окна определяется началом, поэтому в ключ он не входит.</p>
+<div data-diff="lesson-11/sql/init.sql lesson-12/sql/init.sql"></div>
+<p>Приёмник целиком.</p>
+<div data-code="lesson-12/src/main/java/dev/study/payguard/job/JdbcSinks.java"></div>
+<p>Запрос использует <code>ON CONFLICT (merchant_id, window_start_ms) DO UPDATE</code>. При повторе после восстановления строка перезаписывается теми же числами. При позднем срабатывании окна она получает обновлённые итоги, и поэтому здесь нужен <code>DO UPDATE</code>. Вариант <code>DO NOTHING</code> тоже убрал бы повторы, но оставил бы в таблице первый, неполный итог. Значения <code>EXCLUDED</code> это строка, которую пытались вставить.</p>
+<p>Приёмник собран через <code>buildAtLeastOnce</code>. Строки копятся пачками до 200 штук или до секунды, неудачная пачка повторяется до трёх раз. Гарантию at-least-once дают чекпоинты, на них Writer дописывает накопленное. Повторы безопасны благодаря ключу и upsert, поэтому XA-транзакции с их задержкой здесь не нужны.</p>
+<p>Задание и настройки. В <code>PayGuardJob</code> итоги уходят в новый приёмник, лишнее поле и топик удалены.</p>
+<div data-diff="lesson-11/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-12/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<div data-diff="lesson-11/src/main/java/dev/study/payguard/job/JobConfig.java lesson-12/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+<div data-diff="lesson-11/docker-compose.yml lesson-12/docker-compose.yml"></div>
+<p>Проверка. Флаги <code>-s</code>, <code>-f</code> и <code>-v</code> у <code>docker compose rm</code> останавливают контейнер базы, не спрашивают подтверждения и удаляют его анонимный том. Новый контейнер создаст базу заново и выполнит <code>init.sql</code>.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose rm -sfv postgres
+docker compose up -d --wait
+scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --dup 0.02 --bad 0.01 --burst 0.002"</pre>
+<p>Убей TaskManager дважды, как в практике, и посмотри на таблицы и граф.</p>
+<pre data-lang="bash" data-title="терминал">scripts/chaos-kill-tm.sh
+scripts/chaos-kill-tm.sh
+docker compose exec -T postgres psql -U payguard -d payguard -c '\dt'
+JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[].name | select(test("merchant-stats"))'</pre>
+<pre data-lang="text" data-title="вывод" data-output>             List of relations
+ Schema |      Name      | Type  |  Owner
+--------+----------------+-------+----------
+ public | merchant_stats | table | payguard
+ public | merchants      | table | payguard
+(2 rows)
+
+merchant-stats-1m -&gt; (merchant-stats-postgres: Writer -&gt; merchant-stats-postgres: Committer, too-late-sink: Writer -&gt; too-late-sink: Committer)</pre>
+<p>Посчитай строки и продавцов запросом <code>select count(*), count(distinct merchant_id) from merchant_stats</code>. На нашем стенде после двух падений получилось вот что.</p>
+<pre data-lang="text" data-title="сводка прогона стенда" data-output>merchant_stats в Postgres: 150 строк, 50 продавцов</pre>
+<p>Это три минутных окна по 50 продавцов. После каждого восстановления приёмник at-least-once заново отправляет итоги, выданные после последнего чекпоинта, и <code>ON CONFLICT</code> превращает их в обновления существующих строк. Без него повторная вставка нарушила бы первичный ключ, и запись пачки закончилась бы ошибкой базы.</p>
+</div>

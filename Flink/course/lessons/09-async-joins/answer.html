@@ -1,0 +1,23 @@
+<h2>Ответ</h2>
+<button class="reveal-answer">Показать ответ</button>
+<div class="answer-body" hidden>
+<p>Функция держит по ключу два значения. <code>waiting-payment</code> хранит платёж, который ждёт подтверждения. <code>confirmation-seen</code> отмечает подтверждение, пришедшее раньше платежа.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/pipeline/UnconfirmedPaymentFunction.java"></div>
+<p>Разберём три пути. Платёж пришёл первым. Он сохраняется, и ставится таймер на время платежа плюс срок. Если подтверждение успело, <code>processElement2</code> находит платёж, вычисляет время таймера из его <code>eventTimeMs</code>, удаляет таймер и очищает состояние. Если не успело, срабатывает <code>onTimer</code> и выдаёт алерт.</p>
+<p>Подтверждение пришло первым. Платежа ещё нет, поэтому функция запоминает сам факт подтверждения и ставит таймер очистки на время подтверждения плюс срок. Когда придёт платёж, флаг снимается, и платёж в состояние не кладётся. Без таймера флаг мог бы остаться навсегда. Генератор, например, подтверждает и дубликаты платежей. Второе подтверждение приходит, когда платёж уже обработан и состояние очищено, и ставит флаг, который больше никто не снимет.</p>
+<p>Таймер в <code>onTimer</code> общий для обоих случаев. Если в состоянии есть платёж, это алерт. В любом случае флаг очищается, и по ключу ничего не остаётся.</p>
+<p>Подключение в задании. Оба потока разбиты по <code>paymentId</code> и соединены через <code>connect</code>. Алерты правила объединяются с остальными до обогащения.</p>
+<div data-code="lesson-09/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="123-131"></div>
+<p>Тест проверяет все четыре случая. Последний тест двигает watermark только первого входа. Watermark оператора остаётся минимальным из двух, поэтому таймер не срабатывает.</p>
+<div data-code="lesson-09/src/test/java/dev/study/payguard/pipeline/UnconfirmedPaymentFunctionTest.java"></div>
+<p>Итог прогона всех тестов снапшота на стенде курса. Jar вырос до 26 МБ за счёт драйвера PostgreSQL и HikariCP.</p>
+<pre data-lang="text" data-title="итог прогона" data-output>RESULT tests 33 fail 0
+jar bytes 26012929</pre>
+<p>На стенде вершина <code>rule-unconfirmed</code> получила 33845 записей, столько же, сколько <code>join-confirmations</code>. Оба оператора читают одни и те же два потока, разбитые по одному ключу.</p>
+<pre data-lang="json" data-title="метрики rule-unconfirmed" data-output>[{"id":"numRecordsIn","min":16895.0,"max":16950.0,"sum":33845.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]</pre>
+<p>Алертов в этом замере ещё ноль, и так должно быть. Таймер ждёт пять минут времени события, поэтому первый алерт появится не раньше, чем watermark обоих входов уйдёт на пять минут вперёд от первого неподтверждённого платежа. Чтобы увидеть алерты, оставь генератор работать дольше пяти минут, можно с <code>--confirm 0.5</code>, и отфильтруй топик алертов.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic fraud.alerts --from-beginning --timeout-ms 5000 2&gt;/dev/null \
+  | jq -c 'select(.ruleId == "unconfirmed") | {paymentId, merchantRisk, detail}' | head -3</pre>
+<p>У каждого такого алерта будет <code>detail</code> «нет подтверждения за 300 секунд» и заполненный <code>merchantRisk</code>, потому что правило стоит до обогащения. Мы этот вывод на стенде не снимали, поэтому листинга здесь нет.</p>
+</div>

@@ -1,0 +1,116 @@
+<h2>Что будет в конце</h2>
+<p>Накопительный итог из урока 4 уходит. Вместо него задание считает минутные итоги по продавцам в tumbling окнах по времени события, с допуском опозданий в минуту, и пишет их в топик <code>merchant.stats</code>. Платежи, которые не принял уже никто, уходят в <code>payments.late</code>. Окно проверяет тест на MiniCluster. Файлы сессий карты из задания пока создавать не нужно.</p>
+
+<h2>Шаг 1. Модель итога</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/model/MerchantStats.java</code>. Это то, что уйдёт в Kafka. Границы окна лежат прямо в записи, иначе потребитель не поймёт, к какой минуте относится итог. Старый <code>MerchantTotal</code> удали, он больше не нужен.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/model/MerchantStats.java"></div>
+
+<h2>Шаг 2. Функция сложения</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/PaymentTotals.java</code>. Класс открытый, потому что им же воспользуется окно сессий из задания.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/pipeline/PaymentTotals.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-06/src/main/java/dev/study/payguard/pipeline/PaymentTotals.java" data-lines="7-31"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Три параметра типа означают вход, аккумулятор и результат. Вход это платёж, а аккумулятор и результат здесь совпадают.</p>
+      <p class="tl">Аккумулятор описан как record из двух чисел. Именно он лежит в состоянии окна вместо самих платежей.</p>
+      <p class="tl"><code>createAccumulator</code> вызывается для первой записи нового окна. Окно рождается лениво, вместе с первым платежом.</p>
+      <p class="tl"><code>add</code> вызывается на каждый платёж. Record неизменяемый, поэтому метод возвращает новый аккумулятор. Flink кладёт возвращённое значение обратно в состояние.</p>
+      <p class="tl"><code>getResult</code> вызывается при срабатывании окна и отдаёт аккумулятор как есть, превращать его во что-то другое здесь незачем.</p>
+      <p class="tl"><code>merge</code> складывает два аккумулятора. Сессионное окно вызывает его при каждой склейке. Tumbling окну он не нужен.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 3. Окно продавца</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/MerchantStatsWindow.java</code>. Все настройки окна собраны в одном классе, а задание только подключает его к потоку.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/pipeline/MerchantStatsWindow.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-06/src/main/java/dev/study/payguard/pipeline/MerchantStatsWindow.java" data-lines="17-45"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Размер окна и допуск опозданий вынесены в константы. Тест и задание ссылаются на них, и числа не разъедутся.</p>
+      <p class="tl">Тег побочного выхода объявлен анонимным подклассом, отсюда фигурные скобки. Так Flink узнаёт тип <code>PaymentEvent</code> несмотря на стирание дженериков в Java.</p>
+      <p class="tl"><code>keyBy</code> раскладывает платежи по продавцам. Окна бывают и без ключа, но тогда весь поток идёт через одну подзадачу.</p>
+      <p class="tl"><code>TumblingEventTimeWindows.of</code> задаёт минутные окна по времени события, выровненные по началу эпохи.</p>
+      <p class="tl"><code>allowedLateness</code> держит окно в состоянии ещё минуту после срабатывания. <code>sideOutputLateData</code> направляет в тег то, что опоздало и сверх этого.</p>
+      <p class="tl"><code>aggregate</code> с двумя аргументами складывает платежи через <code>PaymentTotals</code>, а в конце отдаёт единственный аккумулятор в <code>AddWindowBounds</code>.</p>
+      <p class="tl">Имя и uid оператора задаются сразу, их смысл ты знаешь по уроку 2.</p>
+      <p class="tl"><code>AddWindowBounds</code> наследует <code>ProcessWindowFunction</code>. Итератор <code>totals</code> всегда содержит ровно один элемент, это готовый аккумулятор.</p>
+      <p class="tl"><code>context.window()</code> даёт границы окна, их и добавляем к счётчикам. Без этой функции границ в результате не было бы.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 4. Настройки, топики и задание</h2>
+<p>В <code>JobConfig</code> появляются три топика. Поле для сессий карты пригодится в задании, заведи его сразу, чтобы не возвращаться к этому файлу.</p>
+<div data-diff="lesson-05/src/main/java/dev/study/payguard/job/JobConfig.java lesson-06/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+<p>Те же три топика добавь в цикл службы <code>kafka-init</code> в <code>docker-compose.yml</code>.</p>
+<div data-diff="lesson-05/docker-compose.yml lesson-06/docker-compose.yml"></div>
+<p>В <code>PayGuardJob</code> цепочку <code>map</code>, <code>keyBy</code>, <code>reduce</code> и <code>print</code> замени подключением окна и двух приёмников Kafka. Приёмник из урока 3 обобщённый, поэтому годится и для итогов, и для платежей. Импорты <code>MerchantStats</code> и <code>MerchantStatsWindow</code> добавь, а импорт <code>MerchantTotal</code> убери.</p>
+<p>С этого урока <code>main</code> растёт с каждым новым оператором, поэтому разнеси граф по коротким методам. <code>parsePayments</code> возвращает разобранный поток вместе с DLQ, а каждое следующее ответвление подключается своим методом. Сам <code>main</code> остаётся оглавлением задания.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="25-37"></div>
+<p>Окно и оба его приёмника.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="60-68"></div>
+<p>Побочный выход берётся у результата окна через тот же тег. Тип потока известен из тега, поэтому приёмник получает <code>PaymentEvent</code>.</p>
+
+<h2>Шаг 5. Тест на MiniCluster</h2>
+<p>Harness из урока 3 проверяет один оператор, а у окна важна связка из keyBy, watermark, таймеров и состояния. Проще запустить кусок конвейера целиком. MiniCluster это настоящий Flink внутри JVM теста, зависимость <code>flink-test-utils</code> уже есть в <code>build.gradle.kts</code>. Сначала общий помощник для тестов, создай <code>src/test/java/dev/study/payguard/testing/Payments.java</code>.</p>
+<div data-code="lesson-06/src/test/java/dev/study/payguard/testing/Payments.java"></div>
+<p>В <code>streamOf</code> время события берётся из поля платежа, а watermark следует за ним без задержки. Это стратегия <code>forMonotonousTimestamps</code>. Комментарий в коде обещает, что после конца данных watermark уходит в бесконечность и закрывает все окна. Проверим это в исходниках, ведь на этом держится весь тест.</p>
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Когда источник дочитал данные, задача источника вызывает этот метод. Комментарий говорит, что он отправляет <code>MAX_WATERMARK</code>, чтобы сработали все таймеры и сбросилось состояние окон.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/StreamTask.java" data-lines="737-747" data-must="MAX_WATERMARK} so that all registered timers are fired."></div>
+<p>Для задачи источника метод переопределён и действительно отправляет <code>Watermark.MAX_WATERMARK</code>, то есть <code>Long.MAX_VALUE</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/runtime/tasks/SourceOperatorStreamTask.java" data-lines="215-219" data-must="output.emitWatermark(Watermark.MAX_WATERMARK);"></div>
+<p>Поэтому в тесте последнее окно тоже выдаст итог, хотя платежей после него нет. На стенде с Kafka источник бесконечен, и последнее окно ждёт настоящего watermark.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/testing/" target="_blank" rel="noopener">Testing</a></p>
+</div>
+<p>Теперь сам тест, <code>src/test/java/dev/study/payguard/pipeline/MerchantStatsWindowTest.java</code>.</p>
+<div data-code="lesson-06/src/test/java/dev/study/payguard/pipeline/MerchantStatsWindowTest.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-06/src/test/java/dev/study/payguard/pipeline/MerchantStatsWindowTest.java" data-lines="18-41"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Расширение JUnit 5 поднимает один MiniCluster на весь класс, с одним TaskManager и двумя слотами. Поднимать кластер на каждый тест было бы долго.</p>
+      <p class="tl"><code>getExecutionEnvironment</code> внутри такого теста сам подключается к MiniCluster, расширение регистрирует для этого тестовое окружение. Параллелизм 2 нужен, чтобы продавцы разошлись по двум подзадачам, как на стенде.</p>
+      <p class="tl">Четыре платежа подобраны под границы. Платежи в 1 с и 59 с попадают в первую минуту m1, платёж в 61 с открывает вторую минуту, m2 живёт отдельно.</p>
+      <p class="tl"><code>executeAndCollect(10)</code> запускает задание и собирает до 10 результатов или до конца данных. Метод заранее создаёт список на столько элементов, сколько указано в лимите, поэтому лимит должен быть небольшим. С <code>Integer.MAX_VALUE</code> тест упадёт с <code>OutOfMemoryError</code>, мы на это наткнулись при подготовке урока 13.</p>
+      <p class="tl">Порядок итогов между подзадачами не определён, поэтому сравнение идёт без учёта порядка. Начало первого окна равно 0, это то же выравнивание по эпохе.</p>
+    </div>
+  </div>
+</div>
+<pre data-lang="bash" data-title="терминал">./gradlew test --tests 'dev.study.payguard.pipeline.MerchantStatsWindowTest'</pre>
+<p>Флаг <code>--tests</code> запускает только указанный класс. Тест должен пройти. Если вместо этого он падает с текстом <code>Record has Long.MIN_VALUE timestamp</code>, значит, поток пришёл в окно без времени события. Это исключение из <code>assignWindows</code>, которое мы видели в теории, и лечится оно стратегией watermark на источнике.</p>
+
+<h2>Шаг 6. Запусти на стенде</h2>
+<p>Порядок прежний, сначала сборка, потом стенд. Если поднять Compose раньше сборки, Docker смонтирует пустую <code>build/libs</code>. Команда службы <code>kafka-init</code> изменилась, поэтому Compose пересоздаст её и она создаст новые топики. Ключ <code>--if-not-exists</code> не даёт ей споткнуться о старые.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list</pre>
+<p>Останови задание прошлого урока через <code>flink cancel &lt;JobID&gt;</code>. Его состояние с накопительными итогами новому заданию не нужно. Затем отправь новое и запусти генератор. По умолчанию генератор делает 5 % платежей опоздавшими.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --bad 0.01"</pre>
+<p>Подожди минуты полторы, чтобы watermark закрыл хотя бы одно окно, и прочитай начало топика итогов.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic merchant.stats --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"merchantId":"m-0000","windowStartMs":1794085500000,"windowEndMs":1794085560000,"paymentCount":632,"amountMinor":16098738}
+{"merchantId":"m-0008","windowStartMs":1794085500000,"windowEndMs":1794085560000,"paymentCount":29,"amountMinor":850031}
+{"merchantId":"m-0009","windowStartMs":1794085500000,"windowEndMs":1794085560000,"paymentCount":27,"amountMinor":650680}</pre>
+<p>Границы окна делятся на 60000 без остатка, это выравнивание из <code>getWindowStartWithOffset</code>. Окно неполное, генератор начал писать примерно за 11 секунд до его конца. Даже так у горячего продавца m-0000 632 платежа, а у обычных около 30. Треть потока идёт в одного продавца, так задано в генераторе.</p>
+<p>Теперь посмотри на вершину окна через REST. Первая команда находит идентификатор задания, вторая вершину, имя которой начинается с имени оператора окна.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+V=$(curl -s localhost:8081/jobs/$JOB | jq -r '.vertices[] | select(.name | startswith("merchant-stats-1m")) | .id')
+curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=numRecordsIn,numRecordsOut,busyTimeMsPerSecond,backPressuredTimeMsPerSecond&amp;agg=min,max,sum" | jq -c .
+curl -s localhost:8081/jobs/$JOB/vertices/$V/watermarks | jq -c '[.[].value]'</pre>
+<pre data-lang="json" data-title="вывод" data-output>[{"id":"numRecordsIn","min":7012.0,"max":10592.0,"sum":17604.0},{"id":"numRecordsOut","min":89.0,"max":93.0,"sum":182.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]
+["1794085630855","1794085630855"]</pre>
+<p>Это числа с нашего стенда. На вход пришло 17604 платежа, и одна подзадача получила в полтора раза больше другой. Горячий продавец целиком живёт в одной подзадаче, перекос ты помнишь по уроку 4.</p>
+<p>На выход ушло 182 записи. Как и в уроке 3, <code>numRecordsOut</code> вершины считает записи, отправленные приёмниками Kafka. Watermark равен 1794085630855, значит, сработали окна, которые кончаются в 1794085560000 и 1794085620000. Продавцов 50, так что основных итогов не больше 100. Остальные записи могли появиться только поздними срабатываниями, других путей выдачи у оператора нет. Опоздавшие платежи генератора приходили, когда их минута уже выдала итог, и каждый такой платёж выпускал её итог заново.</p>
+<p>Прочитай <code>payments.late</code> той же командой, что и <code>merchant.stats</code>. На нашем стенде топик пуст, и это ожидаемо. Генератор опаздывает максимум на 30 с.</p>
+<div data-code="lesson-06/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java" data-lines="15-15"></div>
+<p>Платёж уходит в побочный выход, только когда watermark обогнал его время больше чем на допуск. Watermark отстаёт от самого свежего платежа на 10 с, допуск равен 60 с, поэтому отбросить можно только платёж, опоздавший больше чем на 70 с. Чтобы увидеть побочный выход в работе, временно поставь <code>ALLOWED_LATENESS</code> в ноль и повтори прогон. Потом верни минуту, следующие уроки рассчитывают на неё.</p>

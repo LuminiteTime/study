@@ -1,0 +1,161 @@
+<h2>Зелёные тесты и упавший запуск</h2>
+<p>В уроке 8 мы уже видели такую сцену. Тесты правил проходят, jar собирается, а отправка на кластер падает ещё до старта задания.</p>
+<pre data-lang="text" data-title="вывод flink run" data-output>RuleConfig[velocityMaxPayments=10, blockedCountries=[]] is not serializable. The object probably contains or references non serializable fields.</pre>
+<p>Тест на harness этой ошибки не видел. Он проверял функцию, и функция работала правильно. Сломалось другое свойство, функцию нельзя отправить по сети на TaskManager.</p>
+<p>Вторая ошибка опаснее, потому что молчит. Оператор без <code>uid</code> работает как обычно. Flink сам выводит его идентификатор из положения в графе, и документация предупреждает, что такой идентификатор меняется при правке задания. Узнаешь ты об этом в день релиза, когда новая версия не сможет сопоставить состояние из savepoint со своими операторами.</p>
+<p>У задания Flink много свойств, которые нельзя проверить одним видом теста. Логика, сериализуемость, восстановление, транзакции и упаковка ломаются независимо. Поэтому тестов нужно несколько видов, и у каждого своя цена.</p>
+
+<h2>Проверка квартиры после ремонта</h2>
+<p>Электрик сдаёт квартиру. Сначала он подносит тестер к каждой розетке, это быстро и точно показывает неисправную. Затем выключает свет и включает снова, чтобы посмотреть, помнит ли термостат своё расписание. Потом читает схему щитка при выключенном токе и видит автомат без подписи, хотя тот исправно работает. Дальше питает квартиру целиком от переносного генератора. В конце подключает её к городской сети.</p>
+<p>В тестах Flink этим шагам соответствуют функция на harness, restore-тест, топология без запуска, MiniCluster и сквозной тест в контейнерах. Генератор проверяет всю проводку и обходится без города. Городская сеть проверяет ввод в дом, и стоит это дороже всего. Выбери ошибку и посмотри, какие уровни её заметят.</p>
+
+<div class="viz" id="viz-l16">
+  <p class="viz-title">Какую ошибку видит каждый уровень</p>
+  <div class="viz-controls" id="viz-l16-bugs"></div>
+  <svg id="viz-l16-svg" role="img" aria-label="Пирамида из пяти уровней тестов. Уровни, которые поймают выбранную ошибку, подсвечены и подписаны."></svg>
+  <p class="viz-note" id="viz-l16-note" aria-live="polite"></p>
+</div>
+<p>Строки про <code>RuleConfig</code>, забытый <code>uid</code> и поле вместо состояния проверены поломкой кода на копии снапшота и запуском <code>./gradlew test</code>. Остальные строки выведены из исходников и кода тестов, запуском с поломкой мы их не проверяли.</p>
+
+<table>
+<thead><tr><th>Уровень</th><th>Что запускается</th><th>Где в PayGuard</th><th>Где в CI</th></tr></thead>
+<tbody>
+<tr><td>Функция на harness</td><td>Один оператор в макете окружения</td><td><code>CardProfileFunctionTest</code> и другие тесты из прошлых уроков</td><td><code>./gradlew test</code></td></tr>
+<tr><td>Restore на harness</td><td>Снимок одного оператора и подъём второго из него</td><td><code>CardProfileRestoreTest</code></td><td><code>./gradlew test</code></td></tr>
+<tr><td>Топология</td><td>Построение графа, заданий нет</td><td><code>PipelineTopologyTest</code></td><td><code>./gradlew test</code></td></tr>
+<tr><td>MiniCluster</td><td>Часть конвейера на встроенном кластере</td><td><code>MerchantStatsWindowTest</code>, <code>AlertEnrichmentTest</code></td><td><code>./gradlew test</code></td></tr>
+<tr><td>E2E</td><td>Весь граф на встроенном кластере, Kafka и PostgreSQL в контейнерах</td><td><code>PayGuardE2ETest</code></td><td><code>./gradlew e2eTest</code></td></tr>
+</tbody>
+</table>
+
+<h2>Уровень 1. Функция на harness</h2>
+<p>Test harness создаёт настоящий оператор Flink внутри макета окружения. Сети, слотов и потоков задания здесь нет. Ты сам подаёшь запись через <code>processElement</code>, двигаешь время через <code>processWatermark</code> и <code>setProcessingTime</code> и читаешь выход через <code>extractOutputValues</code>. Такой тест быстрый и детерминированный, поэтому граничные случаи пишут здесь.</p>
+<p>В Spark потоковую логику обычно проверяют на локальной сессии с <code>master("local[*]")</code> и источником <code>MemoryStream</code>, то есть запускают настоящий запрос. Во Flink такой запуск тоже есть, это MiniCluster. Harness даёт ещё один уровень ниже него, где оператор можно вызвать напрямую и подвинуть его время вручную.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Почему harness пропустил <code>RuleConfig</code>. Функцию <code>DynamicRules</code> в граф добавляет <code>process</code> из <code>BroadcastConnectedStream</code>, и он прогоняет её через <code>clean</code> окружения. Третий аргумент <code>true</code> включает проверку сериализуемости.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/environment/StreamExecutionEnvironment.java" data-lines="2112-2118" data-must="ClosureCleaner.clean(f, getConfig().getClosureCleanerLevel(), true)"></div>
+<p>Сама проверка пытается сериализовать объект. Строки с сообщением дают ровно тот текст, что мы получили от <code>flink run</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/ClosureCleaner.java" data-lines="147-172" data-must="The object probably contains or references non serializable fields."></div>
+<p>Теперь конструктор harness. Функция сюда приходит уже упакованной в оператор, и <code>clean</code> для неё никто не вызывает. Чистится только селектор ключа, и последний аргумент <code>false</code> отключает проверку даже для него.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/KeyedOneInputStreamOperatorTestHarness.java" data-lines="59-74" data-must="ClosureCleaner.clean(keySelector, ExecutionConfig.ClosureCleanerLevel.RECURSIVE, false)"></div>
+<p>Harness проверяет поведение оператора. Вопрос о том, можно ли этот оператор отправить на кластер, он перед собой не ставит.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/testing/" target="_blank" rel="noopener">Testing</a></p>
+</div>
+
+<h2>Уровень 2. Restore-тест</h2>
+<p>Если функция держит данные в поле вместо состояния Flink, обычный тест на harness этого не заметит. Пока процесс жив, поле ведёт себя как состояние. Restore-тест снимает снимок с одного экземпляра оператора, поднимает из него второй и подаёт ещё одну запись. Так он воспроизводит перезапуск задания прямо в памяти.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Метод <code>snapshot</code> из harness отдаёт состояние в том виде, в каком его получил бы JobManager. Внутри вызывается настоящий <code>snapshotState</code> оператора.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/AbstractStreamOperatorTestHarness.java" data-lines="730-736" data-must="getJobManagerOwnedState"></div>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/AbstractStreamOperatorTestHarness.java" data-lines="751-765" data-must="operator.snapshotState("></div>
+<p>При подъёме снимок кладётся под идентификатор текущего оператора. Смотри на <code>operator.getOperatorID()</code>. Идентификатор старого экземпляра нигде не сравнивается. Новый harness по умолчанию получает случайный <code>new OperatorID()</code>.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/AbstractStreamOperatorTestHarness.java" data-lines="625-633" data-must="operator.getOperatorID(), jmOperatorStateHandles"></div>
+<p>Отсюда следует граница этого теста. Он докажет, что оператор сохраняет и читает своё состояние. Сопоставление по <code>uid</code> он не проверяет, эту работу мы отдадим следующему уровню.</p>
+<p>Вторая граница в том, что на обеих сторонах стоит один и тот же класс. Изменение схемы состояния такой тест не увидит. Для этого harness умеет читать снимок из файла, а <code>OperatorSnapshotUtil.writeStateHandle</code> умеет его записать. Снимок старой версии можно положить в ресурсы теста и поднимать из него каждую новую версию. В PayGuard мы это проверяли руками в уроке 13, когда запускали v2 с новым полем из savepoint версии v1.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/AbstractStreamOperatorTestHarness.java" data-lines="513-515" data-must="OperatorSnapshotUtil.readStateHandle"></div>
+<p>Третья граница это хранилище состояния. По умолчанию harness держит его в куче, хотя в нашем Compose стоит <code>state.backend.type: rocksdb</code>. Заменить хранилище можно методом <code>setStateBackend</code>.</p>
+<div data-src="flink:flink-runtime/src/test/java/org/apache/flink/streaming/util/AbstractStreamOperatorTestHarness.java" data-lines="140-141" data-must="new HashMapStateBackend()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/testing/" target="_blank" rel="noopener">Testing</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/state_backends/" target="_blank" rel="noopener">State Backends</a></p>
+</div>
+
+<h2>Уровень 3. Топология без запуска</h2>
+<p>Самый дешёвый способ проверить задание целиком это построить его граф и посмотреть на него. Метод <code>env.getStreamGraph()</code> вызывает весь код описания задания, но ничего не отправляет на исполнение. Kafka, база и кластер для этого не нужны. Такой тест поймает все ошибки, которые возникают при описании графа, и в их числе <code>RuleConfig</code> без <code>Serializable</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Граф получается вызовом генератора, запуска в этом коде нет. Обрати внимание на <code>@Internal</code>. Это внутренний метод, и при обновлении Flink тест может потребовать правки.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/environment/StreamExecutionEnvironment.java" data-lines="2033-2045" data-must="getStreamGraphGenerator(transformations).generate()"></div>
+<p>Генератор переносит <code>uid</code> из описания оператора в узел графа, только если ты его задал. Значит, <code>null</code> в узле означает забытый <code>uid</code>. В этом же месте видна встроенная альтернатива, настройка <code>pipeline.auto-generate-uids</code>. При <code>false</code> Flink сам бросит исключение на первом операторе без <code>uid</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraphGenerator.java" data-lines="546-567" data-must="streamGraph.setTransformationUID(transform.getId(), transform.getUid())"></div>
+<p>Узел отдаёт значение через обычный геттер, на него и опирается наш тест.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamNode.java" data-lines="388-394" data-must="public String getTransformationUID()"></div>
+<p>Следующий шаг после <code>StreamGraph</code> это <code>JobGraph</code>, тот граф, что уходит на кластер. Метод без аргументов помечен <code>@VisibleForTesting</code>, он как раз для таких проверок.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraph.java" data-lines="1160-1173" data-must="StreamingJobGraphGenerator.createJobGraph"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/production_ready/" target="_blank" rel="noopener">Production Readiness Checklist</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/savepoints/" target="_blank" rel="noopener">Savepoints</a></p>
+</div>
+
+<p>С сериализаторами всё тоньше. В уроке 3 мы запретили Kryo настройкой <code>pipeline.generic-types: false</code>. Запрет срабатывает при создании сериализатора, а создаются они в двух разных местах и в разное время.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Запрет живёт в типе, который ушёл бы в Kryo.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/GenericTypeInfo.java" data-lines="84-93" data-must="Generic types have been disabled in the ExecutionConfig"></div>
+<p>Сериализаторы для типов на рёбрах графа создаёт <code>StreamGraph</code> при добавлении оператора. Такая ошибка всплывёт уже в тесте топологии.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraph.java" data-lines="1183-1187" data-must="typeInfo.createSerializer(executionConfig.getSerializerConfig())"></div>
+<p>Сериализатор состояния создаётся в момент <code>getState</code>, а мы вызываем его из <code>open</code>, то есть на работающей подзадаче. Граф об этом типе ещё ничего не знает. Такую ошибку покажет только запуск с тем же окружением.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/StreamingRuntimeContext.java" data-lines="203-208" data-must="stateProperties.initializeSerializerUnlessSet(this::createSerializer)"></div>
+<p>Harness берёт конфигурацию из <code>MockEnvironmentBuilder</code>, там лежит обычный <code>new ExecutionConfig()</code> с разрешённым Kryo. Поэтому тесты обязаны брать окружение из той же фабрики, что и прод, иначе они проверяют другие условия. Для этого в практике появится метод <code>createEnvironment</code>.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/types_serialization/" target="_blank" rel="noopener">Data Types &amp; Serialization</a></p>
+</div>
+
+<h2>Уровень 4. MiniCluster</h2>
+<p>MiniCluster это встроенный кластер Flink внутри JVM теста. Записи идут через настоящие подзадачи, параллелизм и водяные знаки. Источники и приёмники здесь можно подменить, как <code>MerchantStatsWindowTest</code> подаёт готовый список платежей через <code>fromData</code>. Документация советует три вещи. Запускай с параллелизмом больше 1, потому что часть ошибок видна только так. Делай кластер общим для тестов класса, потому что старт и остановка съедают большую часть времени. Состояние можно проверить настоящим перезапуском, если тестовая функция бросит исключение при включённых чекпоинтах.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Самое полезное свойство расширения JUnit в том, что код задания менять не нужно. Перед каждым тестом оно регистрирует своё окружение как контекстное.</p>
+<div data-src="flink:flink-test-utils-parent/flink-test-utils/src/main/java/org/apache/flink/test/junit5/MiniClusterExtension.java" data-lines="257-272" data-must="TestStreamEnvironment.setAsContext("></div>
+<p>Фабрика принимает конфигурацию вызывающего кода и применяет её через <code>env.configure</code>. Поэтому <code>GENERIC_TYPES=false</code> из нашего метода доезжает до тестового окружения.</p>
+<div data-src="flink:flink-test-utils-parent/flink-test-utils/src/main/java/org/apache/flink/streaming/util/TestStreamEnvironment.java" data-lines="106-118" data-must="env.configure(conf, env.getUserClassloader());"></div>
+<p>Осталось посмотреть, кто читает эту фабрику. Вызов <code>getExecutionEnvironment</code> берёт её, если она есть, и создаёт локальное окружение, если нет. При <code>flink run</code> фабрику ставит клиент через <code>ClientUtils</code>. Значит, один и тот же <code>createEnvironment</code> работает на кластере, поверх MiniCluster в E2E и локально в тесте топологии, где расширения нет и граф просто строится.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/environment/StreamExecutionEnvironment.java" data-lines="2194-2198" data-must="createLocalEnvironment(configuration)"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/testing/#testing-flink-jobs" target="_blank" rel="noopener">Testing Flink Jobs</a>. Там описан <code>MiniClusterWithClientResource</code> для JUnit 4, расширение для JUnit 5 описано только в javadoc класса.</p>
+</div>
+
+<h2>Уровень 5. Сквозной тест в контейнерах</h2>
+<p>Документация предлагает подменять источники и приёмники тестовыми. Это хорошо для логики, но транзакции Kafka и SQL к настоящей базе так не проверить. Библиотека Testcontainers запускает из теста настоящие контейнеры и сама их убирает. В PayGuard сквозной тест строит весь граф через <code>buildPipeline</code>, работает на MiniCluster и общается с настоящими Kafka и PostgreSQL.</p>
+<p>Алерты пишутся с гарантией <code>EXACTLY_ONCE</code>, и по документации коннектора такая транзакция фиксируется на чекпоинте. Потребитель с <code>read_committed</code> не увидит алерт, пока чекпоинт не пройдёт. Поэтому в тесте включены чекпоинты каждую секунду, настройки кластера из Compose сюда не приходят. Тот же <code>rocksdb</code> из Compose в этом тесте тоже не действует, задание живёт на настройках по умолчанию.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Ни один уровень не запускает твой jar</strong>
+    <p>Все пять уровней работают на тестовом classpath Gradle. Толстый jar, образ Flink и каталог <code>lib</code> в них не участвуют. Ошибка <code>NoSuchMethodError</code> из урока 14, когда SQL-коннектор лежит в <code>lib</code> кластера, пройдёт через все тесты. Её покажет только запуск собранного jar на настоящем образе. В PayGuard такой проверки в CI пока нет, её мы делали руками в каждом уроке.</p>
+  </div>
+</div>
+
+<h2>Порядок в CI</h2>
+<p>Быстрые тесты идут первыми и не требуют Docker. Сквозной тест запускается отдельным заданием и только после успешной сборки, чтобы не тратить время на контейнеры, если код уже сломан. Локально удобно гонять <code>./gradlew test</code> перед каждым коммитом и запускать сквозной тест по необходимости.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l16">
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Проверка сериализуемости срабатывает при добавлении функции в граф. PipelineTopologyTest построит граф за секунды без кластера и контейнеров."
+       data-explanation-wrong="Вспомни, в какой момент Flink проверяет сериализуемость функции. Для этого её надо добавить в граф, запускать задание не обязательно.">
+    <h3 class="quiz-question">Коллега положил в новую функцию поле с несериализуемым клиентом. Тесты функции на harness зелёные. Какой самый дешёвый тест поймает ошибку до отправки на кластер?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Restore-тест этой функции на harness</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Сквозной тест с Kafka и PostgreSQL в контейнерах</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Тест топологии, который строит граф задания</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Harness кладёт снимок под идентификатор текущего оператора, поэтому смена uid для него незаметна. Настоящая проверка uid живёт в тесте топологии и в запуске из savepoint."
+       data-explanation-wrong="Посмотри, под каким идентификатором harness кладёт снимок при initializeState. Сравнивает ли он что-нибудь со старым экземпляром?">
+    <h3 class="quiz-question">Перед релизом переименовали uid у оператора дедупликации. Restore-тест зелёный, а после релиза из savepoint состояние дедупликации к оператору не привязывается. Почему тест этого не показал?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Harness привязывает снимок к текущему оператору и uid не сравнивает</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Harness использует RocksDB, где uid не хранится</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Снимок в harness не содержит состояния с ключами</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Задача e2eTest берёт classpath тестов Gradle, и настоящий jar там не участвует. На кластере порядок классов задают образ и lib, поэтому нужен запуск самого jar на самом образе."
+       data-explanation-wrong="Посмотри, какой classpath использует задача e2eTest и где в сквозном тесте участвует собранный jar.">
+    <h3 class="quiz-question">PayGuardE2ETest зелёный, все 45 обычных тестов зелёные. На стенде с образом Flink и коннектором в lib команда flink run падает с NoSuchMethodError. Что не так с проверками?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>В сквозном тесте слишком редкие чекпоинты</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Тесты работают на classpath Gradle и не запускают jar на образе кластера</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>MiniCluster использует другую версию Flink</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

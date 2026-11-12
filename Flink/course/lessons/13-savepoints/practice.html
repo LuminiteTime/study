@@ -1,0 +1,107 @@
+<h2>Что будет в конце</h2>
+<p>В PayGuard появится оператор <code>card-profile</code>, который ведёт профиль каждой карты. Ты запустишь первую версию, остановишь задание со savepoint, добавишь в профиль поле и продолжишь с того же места. Потом ещё раз остановишь задание и запустишь его с параллелизмом 4. Файл <code>StateInspector.java</code> и зависимость <code>flink-state-processor-api</code> относятся к заданию, их пока создавать не нужно.</p>
+
+<h2>Шаг 1. Профиль карты, первая версия</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/model/CardProfile.java</code>. Ниже состояние файла до правки. В снапшоте урока его нет, потому что на шаге 6 ты заменишь его второй версией.</p>
+<pre data-lang="java" data-title="model/CardProfile.java, версия 1, до правки">package dev.study.payguard.model;
+
+/** Накопленный профиль карты. Лежит в состоянии, поэтому менять его можно только по правилам эволюции схемы. */
+public record CardProfile(long paymentCount, long totalAmountMinor) {
+
+    public static final CardProfile EMPTY = new CardProfile(0, 0);
+
+    public CardProfile plus(PaymentEvent payment) {
+        return new CardProfile(paymentCount + 1, totalAmountMinor + payment.amountMinor());
+    }
+}</pre>
+<p>Record неизменяемый, поэтому метод <code>plus</code> возвращает новый профиль. Константа <code>EMPTY</code> избавляет функцию от проверок на пустое значение.</p>
+
+<h2>Шаг 2. Функция профиля</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/pipeline/CardProfileFunction.java</code>. Этот файл не изменится во второй версии.</p>
+<div data-code="lesson-13/src/main/java/dev/study/payguard/pipeline/CardProfileFunction.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-13/src/main/java/dev/study/payguard/pipeline/CardProfileFunction.java" data-lines="13-31"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Функция работает на потоке с ключом. Ключ это номер карты, на вход приходит платёж, на выход профиль.</p>
+      <p class="tl">Две публичные константы. <code>UID</code> станет надписью на коробке со состоянием оператора, <code>STATE_NAME</code> именем состояния внутри неё. Инспектор из задания прочитает снимок по этим же строкам, поэтому они вынесены в одно место.</p>
+      <p class="tl">Ссылка на состояние объявлена <code>transient</code>. Сама функция сериализуется при отправке на кластер, а состояние ей выдаёт среда выполнения в <code>open</code>.</p>
+      <p class="tl">Дескриптор описывает состояние именем и классом значения. По классу Flink строит <code>PojoSerializer</code>, и его снимок попадёт в savepoint вместе с данными.</p>
+      <p class="tl">На каждый платёж читаем профиль текущей карты. Для новой карты там <code>null</code>, и мы начинаем с <code>EMPTY</code>.</p>
+      <p class="tl">Записываем обновлённый профиль обратно и отдаём его дальше по потоку.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 3. Подключи оператор к заданию</h2>
+<p>Профили будут уходить в новый топик <code>card.profiles</code>. Добавь его имя в настройки задания.</p>
+<div data-diff="lesson-12/src/main/java/dev/study/payguard/job/JobConfig.java lesson-13/src/main/java/dev/study/payguard/job/JobConfig.java"></div>
+<p>В задании оператор встаёт на поток <code>byCard</code>, уже разбитый по карте. Тот же поток кормит правила, так что новый <code>keyBy</code> не нужен.</p>
+<div data-diff="lesson-12/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-13/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<p>У оператора и у приёмника свои <code>uid</code>. Приёмник Kafka тоже хранит состояние, поэтому без <code>uid</code> он при следующей правке графа потерял бы его. Гарантия at-least-once здесь достаточна, повтор профиля после сбоя просто перезапишет то же значение у потребителя. Топик создаёт служба <code>kafka-init</code>, допиши его в список.</p>
+<div data-diff="lesson-12/docker-compose.yml lesson-13/docker-compose.yml"></div>
+
+<h2>Шаг 4. Запусти первую версию</h2>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --dup 0.02 --bad 0.01 --burst 0.002"</pre>
+<p>Compose пересоздаст <code>kafka-init</code>, потому что изменилась его команда, и тот создаст <code>card.profiles</code>. Остальные команды знакомы по прошлым урокам. Генератор оставь работать во втором терминале. В списке вершин задания появится новая, оператор и приёмник сцеплены в одну цепочку.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -c '.vertices[] | select(.name | startswith("card-profile")) | {name, parallelism, status}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"card-profile -&gt; card-profiles-sink: Writer -&gt; card-profiles-sink: Committer","parallelism":2,"status":"RUNNING"}</pre>
+<p>Подожди минуту, чтобы профили накопились, и проверь, что чекпоинты идут. Команда та же, что в уроке 11, счётчик <code>restored</code> пока равен нулю.</p>
+
+<h2>Шаг 5. Останови задание со savepoint</h2>
+<p>Создай <code>scripts/stop-with-savepoint.sh</code> и сделай его исполняемым.</p>
+<div data-code="lesson-13/scripts/stop-with-savepoint.sh"></div>
+<p>Скрипт находит запущенное задание через REST и вызывает <code>flink stop</code> внутри контейнера JobManager. Флаг <code>-T</code> у <code>docker compose exec</code> отключает псевдотерминал, иначе в вывод попадут управляющие символы и <code>grep</code> не найдёт путь. Флаг <code>--type canonical</code> выбирает переносимый формат. Каталог снимка не передаём, его задаёт <code>execution.checkpointing.savepoint-dir</code> из <code>docker-compose.yml</code>. CLI печатает строку вида <code>Savepoint completed. Path: ...</code>, <code>grep</code> вырезает из неё путь, <code>sed</code> срезает точку в конце.</p>
+<pre data-lang="bash" data-title="терминал">chmod +x scripts/stop-with-savepoint.sh
+SP=$(scripts/stop-with-savepoint.sh)
+echo "$SP"</pre>
+<pre data-lang="text" data-title="вывод" data-output>file:/flink-data/savepoints/savepoint-1687c2-d2b5454c1f19</pre>
+<p>Имя каталога собрано из начала идентификатора задания и случайного суффикса. Путь указан изнутри контейнера. На твоей машине тот же каталог лежит в <code>data/savepoints</code> проекта, потому что <code>./data</code> смонтирована в <code>/flink-data</code>. Внутри есть файл <code>_metadata</code> со списком операторов и снимками сериализаторов, рядом лежат файлы с данными состояния. Задание после команды перешло в FINISHED. Генератор продолжает писать в Kafka, и эти платежи никуда не денутся, новая версия начнёт читать со смещений, сохранённых в снимке.</p>
+
+<h2>Шаг 6. Вторая версия профиля</h2>
+<p>Замени <code>CardProfile.java</code>. В record появилось поле <code>lastCountry</code>, константа и метод <code>plus</code> его учитывают.</p>
+<div data-code="lesson-13/src/main/java/dev/study/payguard/model/CardProfile.java"></div>
+<p>Поле добавлено в конец, но порядок здесь не важен. Сериализатор сопоставляет поля по имени, а перестановку аргументов конструктора берёт на себя <code>JavaRecordBuilderFactory</code>. Тип <code>String</code> ссылочный, поэтому у восстановленных профилей поле будет <code>null</code>, пока по карте не придёт новый платёж. Теперь добавь тест функции.</p>
+<div data-code="lesson-13/src/test/java/dev/study/payguard/pipeline/CardProfileFunctionTest.java"></div>
+<p>Тест прогоняет два платежа одной карты через harness из урока 7 и проверяет последний профиль. Страна <code>DE</code> берётся из фабрики тестовых платежей. На нашем стенде прошли все 40 тестов проекта.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew test shadowJar
+docker compose exec -T jobmanager flink run --detached \
+  --fromSavepoint "$SP" \
+  /jobs/payguard-1.0.0.jar</pre>
+<p>Папка <code>build/libs</code> смонтирована в контейнер, поэтому новый jar виден сразу, пересоздавать контейнеры не нужно. Скрипт <code>submit.sh</code> здесь не подходит, он передаёт свои аргументы заданию, а флаг <code>--fromSavepoint</code> нужен самому CLI и должен стоять до пути к jar. Короткая форма флага <code>-s</code>. Если бы мы удалили оператор, сюда же добавился бы <code>--allowNonRestoredState</code>.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB/checkpoints | jq '.counts.restored, .latest.restored.external_path'
+curl -s localhost:8081/jobs/$JOB/exceptions | jq '.exceptionHistory.entries | length'</pre>
+<p>Первая команда покажет 1 восстановление и путь к снимку, вторая 0, то есть исключений не было. Так и было на нашем стенде, запуск второй версии из снимка первой прошёл без ошибок. Посмотри на сами профили.</p>
+<pre data-lang="bash" data-title="терминал">docker compose exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 --topic card.profiles --from-beginning --max-messages 3 2&gt;/dev/null</pre>
+<p>С начала топика ты увидишь записи первой версии без поля страны. Записи второй версии выглядят так.</p>
+<pre data-lang="json" data-title="вывод" data-output>{"paymentCount":1,"totalAmountMinor":13896,"lastCountry":"ES"}
+{"paymentCount":1,"totalAmountMinor":11869,"lastCountry":"PL"}
+{"paymentCount":1,"totalAmountMinor":39786,"lastCountry":"ES"}</pre>
+<p>В записи нет номера карты, приёмник пишет только значение. Топик здесь служит следом работы оператора. Полную картину по картам даст инспектор из задания. Профиль уходит в топик после каждого платежа, поэтому <code>lastCountry</code> в топике всегда заполнено. Значение <code>null</code> живёт только в состоянии у карт, которые с момента релиза молчат.</p>
+
+<h2>Шаг 7. Смени параллелизм</h2>
+<pre data-lang="bash" data-title="терминал">SP=$(scripts/stop-with-savepoint.sh)
+docker compose exec -T jobmanager flink run --detached -p 4 \
+  --fromSavepoint "$SP" \
+  /jobs/payguard-1.0.0.jar
+curl -s localhost:8081/overview | jq '{slots: .["slots-total"], free: .["slots-available"]}'</pre>
+<p>Флаг <code>-p 4</code> заменяет <code>parallelism.default: 2</code> для всех операторов, у которых параллелизм не задан в коде. Все вершины получили по 4 подзадачи и уместились в 4 слота единственного TaskManager благодаря slot sharing из урока 2. На нашем стенде заняты все 4 слота из 4, задание поднялось из снимка без ошибок.</p>
+<p>Состояние профилей было в двух подзадачах, с группами 0-63 и 64-127. Теперь диапазонов четыре, 0-31, 32-63, 64-95 и 96-127. Подзадачи 0 и 1 берут половины старой подзадачи 0, подзадачи 2 и 3 половины старой подзадачи 1. Это та же картина, что в симуляции на вкладке теории при 2 и 4. Значение <code>maxParallelism</code> мы не задавали, поэтому для параллелизма 4 планировщик и так вычислил 128, и спорить со снимком ему не пришлось.</p>
+
+<h2>Что пойдёт не так</h2>
+<p>Мы не ловили эти ошибки на стенде, но их тексты заданы в исходниках, которые разобраны на вкладке теории. По фрагменту сообщения легко понять, какая проверка сработала.</p>
+<table>
+<thead><tr><th>Что сделали</th><th>Фрагмент сообщения</th><th>Как лечить</th></tr></thead>
+<tbody>
+<tr><td>Удалили оператор с состоянием или сменили его <code>uid</code></td><td><code>Cannot map checkpoint/savepoint state for operator</code></td><td>Вернуть старый <code>uid</code>. Если удаление намеренное, запустить с <code>--allowNonRestoredState</code></td></tr>
+<tr><td>Задали <code>maxParallelism</code>, отличный от снимка</td><td><code>Max parallelism mismatch between checkpoint/savepoint state and new program</code></td><td>Убрать настройку или задать то же число, что в снимке</td></tr>
+<tr><td>Подзадач больше, чем групп</td><td><code>The state for task ... can not be restored. The maximum parallelism</code></td><td>Уменьшить параллелизм до числа групп</td></tr>
+</tbody>
+</table>

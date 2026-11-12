@@ -1,0 +1,192 @@
+<h2>Релиз, который стирает память</h2>
+<p>Аналитики просят добавить в профиль карты страну последнего платежа. В коде это одно новое поле в record. Профиль хранится в состоянии задания, и за дни работы там накопились счётчики по тысячам карт. Если остановить задание командой <code>cancel</code> и запустить новый jar с чистого листа, профили начнутся с нуля. Вместе с ними пропадут дедупликация, открытые окна и частичные совпадения CEP.</p>
+<p>Чекпоинт из урока 11 спасает от падений. Его создаёт и удаляет сам Flink, и рассчитан он на перезапуск того же кода. Для плановых изменений есть savepoint, снимок, который делаешь ты и который Flink никогда не удаляет сам. Сегодня мы разберём четыре вещи. Как savepoint находит оператор в новой версии программы. Какие правки типа состояния он переживает. Как состояние делится между другим числом подзадач. И как прочитать снимок без запуска задания.</p>
+
+<h2>Переезд с подписанными коробками</h2>
+<p>Переезжая, ты складываешь вещи в коробки и пишешь на каждой, в какую комнату её нести. Грузчики в новой квартире твоих вещей не знают и читают только надписи. Коробку с надписью «кабинет» поставят в кабинет. Если кабинета в новой квартире нет, грузчик остановится и спросит, что делать. Ответ «оставьте в кладовке, разберусь сам» и есть флаг --allowNonRestoredState.</p>
+<p>Внутри каждой коробки лежит опись. Если в новом шкафу появилась лишняя полка, вещи по описи встанут на свои места, новая полка останется пустой. Если в описи написано «книги», а шкаф теперь ждёт обувь, вещи не встанут никуда. Книги ты заранее разложил по 128 пронумерованным коробкам по жёсткому правилу. В старой квартире было два стеллажа, в новой четыре. Коробки переставляют целиком, перекладывать книги не нужно. Число коробок поменять нельзя, оно определилось в день упаковки.</p>
+<p>Во Flink надпись на коробке называется <code>uid</code> оператора, опись это снимок сериализатора, пронумерованные коробки это группы ключей (key groups), а стеллажи это подзадачи. Чекпоинт похож на вещи, разложенные по местам в той же квартире. После аварии их находят там, где оставили. Savepoint это коробки для переезда. Паковать их дольше, зато их можно везти в другую квартиру.</p>
+
+<h2>Чекпоинт и savepoint</h2>
+<p>Оба снимка создаются одним механизмом барьеров из урока 11. Отличаются они тем, кто ими владеет и для чего они нужны.</p>
+<table>
+<thead><tr><th></th><th>Чекпоинт</th><th>Savepoint</th></tr></thead>
+<tbody>
+<tr><td>Кто создаёт</td><td>Flink, по интервалу</td><td>Ты, командой CLI или через REST</td></tr>
+<tr><td>Кто удаляет</td><td>Flink. При остановке задания тоже, если не включено хранение</td><td>Только ты. Flink не трогает его ни после остановки, ни после восстановления</td></tr>
+<tr><td>Формат</td><td>Родной для бэкенда состояния, у RocksDB бывает инкрементальным</td><td>Canonical по умолчанию, по запросу native</td></tr>
+<tr><td>Для чего</td><td>Восстановление после сбоя</td><td>Новый код, другой параллелизм, новая версия Flink, смена бэкенда</td></tr>
+</tbody>
+</table>
+<p>Формат canonical един для всех бэкендов состояния. Снимок, снятый с RocksDB, можно восстановить в HashMap и наоборот. Документация называет его самым стабильным форматом с наибольшей совместимостью между версиями и схемами. Формат native пишет то, что бэкенду удобно, у RocksDB это SST-файлы. Он быстрее создаётся и восстанавливается, но сменить бэкенд с ним нельзя. Эволюция схемы и чтение через State Processor API для него помечены в документации как работающие без гарантий.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Какой формат получится, если флаг <code>--type</code> не указан. Смотри на константу <code>DEFAULT</code> в конце перечисления.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/core/execution/SavepointFormatType.java" data-lines="28-43" data-must="DEFAULT = SavepointFormatType.CANONICAL"></div>
+<p>По умолчанию снимается canonical. В нашем скрипте тип всё равно указан явно, чтобы через год никто не гадал, в каком формате лежат снимки.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/savepoints/" target="_blank" rel="noopener">Savepoints, Savepoint format</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/checkpoints_vs_savepoints/" target="_blank" rel="noopener">Checkpoints vs. Savepoints</a></p>
+</div>
+
+<p>В нашем <code>docker-compose.yml</code> с урока 11 стоит <code>externalized-checkpoint-retention: RETAIN_ON_CANCELLATION</code>, поэтому последние чекпоинты переживают и <code>cancel</code>. Запустить задание из такого чекпоинта тоже можно. Таблица в документации разрешает выровненному чекпоинту смену кода и параллелизма, а для эволюции схемы ставит знак «работает без гарантий». Для плановых релизов бери savepoint.</p>
+
+<h2>stop и cancel</h2>
+<p>Команда stop (<code>flink stop</code>) останавливает задание аккуратно. Источники получают просьбу отправить последний барьер, по нему снимается savepoint, и только после его успеха источники завершаются. Задание переходит в состояние FINISHED, CLI печатает путь к снимку. Команда cancel (<code>flink cancel</code>) останавливает задание сразу и savepoint не снимает. Старый флаг <code>cancel --withSavepoint</code> объявлен устаревшим, документация советует вместо него <code>stop</code>. Есть и третья команда, <code>flink savepoint</code>. Она снимает снимок и оставляет задание работать, так удобно получить копию состояния для анализа.</p>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Флаг --drain нужен только при окончательной остановке</strong>
+    <p>С флагом <code>--drain</code> перед последним барьером уходит <code>MAX_WATERMARK</code>. Все таймеры по времени события срабатывают, и минутные окна продавцов закроются досрочно с неполными суммами. Документация прямо предупреждает, что продолжение задания после такого снимка может дать неверные результаты. Для релиза используй <code>stop</code> без этого флага.</p>
+  </div>
+</div>
+
+<h2>Как состояние находит свой оператор</h2>
+<p>Внутри savepoint лежит отображение «идентификатор оператора → состояние». Идентификатор (OperatorID) это 16 байт. Если у оператора задан uid, байты получаются хешем от этой строки. Если не задан, Flink выводит их из положения оператора в графе, и правка топологии может их сдвинуть. Об этом шла речь в уроке 2.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Как строка <code>uid</code> превращается в идентификатор при сборке графа. Хеш murmur3 на 128 бит от UTF-8 байтов строки, и больше ничего в него не входит.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/graph/StreamGraphHasherV2.java" data-lines="134-149" data-must="Hashing.murmur3_128(0)"></div>
+<p>State Processor API считает идентификатор той же функцией. Поэтому в задании урока достаточно передать строку <code>card-profile</code>, и инспектор найдёт состояние оператора в снимке.</p>
+<div data-src="flink:flink-libraries/flink-state-processing-api/src/main/java/org/apache/flink/state/api/runtime/OperatorIDGenerator.java" data-lines="43-46" data-must="murmur3_128(0)"></div>
+<p>Отсюда следует простое правило. Одинаковый <code>uid</code> в двух версиях программы даёт одинаковый идентификатор, и состояние находит оператор. Имя оператора, которое задаёт <code>.name()</code>, в этом не участвует.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/savepoints/" target="_blank" rel="noopener">Savepoints, Assigning Operator IDs</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/upgrading/" target="_blank" rel="noopener">Upgrading Applications, Matching Operator State</a></p>
+</div>
+
+<p>При запуске из снимка JobManager сначала читает его метаданные и проверяет, что каждому сохранённому состоянию нашёлся оператор. Это делает метод <code>Checkpoints.loadAndValidateCheckpoint</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первый шаг. Для каждой вершины нового графа в таблицу кладутся оба идентификатора оператора, выведенный из графа и заданный через <code>uid</code>.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/Checkpoints.java" data-lines="153-162" data-must="getUserDefinedOperatorID"></div>
+<p>Второй шаг. Для состояния, которому оператор не нашёлся, есть три исхода. С флагом <code>allowNonRestoredState</code> оно пропускается с записью в лог. Без флага пустое состояние тоже пропускается. Непустое приводит к исключению.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/Checkpoints.java" data-lines="194-213" data-must="allowNonRestoredState"></div>
+<p>Текст исключения задан чуть ниже в том же файле, в <code>throwNonRestoredStateException</code>. Он начинается словами <code>Failed to rollback to checkpoint/savepoint</code> и заканчивается советом поставить <code>--allowNonRestoredState</code>. В обратную сторону проверки нет. Новый оператор, которого не было в снимке, просто стартует с пустым состоянием.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/deployment/cli/" target="_blank" rel="noopener">Command-Line Interface, Starting a Job from a Savepoint</a></p>
+</div>
+
+<p>Флаг <code>--allowNonRestoredState</code> выбрасывает состояние насовсем. Ставь его, только когда оператор удалён намеренно. Если же ты случайно поменял <code>uid</code>, флаг тихо обнулит состояние оператора, и задание запустится как ни в чём не бывало. Правильное лечение в этом случае вернуть старый <code>uid</code>.</p>
+
+<h2>Эволюция схемы состояния</h2>
+<p>Значения состояния лежат в снимке байтами. Прочитать их может только сериализатор того же формата, поэтому рядом с данными Flink кладёт снимок сериализатора (serializer snapshot). Это описание формата, например список полей POJO с их типами. При восстановлении новый сериализатор сравнивает себя со старым снимком. Возможны четыре ответа. Совместим как есть. Совместим после миграции, тогда старые байты читаются старым сериализатором и переписываются новым. Совместим после перенастройки. Несовместим, тогда восстановление падает.</p>
+<p>Для POJO документация задаёт правила.</p>
+<ul>
+  <li>Поля можно удалять. Старое значение удалённого поля пропадёт в следующих снимках.</li>
+  <li>Поля можно добавлять. Новое поле получит значение по умолчанию для своего типа в Java.</li>
+  <li>Тип объявленного поля менять нельзя.</li>
+  <li>Имя класса, включая пакет, менять нельзя.</li>
+</ul>
+<p>Record во Flink 2.2 идёт тем же путём. <code>TypeExtractor</code> признаёт record типом POJO, даже без конструктора по умолчанию и сеттеров, и сериализует его через <code>PojoSerializer</code>. Наш <code>CardProfile</code> как раз record.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Проверка совместимости в <code>PojoSerializerSnapshot.resolveSchemaCompatibility</code>. Сначала сравнивается класс, потом сериализаторы полей, которые есть в обеих версиях.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/runtime/PojoSerializerSnapshot.java" data-lines="208-225" data-must="previousPojoClass != snapshotData.getPojoClass()"></div>
+<p>Если класс и старые поля совпали, а набор полей изменился, ответ будет «совместим после миграции».</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/runtime/PojoSerializerSnapshot.java" data-lines="383-390" data-must="newPojoHasNewOrRemovedFields"></div>
+<p>Каким станет новое поле record после миграции, решает <code>JavaRecordBuilderFactory</code>. Если имена или порядок компонент изменились, он строит таблицу перестановки аргументов конструктора. Новые примитивные поля получают значение по умолчанию, остальные новые поля остаются <code>null</code>.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/api/java/typeutils/runtime/JavaRecordBuilderFactory.java" data-lines="139-163" data-must="newPrimitive"></div>
+<p>Для нашего релиза это значит следующее. Профили, восстановленные из старого снимка, получат <code>lastCountry == null</code> и будут жить так до первого нового платежа по карте. Код, который читает это поле, обязан пережить <code>null</code>.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/schema_evolution/" target="_blank" rel="noopener">State Schema Evolution</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/serialization/types_serialization/" target="_blank" rel="noopener">Data Types &amp; Serialization</a></p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-icon">💡</div>
+  <div class="callout-content">
+    <strong class="callout-title">Переименование поля равно удалению и добавлению</strong>
+    <p>Поля сопоставляются по имени. Если переименовать <code>totalAmountMinor</code> в <code>totalMinor</code>, Flink увидит удалённое поле и новое. Задание запустится без единой ошибки, а суммы всех карт станут нулём. Тесты на harness это не поймают, потому что в них один и тот же класс с обеих сторон, об этом урок 16.</p>
+  </div>
+</div>
+
+<p>Ещё три ограничения из той же страницы документации. Ключ состояния эволюционировать не может, его байты служат адресом, и у RocksDB сравниваются побайтно. Типы, которые ушли в Kryo, эволюции не поддерживают вовсе. Наше задание с урока 3 запрещает Kryo настройкой <code>pipeline.generic-types: false</code>, поэтому для такого типа Flink откажется создавать сериализатор и задание упадёт сразу, до первого снимка. Если правка всё-таки несовместима, остаются свой сериализатор или переписывание снимка через State Processor API.</p>
+
+<h2>Rescale через группы ключей</h2>
+<p>В уроке 4 мы считали, куда попадает ключ. Номер группы равен <code>murmurHash(key.hashCode()) % maxParallelism</code> и от параллелизма не зависит. Подзадача владеет непрерывным диапазоном групп. Теперь посмотрим на тот же механизм со стороны восстановления. Состояние в снимке разложено по группам, и при смене параллелизма Flink переносит его целыми группами. Такой запуск с другим параллелизмом называют rescale.</p>
+
+<div class="viz" id="viz-l13">
+  <p class="viz-title">Восстановление с другим параллелизмом</p>
+  <div class="viz-controls">
+    <label>Групп ключей <select id="viz-l13-max"><option value="128" selected>128</option><option value="16">16</option><option value="4">4</option></select></label>
+    <label>Было подзадач <input type="range" id="viz-l13-old" min="1" max="8" value="2"> <span id="viz-l13-old-value">2</span></label>
+    <label>Станет <input type="range" id="viz-l13-new" min="1" max="8" value="4"> <span id="viz-l13-new-value">4</span></label>
+    <button class="primary" id="viz-l13-run" type="button">Восстановить</button>
+    <button id="viz-l13-reset" type="button">Сначала</button>
+  </div>
+  <svg id="viz-l13-svg" role="img" aria-label="Сетка групп ключей. Цвет группы показывает подзадачу, которая ею владеет, до и после смены параллелизма."></svg>
+  <p class="viz-note" id="viz-l13-result"></p>
+</div>
+
+<p>Поставь 2 и 4 при 128 группах. Сменят владельца 96 групп, при этом каждая новая подзадача читает кусок ровно одной старой. Поставь 2 и 3, и средняя подзадача соберёт своё состояние из двух старых. Выбери 4 группы и параллелизм 6, чтобы увидеть отказ.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Раскладкой состояния при восстановлении занимается <code>StateAssignmentOperation</code>. Если параллелизм не изменился, подзадача получает файлы своей прежней подзадачи как есть. Иначе для неё собираются пересечения со всеми старыми файлами.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/StateAssignmentOperation.java" data-lines="315-330" data-must="getManagedKeyedStateHandles"></div>
+<p>Диапазоны для нового параллелизма нарезаются той же функцией, что используется при обработке записей.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/StateAssignmentOperation.java" data-lines="680-691" data-must="computeKeyGroupRangeForOperatorIndex"></div>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/state/KeyGroupRangeAssignment.java" data-lines="93-106" data-must="int start = ((operatorIndex * maxParallelism + parallelism - 1) / parallelism);"></div>
+<p>Комментарий к <code>createKeyGroupPartitions</code> требует, чтобы эта нарезка совпадала с <code>KeyGroupStreamPartitioner</code>. Иначе запись пришла бы в подзадачу, у которой нет состояния её ключа. Формулы диапазона и <code>computeOperatorIndexForKeyGroup</code> из урока 4 согласованы, и симуляция выше считает по ним обеим.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/concepts/stateful-stream-processing/" target="_blank" rel="noopener">Stateful Stream Processing, Keyed State</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/execution/parallel/" target="_blank" rel="noopener">Parallel Execution</a></p>
+</div>
+
+<p>Состояние без ключа (operator state), например список назначенных источнику партиций Kafka, на группы не делится. В том же методе его раздаёт по кругу <code>RoundRobinOperatorStateRepartitioner</code>.</p>
+
+<h2>Предел, заданный при первом запуске</h2>
+<p>Число групп, оно же максимальный параллелизм (maxParallelism), записано в снимке у каждого оператора. При восстановлении оно сверяется с новым графом дважды.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Первая проверка. Подзадач не может быть больше, чем групп в снимке.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/checkpoint/StateAssignmentOperation.java" data-lines="700-713" data-must="is lower than the configured parallelism"></div>
+<p>Вторая проверка касается самого числа групп. Если ты его не задавал, планировщик вычислил значение сам и пометил его как автоматическое. Такое значение разрешено заменить числом из снимка. Заданное явно заменить нельзя.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/runtime/scheduler/SchedulerBase.java" data-lines="357-377" data-must="Cannot override a configured max parallelism."></div>
+<p>Наш проект <code>maxParallelism</code> не задаёт, поэтому новое задание молча примет 128 групп из снимка, даже если по формуле из урока 4 для нового параллелизма вышло бы 256. Если же в новой версии появится <code>env.setMaxParallelism(1024)</code> при снимке со 128 группами, <code>loadAndValidateCheckpoint</code> бросит исключение с текстом <code>Max parallelism mismatch between checkpoint/savepoint state and new program</code>. Сменить число групп у работающего состояния можно только переписав снимок через State Processor API.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/ops/state/savepoints/" target="_blank" rel="noopener">Savepoints, FAQ</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/state_processor_api/" target="_blank" rel="noopener">State Processor API</a></p>
+</div>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming состояние живёт в checkpoint location конкретного запроса. Оно разбито на <code>spark.sql.shuffle.partitions</code> частей, и это число нельзя менять после первого запуска. Список изменений запроса, с которыми можно продолжить с того же каталога, задан в документации Spark, и смена ключей или агрегатов stateful-операции туда не входит.</p>
+<p>У Flink снимок отделён от программы и привязан к операторам через <code>uid</code>. Параллелизм меняется при каждом запуске в пределах числа групп. Тип состояния может эволюционировать по правилам сериализатора, а всё остальное можно переписать отдельной пакетной программой.</p>
+
+<h2>Снимок как база данных</h2>
+<p>Документация State Processor API предлагает смотреть на savepoint как на базу данных. Каждый <code>uid</code> служит отдельной схемой. Состояние с ключом одного оператора превращается в таблицу, где одна колонка хранит ключ и по колонке приходится на каждое состояние. Читать такую базу можно обычной программой DataStream в режиме BATCH. Тем же API можно записать новый снимок, например заполнить состояние из истории до первого запуска, сменить <code>uid</code> или число групп. В задании урока ты напишешь инспектор, который печатает самые активные карты прямо из снимка. Запущенное задание ему не нужно.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l13">
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Поля сопоставляются по имени. Старое поле считается удалённым, новое добавленным, и примитивный long получает 0. Ошибки не будет, поэтому такую правку легко пропустить."
+       data-explanation-wrong="Вспомни, как PojoSerializerSnapshot сравнивает поля и что делает JavaRecordBuilderFactory с новым примитивным полем.">
+    <h3 class="quiz-question">В record CardProfile переименовали totalAmountMinor в totalMinor и запустили задание из savepoint. Что произойдёт?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Восстановление упадёт с ошибкой несовместимой схемы</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Задание запустится, и у всех карт сумма станет нулём</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Flink сопоставит поля по позиции и перенесёт суммы</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Явно заданный maxParallelism не может принять значение из снимка, и loadAndValidateCheckpoint сообщит о несовпадении. Число групп меняют только переписыванием снимка через State Processor API."
+       data-explanation-wrong="Посмотри на SchedulerBase. Заменить число групп значением из снимка можно только тогда, когда его вычислил планировщик.">
+    <h3 class="quiz-question">Задание год работало с параллелизмом 2 и автоматическим maxParallelism 128. Команда добавила env.setMaxParallelism(1024) «на вырост» и запускает из savepoint с -p 8. Что будет?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Состояние перераспределится по 1024 группам</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Flink проигнорирует 1024 и продолжит со 128 группами</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Запуск упадёт из-за несовпадения maxParallelism</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. Состояние удалённого оператора не к чему привязать, и флаг разрешает его выбросить. Только убедись, что оператор удалён намеренно, а не потерял uid."
+       data-explanation-wrong="Формат снимка и способ остановки тут ни при чём. Посмотри, что Checkpoints делает с непустым состоянием без оператора.">
+    <h3 class="quiz-question">Из задания убрали правило rule-amount-spike с состоянием по картам. Запуск из savepoint падает со словами «operator is not available in the new program». Что делать?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Запустить с --allowNonRestoredState, состояние правила будет выброшено</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Снять savepoint в формате native</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Остановить старое задание через cancel вместо stop</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

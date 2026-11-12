@@ -1,0 +1,133 @@
+<h2>Что будет в конце</h2>
+<p>Стенд из Compose проходит итоговый хаос-тест без дублей в <code>fraud.alerts</code>. Тот же стенд с надстройкой SASL пускает к брокеру только клиентов с паролем, и PayGuard вместе с генератором работают через неё. В репозитории появляется сценарий выпуска образа. Файлы <code>ops/runbook.md</code> и <code>ops/production-readiness.md</code> из снапшота относятся к заданию, пока их создавать не нужно.</p>
+
+<h2>Шаг 1. Учётные данные Kafka из окружения</h2>
+<p>Создай <code>src/main/java/dev/study/payguard/job/KafkaSecurity.java</code>. Класс собирает свойства подключения к Kafka для всех клиентов проекта, источников, приёмников и генератора.</p>
+<div data-code="lesson-21/src/main/java/dev/study/payguard/job/KafkaSecurity.java"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-21/src/main/java/dev/study/payguard/job/KafkaSecurity.java" data-lines="15-27"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Метод всегда возвращает новый объект <code>Properties</code>, поэтому вызывающий код может спокойно дописывать в него свои ключи.</p>
+      <p class="tl">Если переменной <code>PAYGUARD_KAFKA_USER</code> нет, свойства пустые, и клиент подключается без аутентификации. Так старый стенд и тесты работают без изменений.</p>
+      <p class="tl">Протокол <code>SASL_PLAINTEXT</code> включает аутентификацию без шифрования. Комментарий напоминает, что в проде здесь стоит <code>SASL_SSL</code>.</p>
+      <p class="tl">Механизм <code>PLAIN</code> передаёт логин и пароль как есть, брокер сверяет их со своим списком.</p>
+      <p class="tl">Строка JAAS называет модуль входа клиента Kafka и передаёт ему логин и пароль из окружения. Кавычки вокруг значений и точка с запятой в конце обязательны по синтаксису JAAS.</p>
+    </div>
+  </div>
+</div>
+
+<h2>Шаг 2. Подключи свойства ко всем клиентам</h2>
+<p>В <code>KafkaSinks</code> приёмник at-least-once получает свойства через <code>setKafkaProducerConfig</code>. В exactly-once приёмнике объект из <code>fromEnvironment</code> становится основой, и в него дописывается тайм-аут транзакции из урока 12.</p>
+<div data-diff="lesson-20/src/main/java/dev/study/payguard/job/KafkaSinks.java lesson-21/src/main/java/dev/study/payguard/job/KafkaSinks.java"></div>
+<p>Все три источника в <code>PayGuardJob</code> получают те же свойства через <code>setProperties</code>. Метод копирует ключи в общий набор свойств источника, поэтому порядок вызовов в строителе не важен.</p>
+<div data-diff="lesson-20/src/main/java/dev/study/payguard/job/PayGuardJob.java lesson-21/src/main/java/dev/study/payguard/job/PayGuardJob.java"></div>
+<p>Генератор живёт в том же jar и берёт класс из пакета задания.</p>
+<div data-diff="lesson-20/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java lesson-21/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java"></div>
+<p>Пока переменные окружения не заданы, поведение проекта не меняется. Это пригодится в шаге 4, где хаос-тест идёт на обычном стенде без паролей.</p>
+
+<h2>Шаг 3. Надстройка Compose с SASL</h2>
+<p>Положи рядом с <code>docker-compose.yml</code> файл <code>docker-compose.sasl.yml</code>. Это надстройка (override file). Compose читает основной файл, потом надстройку и сливает их. Словари вроде <code>environment</code> объединяются по ключам, а списки вроде <code>command</code> заменяются целиком.</p>
+<div data-code="lesson-21/docker-compose.sasl.yml"></div>
+<p>Разберём по блокам.</p>
+<ul>
+  <li>Якорь <code>x-flink-kafka-auth</code> задаёт переменные для JobManager и TaskManager. Их читает <code>KafkaSecurity</code>. Пароль подставляется из файла <code>.env</code>.</li>
+  <li><code>KAFKA_LISTENER_SECURITY_PROTOCOL_MAP</code> переводит слушатели INTERNAL и EXTERNAL на <code>SASL_PLAINTEXT</code>. Слушатель CONTROLLER для внутреннего кворума KRaft остаётся без пароля.</li>
+  <li>Две строки JAAS задают серверную сторону PLAIN для каждого слушателя. Пары <code>user_admin</code> и <code>user_payguard</code> объявляют учётные записи брокера и их пароли, а <code>username</code> и <code>password</code> брокер использует сам для связи между брокерами.</li>
+  <li>Проверка здоровья и <code>kafka-init</code> теперь ходят с учёткой admin. Скрипт пишет файл <code>client.properties</code> и передаёт его через <code>--command-config</code>. Двойной <code>$$</code> нужен, чтобы Compose не подставил переменную сам и оставил её оболочке контейнера.</li>
+</ul>
+<p>Команда <code>kafka-init</code> в надстройке заменяет исходную целиком, поэтому в ней повторён весь список топиков вместе с компактируемым <code>merchants.changelog</code> из урока 15. Забыть один топик при таком копировании легко, первая версия надстройки так и потеряла <code>merchants.changelog</code>. SQL-кластер в режиме SASL мы не запускали.</p>
+<p>Пароли лежат в <code>.env.example</code>. Это образец, настоящий <code>.env</code> создаётся копией и в git не попадает.</p>
+<div data-code="lesson-21/.env.example"></div>
+<div data-diff="lesson-20/.gitignore lesson-21/.gitignore"></div>
+
+<h2>Шаг 4. Итоговый хаос-тест</h2>
+<p>Создай <code>scripts/final-chaos.sh</code>. Он по очереди ломает три компонента стенда и в конце проверяет дубли.</p>
+<div data-code="lesson-21/scripts/final-chaos.sh"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-21/scripts/final-chaos.sh" data-lines="7-21"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Функция <code>step</code> печатает заголовок шага, выполняет переданную команду, ждёт <code>PAUSE</code> секунд и печатает первую строку отчёта о чекпоинтах из урока 11. В ней три счётчика, завершённые, неудачные и восстановления.</p>
+      <p class="tl">Первый шаг вызывает <code>chaos-kill-tm.sh</code> из урока 11. Тот убивает TaskManager сигналом SIGKILL и ждёт, пока задание восстановится из чекпоинта.</p>
+      <p class="tl">Второй шаг останавливает PostgreSQL на 30 секунд и запускает обратно. Вывод Compose уходит в <code>/dev/null</code>, чтобы не мешать отчёту.</p>
+      <p class="tl">Третий шаг перезапускает контейнер Kafka. Задание должно переподключиться без рестарта.</p>
+      <p class="tl">В конце <code>verify-no-duplicates.sh</code> из урока 12 читает <code>fraud.alerts</code> с <code>read_committed</code> и считает идентификаторы алертов, встретившиеся дважды.</p>
+    </div>
+  </div>
+</div>
+<p>Собери проект и подними обычный стенд. Переменная <code>COMPOSE_FILE</code> в этот момент не должна быть задана.</p>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+./scripts/submit.sh
+./gradlew loadgen --args="--rate 200 --dup 0.02"</pre>
+<p>Генератор пишет 200 платежей в секунду и дублирует 2 % из них, чтобы дедупликация из урока 7 тоже работала под нагрузкой. Во втором терминале дай заданию сделать несколько чекпоинтов и запусти тест.</p>
+<pre data-lang="bash" data-title="терминал">PAUSE=45 ./scripts/final-chaos.sh</pre>
+<p>Переменная <code>PAUSE</code> задаёт паузу после каждого шага. 45 секунд хватает на три чекпоинта при интервале 15 секунд. Итог нашего прогона сведён в таблицу, это первая строка отчёта после каждого шага.</p>
+<table>
+<thead><tr><th>Момент</th><th>Завершено</th><th>Неудачных</th><th>Восстановлений</th><th>Что произошло</th></tr></thead>
+<tbody>
+<tr><td>До хаоса</td><td>5</td><td>0</td><td>0</td><td>Чекпоинт 5 занял 258 мс, записано 5081 КиБ при состоянии 6646 КиБ</td></tr>
+<tr><td>Убит TaskManager</td><td>8</td><td>1</td><td>1</td><td>Скрипт напечатал «Задание восстановлено из чекпоинта за 13 с». Чекпоинт в момент убийства упал</td></tr>
+<tr><td>PostgreSQL выключен на 30 с</td><td>10</td><td>2</td><td>5</td><td>Задание перезапускалось четыре раза, пока базы не было</td></tr>
+<tr><td>Kafka перезапущена</td><td>14</td><td>2</td><td>5</td><td>Счётчик восстановлений не вырос, задание пережило рестарт брокера без перезапуска</td></tr>
+</tbody>
+</table>
+<p>Последняя строка вывода скрипта.</p>
+<pre data-lang="text" data-title="вывод" data-output>fraud.alerts [read_committed]: записей 7, идентификаторов с повтором 0</pre>
+<p>Для сравнения запусти проверку с уровнем изоляции <code>read_uncommitted</code>.</p>
+<pre data-lang="bash" data-title="терминал">./scripts/verify-no-duplicates.sh fraud.alerts alertId read_uncommitted</pre>
+<pre data-lang="text" data-title="вывод" data-output>fraud.alerts [read_uncommitted]: записей 12, идентификаторов с повтором 2</pre>
+<p>Лишние пять записей и два повтора это данные транзакций, которые отменились при восстановлениях. Потребитель <code>read_committed</code> их не видит, так и работает exactly-once из урока 12.</p>
+<p>Теперь посмотри, что задание пережило. История исключений доступна через REST.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '[.jobs[] | select(.status == "RUNNING")][0].id')
+curl -s localhost:8081/jobs/$JOB/exceptions | jq -r '.exceptionHistory.entries[].exceptionName'</pre>
+<p>Первая команда находит идентификатор запущенного задания, вторая печатает имена исключений из истории. У нас там было пять записей. Три раза <code>java.io.IOException: unable to open JDBC writer</code>, это рестарты без базы, каждый падал на открытии JDBC-приёмника, а exponential-delay растягивал паузы между ними. Ещё <code>FlinkExpectedException: The TaskExecutor is shutting down.</code> и <code>ResourceManagerException: TaskManager with id 192.168.97.5:38213-1d33ea is no longer reachable.</code>, это следы убитого TaskManager. Задание в конце RUNNING.</p>
+<p>Такая история и есть материал для runbook. Каждое исключение здесь ожидаемое, и дежурный должен уметь отличить его от исключения из аварии в теории.</p>
+
+<h2>Шаг 5. Стенд с SASL</h2>
+<p>Останови обычный стенд и включи надстройку.</p>
+<pre data-lang="bash" data-title="терминал">docker compose down
+cp .env.example .env
+export COMPOSE_FILE=docker-compose.yml:docker-compose.sasl.yml
+docker compose up -d --wait</pre>
+<p><code>cp</code> создаёт рабочий <code>.env</code> из образца, Compose читает его автоматически из папки проекта. Переменная <code>COMPOSE_FILE</code> перечисляет файлы через двоеточие и действует как пара флагов <code>-f</code>. Мы выбрали её по двум причинам. Все скрипты в <code>scripts/</code> вызывают <code>docker compose</code> без флагов и тоже подхватят надстройку. Сохранить строку с двумя <code>-f</code> в переменной и раскрыть её как команду в zsh не получится, zsh не делит значение переменной на слова. В нашем прогоне брокер стал healthy через 6 секунд, <code>kafka-init</code> создал топики с учёткой admin.</p>
+<p>Проверь, что анонимный клиент больше не проходит.</p>
+<pre data-lang="bash" data-title="терминал">timeout 30 docker compose exec -T kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list; echo $?</pre>
+<p>Команда без <code>--command-config</code> не получает ответа и висит до таймаута. <code>timeout</code> обрывает её и возвращает код 124, его печатает <code>echo $?</code>. Причина видна в логе брокера, <code>docker compose logs kafka</code>.</p>
+<pre data-lang="text" data-title="лог брокера" data-output>WARN ... Unexpected error from /127.0.0.1 ...; closing connection
+org.apache.kafka.common.errors.InvalidRequestException: Unexpected Kafka request of type METADATA during SASL handshake.</pre>
+<p>Клиент сразу отправил запрос метаданных, а брокер на этом слушателе ждал рукопожатие SASL. Он закрыл соединение, клиент переподключался и повторял то же самое.</p>
+<p>Запусти задание и генератор с учётными данными.</p>
+<pre data-lang="bash" data-title="терминал">./scripts/submit.sh
+PAYGUARD_KAFKA_USER=payguard PAYGUARD_KAFKA_PASSWORD=payguard-secret ./gradlew loadgen --args="--rate 200"</pre>
+<p>Заданию переменные передавать не нужно. <code>flink run</code> выполняется внутри контейнера JobManager, а надстройка уже положила туда <code>PAYGUARD_KAFKA_USER</code> и пароль. Генератор работает на твоей машине, поэтому переменные заданы прямо перед командой и действуют только на неё. Через 90 секунд проверь чекпоинты.</p>
+<pre data-lang="bash" data-title="терминал">./scripts/checkpoint-report.sh | head -1</pre>
+<pre data-lang="text" data-title="вывод" data-output>Завершено: 7 неудачных: 0 восстановлений: 0</pre>
+<p>Исключений в истории ноль, задание RUNNING. В Web UI источник <code>payments-raw</code> прочитал 17240 записей, <code>payment-confirmations</code> 16400. Значит, оба потока идут через SASL. Файл <code>.env</code> должен появиться до <code>up</code>. Без него Compose подставит вместо паролей пустые строки и предупредит об этом при старте.</p>
+<p>Вернуть обычный стенд можно так.</p>
+<pre data-lang="bash" data-title="терминал">docker compose down
+unset COMPOSE_FILE</pre>
+
+<h2>Шаг 6. Выпуск образа</h2>
+<p>Создай <code>.github/workflows/release.yml</code>.</p>
+<div data-code="lesson-21/.github/workflows/release.yml"></div>
+<p>Сценарий запускается только на push тега, который начинается с <code>v</code>. Права <code>packages: write</code> разрешают встроенному токену <code>GITHUB_TOKEN</code> писать в реестр, а <code>contents: read</code> оставляет репозиторий только для чтения. Шаг Gradle гоняет быстрые тесты, сквозные тесты на Testcontainers из урока 16 и собирает толстый jar. Отличие от <code>ci.yml</code> в том, что всё делается в одном задании, и образ строится только после зелёных тестов. Имя образа собирается из имени репозитория, а тег из <code>github.ref_name</code>, то есть из имени тега git. Выпуск запускается так.</p>
+<pre data-lang="bash" data-title="терминал">git tag v1.0.0
+git push origin v1.0.0</pre>
+<p>Этот сценарий мы на GitHub не запускали. Он лежит в снапшоте как образец, проверь его на своём репозитории. В <code>k8s/payguard.yaml</code> после этого в поле <code>image</code> пишется полное имя образа из <code>ghcr.io</code>, а для приватного пакета кластеру понадобится секрет для доступа к реестру.</p>
+
+<h2>Шаг 7. Если цикл уже начался</h2>
+<p>Повтори порядок действий из теории на Kubernetes-стенде урока 20. Вывод этих команд мы не сохраняли, поэтому здесь только последовательность. Сначала убедись, что у Kafka есть том, иначе цикл повторится при следующем рестарте брокера.</p>
+<pre data-lang="bash" data-title="терминал">kubectl get pvc kafka-data
+kubectl apply -f k8s/infra.yaml
+kubectl delete flinkdep payguard
+kubectl get configmap
+kubectl delete configmap payguard-cluster-config-map payguard-&lt;jobId&gt;-config-map
+kubectl apply -f k8s/payguard.yaml</pre>
+<p><code>kubectl get configmap</code> покажет ConfigMap кластера, в уроке 20 их было пять. Удалять нужно две с метаданными HA, <code>payguard-cluster-config-map</code> и <code>payguard-&lt;jobId&gt;-config-map</code> с идентификатором задания из списка. Остальные оператор создаст заново. После <code>apply</code> задание стартует без состояния.</p>
+<p>Если хочешь сохранить состояние карт, есть аккуратный путь из теории, который мы не проверяли. Меняется uid приёмника алертов вот в этом месте <code>PayGuardJob</code>.</p>
+<div data-code="lesson-21/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="205-208"></div>
+<p>После выпуска образа с новым uid в спецификации задания задаются <code>initialSavepointPath</code> с путём к последнему сохранённому снимку и <code>allowNonRestoredState: true</code>. Прогони это сначала на копии стенда.</p>

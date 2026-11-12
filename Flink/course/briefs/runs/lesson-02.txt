@@ -1,0 +1,62 @@
+### тесты
+RESULT tests 4 fail 0
+jar bytes 24327017
+### overview
+{"taskmanagers":1,"slots-total":4,"slots-available":4,"jobs-running":0,"jobs-finished":0,"jobs-cancelled":0,"jobs-failed":0,"flink-version":"2.2.1","flink-commit":"450c63e"}
+### flink run
+{
+  "nodes" : [ {
+    "id" : 1,
+    "type" : "Source: payments-raw",
+    "pact" : "Data Source",
+    "contents" : "Source: payments-raw",
+    "parallelism" : 2
+  }, {
+    "id" : 2,
+    "type" : "drop-blank",
+    "pact" : "Operator",
+    "contents" : "drop-blank",
+    "parallelism" : 2,
+    "predecessors" : [ {
+      "id" : 1,
+      "ship_strategy" : "FORWARD",
+      "side" : "second"
+    } ]
+  }, {
+    "id" : 3,
+    "type" : "Sink: stdout",
+    "pact" : "Data Sink",
+    "contents" : "Sink: stdout",
+    "parallelism" : 2,
+    "predecessors" : [ {
+      "id" : 2,
+      "ship_strategy" : "FORWARD",
+      "side" : "second"
+    } ]
+  } ]
+}
+Job has been submitted with JobID 8fe3d0eda0de9f053bb73d644c2fd485
+### job 8fe3d0eda0de9f053bb73d644c2fd485
+{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> drop-blank -> Sink: stdout","parallelism":2,"status":"RUNNING"}]}
+### flink list
+Waiting for response...
+------------------ Running/Restarting Jobs -------------------
+07.11.2026 20:56:54 : 8fe3d0eda0de9f053bb73d644c2fd485 : payguard (RUNNING)
+--------------------------------------------------------------
+No scheduled jobs.
+### плотность подзадач
+Source: payments-raw -> drop-blank -> Sink: stdout :: [{"id":"numRecordsIn","min":8200.0,"max":9540.0,"sum":17740.0},{"id":"numRecordsOut","min":0.0,"max":0.0,"sum":0.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}] :: watermarks []
+### checkpoints
+{"counts":{"restored":0,"total":0,"in_progress":0,"completed":0,"failed":0},"recent":[]}
+### exceptions
+[]
+### топики
+--- fraud.alerts
+--- payments.dlq
+--- payments.raw
+{"paymentId":"bb26c01e-1606-3f27-ced1-7712b8649000","cardId":"c-4447","merchantId":"m-0000","amountMinor":43841,"currency":"EUR","country":"DE","eventTimeMs":1794085023190}
+{"paymentId":"eff2690d-5477-392e-7db0-7656e31e1c58","cardId":"c-4532","merchantId":"m-0024","amountMinor":48451,"currency":"EUR","country":"FR","eventTimeMs":1794085023190}
+{"paymentId":"22b28e3a-fca3-fd2a-271e-f5fa277424f6","cardId":"c-4760","merchantId":"m-0007","amountMinor":28533,"currency":"EUR","country":"FR","eventTimeMs":1794084998166}
+--- rules.config
+### postgres
+### лог TaskManager, ошибки

@@ -1,0 +1,92 @@
+/* Блоки кода: файл из снапшота, вывод терминала, diff, цитата из исходников и подсветка Pygments. */
+.code-file {
+  margin: var(--space-4) 0 var(--space-6);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--code-bg);
+}
+
+.code-file figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  font: 500 var(--text-xs) var(--font-mono);
+  color: var(--code-caption);
+  background: var(--code-bar);
+  overflow-wrap: anywhere;
+}
+
+.code-file pre {
+  margin: 0;
+  padding: var(--space-4);
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--code-text);
+  font: 400 var(--text-sm) / 1.6 var(--font-mono);
+  tab-size: 4;
+}
+
+.code-file code {
+  font: inherit;
+  background: none;
+  padding: 0;
+}
+
+.code-output pre {
+  color: var(--code-output);
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  font: 500 var(--text-xs) var(--font-body);
+  color: var(--code-text);
+  background: var(--code-button);
+  border: 0;
+  border-radius: var(--radius-xs);
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.copy-btn:hover {
+  background: var(--code-button-hover);
+}
+
+.diff-add,
+.diff-del,
+.diff-hunk {
+  display: block;
+}
+
+.diff-add {
+  background: var(--code-diff-add);
+}
+
+.diff-del {
+  background: var(--code-diff-del);
+}
+
+.diff-hunk {
+  color: var(--code-function);
+}
+
+.source-code figcaption a {
+  color: var(--code-function);
+  text-decoration: none;
+}
+
+.source-code figcaption a:hover {
+  text-decoration: underline;
+}
+
+.pyg-k, .pyg-kd, .pyg-kn, .pyg-kr, .pyg-kc, .pyg-kp, .pyg-ow { color: var(--code-keyword); }
+.pyg-kt, .pyg-nc, .pyg-nn { color: var(--code-type); }
+.pyg-s, .pyg-s1, .pyg-s2, .pyg-sb, .pyg-sd, .pyg-sh, .pyg-si, .pyg-sx { color: var(--code-string); }
+.pyg-c, .pyg-c1, .pyg-cm, .pyg-cs, .pyg-ch, .pyg-cp { color: var(--code-comment); font-style: italic; }
+.pyg-nf, .pyg-fm, .pyg-nb, .pyg-bp { color: var(--code-function); }
+.pyg-na, .pyg-nd, .pyg-nt, .pyg-nl { color: var(--code-attribute); }
+.pyg-m, .pyg-mi, .pyg-mf, .pyg-mh, .pyg-il, .pyg-se { color: var(--code-number); }
+.pyg-o { color: var(--code-operator); }
+.pyg-nv, .pyg-vi, .pyg-no { color: var(--code-variable); }
+.pyg-err { color: var(--code-error); background: none; }

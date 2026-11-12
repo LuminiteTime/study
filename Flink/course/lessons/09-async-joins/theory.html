@@ -1,0 +1,196 @@
+<h2>Алерт без контекста</h2>
+<p>Аналитик антифрода получает алерт «11 платежей за минуту» и первым делом спрашивает, что за продавец. Уровень риска продавца лежит в PostgreSQL, его ведёт другая команда. Без этой информации алерт приходится проверять руками, поэтому PayGuard должен дописывать риск в алерт сам. Такую операцию называют обогащением.</p>
+<p>Самый очевидный способ это <code>map</code>, внутри которого JDBC-запрос. Подзадача Flink обрабатывает записи одну за другой в одном потоке. Пока запрос идёт в базу, поток стоит и ничего больше не делает. Если запрос занимает 5 мс, подзадача выдаст не больше 200 записей в секунду, даже когда процессор свободен на 99 %. Дальше очередь растёт в сетевых буферах, и backpressure доходит до источника.</p>
+<p>Вторая задача урока тоже про связь с внешним миром. Банк-эмитент присылает подтверждения платежей отдельным потоком. Нужно соединить платёж с подтверждением, которое пришло в течение пяти минут, и понять, сколько данных Flink будет держать в состоянии, пока ждёт пару.</p>
+
+<h2>Прачечная самообслуживания</h2>
+<p>У тебя гора белья и стиральная машина, стирка идёт 40 минут. Если стоять у машины и ждать, за вечер получится три загрузки. Время уходит на ожидание, руки при этом свободны. В прачечной самообслуживания ты загружаешь сразу восемь машин и забираешь бельё из той, что закончила первой. Пропускная способность теперь равна числу машин, делённому на время стирки.</p>
+<p>У прачечной есть правила, и у Flink они те же. Машин ограниченное число, и когда все заняты, новая корзина ждёт у входа. Это ёмкость очереди (capacity). Иногда машина зависает, и ты через час забираешь бельё мокрым, чтобы не ждать до утра. Это timeout. Если бельё надо раскладывать в том порядке, в каком загружал, чистое бельё из быстрых машин лежит и ждёт, пока достирается самая первая. Это режим ordered. Перед уходом на обед ты записываешь, какие корзины сейчас в машинах. Если отключат свет, по списку можно загрузить их заново. Так работает связь Async I/O с чекпоинтом.</p>
+
+<h2>Async I/O во Flink</h2>
+<p>Асинхронный оператор подключается вызовом <code>AsyncDataStream.unorderedWait</code> или <code>orderedWait</code>. Ему передают поток, функцию, timeout и capacity. Функция наследует <code>RichAsyncFunction</code> и реализует метод <code>asyncInvoke</code>. Метод получает запись и объект <code>ResultFuture</code>, запускает запрос и сразу возвращает управление. Когда ответ придёт, кто-то вызовет <code>ResultFuture.complete</code>, и только тогда результат уйдёт дальше по графу.</p>
+<p>Документация отдельно предупреждает, что <code>asyncInvoke</code> вызывается последовательно в потоке подзадачи. Если внутри него ждать ответа, например вызвать <code>join()</code> у future, асинхронность пропадает и получается тот же синхронный <code>map</code>. У JDBC нет асинхронного клиента, поэтому в PayGuard запрос уходит в собственный пул потоков через <code>CompletableFuture.supplyAsync</code>. Документация называет такой путь допустимым, но менее эффективным, чем настоящий асинхронный клиент.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Ответ из базы приходит в чужом потоке, из пула <code>AlertEnrichment</code>. Посмотрим, что оператор делает с вызовом <code>complete</code>. Результат упаковывается в задачу для mailbox, то есть в очередь дел самой подзадачи, и обрабатывается её потоком. Поэтому выдавать записи дальше из потока пула безопасно, гонок с обработкой входа нет.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/AsyncWaitOperator.java" data-lines="647-670" data-must="mailboxExecutor.execute("></div>
+<p>Второй путь завершения это <code>completeExceptionally</code>. Он вызывает <code>failExternally</code>, и вся подзадача падает с перезапуском задания. Одна недоступная запись в справочнике обернётся рестартом, поэтому в PayGuard ошибка базы превращается в значение <code>UNKNOWN</code> и счётчик в метриках.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/AsyncWaitOperator.java" data-lines="672-691" data-must="failExternally"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/asyncio/" target="_blank" rel="noopener">Asynchronous I/O for External Data Access</a></p>
+</div>
+
+<h2>Capacity и пропускная способность</h2>
+<p>Оператор держит очередь записей, по которым запрос уже отправлен, а результат ещё не выдан. Её размер ограничен capacity. Отсюда простая оценка сверху. Пропускная способность асинхронного оператора не больше, чем параллелизм, умноженный на capacity и делённый на задержку запроса.</p>
+<p>Разберём на числах. Пусть запрос идёт 5 мс, параллелизм 2, capacity 200. Формула даёт 2 × 200 / 0,005 = 80 000 записей в секунду. Синхронный <code>map</code> при тех же условиях дал бы 2 / 0,005 = 400. Только в PayGuard одновременно в базу идут не 200 запросов. У каждой подзадачи пул из 8 потоков и 8 соединений, поэтому настоящий потолок равен 2 × 8 / 0,005 = 3200 записей в секунду. В формулу подставляют наименьшее из ограничений, и capacity лишь одно из них.</p>
+<p>Остальные места в очереди тоже работают. Они поглощают всплески, пока пул разбирает запросы, и держат результаты из кэша, которые готовы сразу. Есть и цена. Каждая запись в очереди занимает память и попадает в чекпоинт, поэтому capacity в десятки тысяч не ставят. Документация советует при нехватке скорее поднять параллелизм.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Что происходит, когда очередь полна. Метод <code>addToWorkQueue</code> пытается положить запись и, пока не получится, отдаёт управление mailbox. Подзадача продолжает выдавать готовые результаты, но новые записи со входа не берёт. Это и есть backpressure, который поднимается вверх по графу.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/AsyncWaitOperator.java" data-lines="346-355" data-must="queue.tryPut(streamElement)"></div>
+<p>Сама проверка места в упорядоченной очереди. Место освобождается, только когда запись покинула очередь, то есть её результат выдан дальше. Готовый, но не выданный результат продолжает занимать место.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/queue/OrderedStreamElementQueue.java" data-lines="95-107" data-must="queue.size() &lt; capacity"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/asyncio/" target="_blank" rel="noopener">Asynchronous I/O, параметры Timeout и Capacity</a></p>
+</div>
+
+<h2>Ordered и unordered</h2>
+<p>Запросы возвращаются в случайном порядке. В режиме unordered результат уходит дальше сразу, как только готов. В режиме ordered он ждёт, пока выйдут все записи, пришедшие раньше. Один медленный запрос в голове очереди задерживает всех за ним, и они продолжают занимать места. Такую ситуацию называют head-of-line blocking.</p>
+<p>Попробуй сам. Каждый восьмой запрос в модели в восемь раз медленнее остальных. Запусти в режиме unordered, потом включи ordered и запусти снова. Серия задержек в обоих прогонах одинаковая.</p>
+
+<div class="viz" id="viz-l09">
+  <p class="viz-title">Очередь асинхронного оператора</p>
+  <div class="viz-controls">
+    <label>Задержка запроса <input type="range" id="viz-l09-latency" min="20" max="200" step="10" value="100"> <span id="viz-l09-latency-value">100 мс</span></label>
+    <label>Capacity <input type="range" id="viz-l09-capacity" min="1" max="16" value="8"> <span id="viz-l09-capacity-value">8</span></label>
+    <label><input type="checkbox" id="viz-l09-ordered"> ordered</label>
+    <button class="primary" id="viz-l09-run" type="button">Запустить</button>
+  </div>
+  <svg id="viz-l09-svg" role="img" aria-label="Ряд мест в очереди асинхронного оператора. Кольцо места заполняется по мере выполнения запроса, готовые результаты подсвечены зелёным. Ниже график выпущенных записей, прошлый прогон пунктиром."></svg>
+  <p class="viz-note" id="viz-l09-result">Нажми кнопку, и модель прогонит 4 секунды работы одной подзадачи с бесконечной очередью записей на входе.</p>
+</div>
+
+<p>С watermark режим unordered ведёт себя сложнее. Записи между двумя watermark могут обгонять друг друга. Watermark не обгоняет записи до него, и записи после него не обгоняют его самого. При частых watermark unordered теряет часть своего преимущества. В PayGuard порядок алертов неважен, поэтому стоит <code>unorderedWait</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Упорядоченная очередь считает готовой только голову. Пока первая запись не завершена, <code>hasCompletedElements</code> возвращает <code>false</code>, сколько бы записей за ней ни было готово.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/queue/OrderedStreamElementQueue.java" data-lines="62-73" data-must="queue.peek().isDone()"></div>
+<p>Неупорядоченная очередь делит записи на сегменты, и границы сегментов проходят по watermark. Обгон возможен только внутри сегмента.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/queue/UnorderedStreamElementQueue.java" data-lines="42-52" data-must="separated by watermarks"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/asyncio/" target="_blank" rel="noopener">Asynchronous I/O, разделы Order of Results и Event Time</a></p>
+</div>
+
+<h2>Timeout</h2>
+<p>Timeout защищает от запросов, которые не вернутся никогда. Его отсчёт начинается, когда запись встала в очередь оператора. Время в пуле потоков <code>AlertEnrichment</code> тоже входит в эти 2 секунды. Если пул перегружен, запись может истечь, даже не дойдя до базы. По умолчанию по истечении timeout функция завершает запись исключением, а исключение, как мы видели, перезапускает задание. Поэтому <code>AlertEnrichment</code> переопределяет метод <code>timeout</code> и выдаёт алерт с риском <code>UNKNOWN</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Таймер регистрируется в <code>processElement</code> сразу после того, как запись получила место в очереди, и до вызова пользовательской функции.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/AsyncWaitOperator.java" data-lines="268-277" data-must="resultHandler.registerTimeout(getProcessingTimeService(), timeout)"></div>
+<p>Поведение по умолчанию задано в интерфейсе <code>AsyncFunction</code>.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/functions/async/AsyncFunction.java" data-lines="89-99" data-must="Async function call has timed out."></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/asyncio/" target="_blank" rel="noopener">Asynchronous I/O, раздел Timeout Handling</a></p>
+</div>
+
+<h2>Что попадает в чекпоинт</h2>
+<p>Запрос в полёте нельзя сохранить на диск, соединение с базой не сериализуется. Flink сохраняет то, что можно, то есть входные записи из очереди. Они лежат в состоянии оператора (operator state), которое не привязано к ключу. После восстановления оператор при открытии отправляет их в <code>processElement</code> заново, и запросы уходят повторно.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>При снимке весь список записей очереди кладётся в списочное состояние оператора. Метод <code>values</code> возвращает входные элементы, результаты в снимок не попадают.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/AsyncWaitOperator.java" data-lines="291-311" data-must="partitionableState.update(queue.values())"></div>
+<p>При открытии оператора восстановленные элементы снова проходят через обработку, как будто только что пришли со входа.</p>
+<div data-src="flink:flink-streaming-java/src/main/java/org/apache/flink/streaming/api/operators/async/AsyncWaitOperator.java" data-lines="225-241" data-must="recoveredStreamElements.get()"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/asyncio/" target="_blank" rel="noopener">Asynchronous I/O, раздел Fault Tolerance Guarantees</a>, <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/fault-tolerance/state/" target="_blank" rel="noopener">Working with State</a></p>
+</div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Повтор запроса после сбоя</strong>
+    <p>Документация называет гарантии асинхронного оператора exactly-once и тут же пишет, что после восстановления запросы отправляются заново. Внешний вызов при этом может выполниться дважды. Чтение риска продавца повторять безопасно. Если асинхронная функция отправляет SMS или списывает деньги, после восстановления клиент получит второе сообщение. Такие вызовы делают идемпотентными, например передают в API ключ запроса, по которому повтор узнаётся.</p>
+  </div>
+</div>
+
+<h2>Кэш рядом с оператором</h2>
+<p>Продавцов в PayGuard 50, их риск меняется редко. Ходить в базу за каждым алертом незачем. <code>AlertEnrichment</code> держит в каждой подзадаче <code>ConcurrentHashMap</code> с риском и временем, до которого запись считается свежей. Срок жизни 5 минут. Значит, изменение в базе дойдёт до алертов с задержкой до пяти минут, и это осознанная плата за нагрузку на базу. Кэш живёт в памяти JVM и в чекпоинт не попадает, после рестарта он наполняется заново.</p>
+<p>Кэш без ограничения размера годится для тысяч ключей. На миллионах продавцов он съест кучу TaskManager, и тогда берут библиотеку с вытеснением, например Caffeine. Если справочник большой и меняется часто, его лучше загружать в Flink потоком изменений и держать в состоянии. Как получить такой поток из PostgreSQL, разберём в уроке 15.</p>
+<p>Ещё одно решение снижает нагрузку сильнее кэша. Мы обогащаем алерты, их на порядки меньше, чем платежей. В прогоне из практики дедупликация пропустила к правилам 17214 платежей, а правила выдали 58 алертов, поэтому в базу ушло бы примерно в 300 раз меньше запросов, чем при обогащении каждого платежа.</p>
+
+<h2>Interval join</h2>
+<p>Теперь о соединении двух потоков. Платёж и подтверждение связаны идентификатором <code>paymentId</code>, и подтверждение приходит позже, в пределах пяти минут. Окно здесь не подходит. Платёж в 12:00:58 и подтверждение в 12:01:03 попадут в разные минутные окна и не встретятся.</p>
+<p>Interval join задаёт интервал вокруг каждой записи левого потока. Записи b правого потока соединяются с записью a, если у них один ключ и выполняется условие <code>a.ts + lowerBound &lt;= b.ts &lt;= a.ts + upperBound</code>. В PayGuard левый поток это платежи, правый это подтверждения, границы 0 и 5 минут. Соединение работает только во времени события и выдаёт только совпавшие пары, это inner join. Временной меткой пары становится наибольшая из двух.</p>
+
+<svg viewBox="0 0 640 210" role="img" aria-label="Шкала времени. Платёж в момент t открывает интервал до t плюс 5 минут. Подтверждение внутри интервала соединяется, подтверждения до t и после t плюс 5 минут остаются без пары." style="width:100%;height:auto;margin:var(--space-4) 0">
+  <defs><marker id="arrow-l09" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--color-text-secondary)"/></marker></defs>
+  <g font-family="var(--font-body)" font-size="12" fill="var(--color-text)">
+    <text x="10" y="64">платежи</text>
+    <text x="10" y="134">подтверждения</text>
+    <line x1="110" y1="60" x2="620" y2="60" stroke="var(--color-border)" stroke-width="2"/>
+    <line x1="110" y1="130" x2="620" y2="130" stroke="var(--color-border)" stroke-width="2"/>
+    <rect x="180" y="110" width="330" height="40" rx="6" fill="var(--color-accent-light)" stroke="var(--color-accent)" stroke-dasharray="4 3"/>
+    <text x="345" y="104" text-anchor="middle" fill="var(--color-accent)">интервал от t до t + 5 мин</text>
+    <circle cx="180" cy="60" r="8" fill="var(--color-accent)"/>
+    <text x="180" y="40" text-anchor="middle">платёж p1, время t</text>
+    <circle cx="150" cy="130" r="7" fill="var(--color-text-muted)"/>
+    <text x="150" y="172" text-anchor="middle" fill="var(--color-text-secondary)">раньше t</text>
+    <circle cx="260" cy="130" r="7" fill="var(--color-success)"/>
+    <text x="260" y="172" text-anchor="middle" fill="var(--color-success)">пара выдана</text>
+    <circle cx="570" cy="130" r="7" fill="var(--color-text-muted)"/>
+    <text x="570" y="172" text-anchor="middle" fill="var(--color-text-secondary)">позже t + 5 мин</text>
+    <line x1="510" y1="20" x2="510" y2="190" stroke="var(--color-info)" stroke-dasharray="5 4"/>
+    <text x="505" y="200" text-anchor="end" fill="var(--color-info)">когда watermark дойдёт сюда, p1 удаляется из состояния</text>
+  </g>
+  <path d="M184 68L256 122" stroke="var(--color-success)" stroke-width="1.5" fill="none" marker-end="url(#arrow-l09)"/>
+</svg>
+
+<p>Оператор держит обе стороны в keyed state. Каждая пришедшая запись кладётся в свой буфер и сверяется с буфером другой стороны. Чтобы буферы не росли бесконечно, на каждую запись ставится таймер очистки по времени события. Платёж с границами 0 и 5 минут живёт в состоянии, пока watermark не пройдёт t + 5 мин. Отсюда оценка объёма. Число платежей в состоянии примерно равно частоте платежей, умноженной на верхнюю границу. При 200 платежах в секунду это 200 × 300 = 60 000 записей. Расширишь интервал до часа, и состояние вырастет в 12 раз.</p>
+<p>Запись, время которой уже позади watermark, в буфер не попадает. Если не задать побочный выход для поздних данных, она пропадает молча. В PayGuard watermark отстаёт от свежих платежей на 10 секунд, а генератор присылает часть платежей с опозданием до 30 секунд. Платёж, опоздавший больше чем на 10 секунд, пары не получит.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Буферы обеих сторон создаются как <code>MapState</code> в keyed state. Ключ карты имеет тип <code>Long</code>, это временная метка записи, значение хранит список записей с этой меткой.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/co/IntervalJoinOperator.java" data-lines="162-183" data-must="getKeyedStateStore()"></div>
+<p>Обработка записи любой стороны. Поздняя запись уходит в побочный выход и дальше не обрабатывается. Остальные кладутся в свой буфер и сверяются со всеми временными метками другого буфера. Последние строки ставят таймер очистки. У правой стороны в PayGuard верхняя относительная граница равна нулю, поэтому подтверждение удаляется, как только watermark пройдёт его собственное время. Платёж с более ранним временем, пришедший после этого, оператор всё равно отбросил бы как поздний.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/co/IntervalJoinOperator.java" data-lines="232-262" data-must="isLate(ourTimestamp)"></div>
+<p>Срабатывание таймера удаляет из буфера всю корзину с нужной временной меткой.</p>
+<div data-src="flink:flink-runtime/src/main/java/org/apache/flink/streaming/api/operators/co/IntervalJoinOperator.java" data-lines="314-330" data-must="leftBuffer.remove(timestamp)"></div>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/joining/" target="_blank" rel="noopener">Joining, раздел Interval Join</a></p>
+</div>
+
+<div class="callout callout-info">
+  <div class="callout-icon">i</div>
+  <div class="callout-content">
+    <strong class="callout-title">Соединение пар многие ко многим</strong>
+    <p>Interval join выдаёт пару для каждой записи другой стороны, которая попала в интервал. Генератор подтверждает и дубликаты платежей, поэтому одному платежу может достаться два подтверждения. Оператор выдаст две пары с одним <code>paymentId</code>. Если нужна ровно одна, дубликаты убирают до соединения или после него.</p>
+  </div>
+</div>
+
+<h2>Ручной join на KeyedCoProcessFunction</h2>
+<p>Interval join видит только совпавшие пары. Он не скажет, что подтверждение не пришло. Для антифрода это важный сигнал. Когда нужна логика сложнее, соединение пишут руками на <code>KeyedCoProcessFunction</code>. У неё два метода обработки, по одному на вход, общее keyed state по ключу и таймеры. Документация описывает шаблон так. Одну сторону сохраняют в состоянии, при записи с другой стороны сверяются с ним, а таймер по watermark решает, что ждать больше нечего. Состоянием и его очисткой здесь управляешь ты сам, и ошибка в очистке превращается в утечку. Такой оператор ты напишешь в задании.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/dev/datastream/operators/process_function/" target="_blank" rel="noopener">Process Function, раздел Low-level Joins</a></p>
+
+<h2>Сравнение со Spark</h2>
+<p>В Spark Structured Streaming соединение двух потоков тоже хранит обе стороны в хранилище состояния. Чтобы его чистить, Spark нужен watermark на входах и условие на время в самом соединении. Без них состояние растёт без ограничений. Внешние соединения потоков в Spark есть, и для них эти условия обязательны.</p>
+<p>Во Flink interval join получает границы в <code>between</code> и чистит буферы таймерами по watermark. Внешнего варианта у него нет, его пишут на <code>KeyedCoProcessFunction</code>.</p>
+<p>Отдельного оператора для асинхронных запросов в Spark нет. Обогащение там обычно пишут в <code>mapPartitions</code> и шлют запросы порциями, или соединяют поток со статической таблицей, которая перечитывается в каждом micro-batch. Во Flink асинхронный оператор встроен и участвует в чекпоинтах.</p>
+
+<h2>Проверь себя</h2>
+<div class="quiz-container" id="quiz-l09">
+  <div class="quiz-question-block" data-correct="a"
+       data-explanation-right="Верно. asyncInvoke вызывается последовательно в потоке подзадачи. Вызов join() ждёт ответа, и capacity 100 ни на что не влияет. Получается 4 подзадачи по 20 запросов в секунду."
+       data-explanation-wrong="Посмотри, что делает join() внутри asyncInvoke. Пока он ждёт ответа, подзадача не может начать следующий запрос, сколько бы мест ни было в очереди.">
+    <h3 class="quiz-question">Коллега обогащает платежи через HTTP-сервис скоринга с задержкой 50 мс. Параллелизм 4, capacity 100. Внутри asyncInvoke он пишет client.get(id).join() и только потом вызывает complete. Сколько записей в секунду выдаст оператор?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Около 80, как синхронный map</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Около 8000, по формуле 4 × 100 / 0,05</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Около 2000, потому что capacity делится между подзадачами</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="b"
+       data-explanation-right="Верно. Условие соединения b.ts от a.ts + 0 до a.ts + 5 мин. Подтверждение с временем на 2 секунды раньше платежа в интервал не попадает. Нижнюю границу ставят отрицательной, например минус 10 секунд."
+       data-explanation-wrong="Подставь числа в условие a.ts + lowerBound &lt;= b.ts. Если часы банка спешат или отстают, подтверждение может получить время раньше самого платежа.">
+    <h3 class="quiz-question">После подключения второго банка 3 % платежей перестали соединяться с подтверждениями. Подтверждения при этом приходят. Выяснилось, что часы банка отстают на 2 секунды. Что поменять в PaymentConfirmationJoin?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Увеличить верхнюю границу до 10 минут</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Сделать нижнюю границу отрицательной, например минус 10 секунд</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Перейти на unorderedWait</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <div class="quiz-question-block" data-correct="c"
+       data-explanation-right="Верно. Входные записи из очереди лежат в чекпоинте, и после восстановления оператор отправляет их в asyncInvoke снова. Для чтения это безопасно, для отправки сообщений нужен ключ идемпотентности."
+       data-explanation-wrong="Вспомни snapshotState в AsyncWaitOperator. Что лежит в чекпоинте, входные записи или результаты, и что с ними происходит в open после рестарта?">
+    <h3 class="quiz-question">Асинхронная функция отправляет клиенту push-уведомление о подозрительном платеже. После падения TaskManager и восстановления из чекпоинта несколько клиентов получили уведомление дважды. Почему?</h3>
+    <div class="quiz-options">
+      <button class="quiz-option" data-value="a"><div class="quiz-option-radio"></div><span>Приёмник Kafka работает в режиме at-least-once</span></button>
+      <button class="quiz-option" data-value="b"><div class="quiz-option-radio"></div><span>Timeout сработал раньше ответа сервиса</span></button>
+      <button class="quiz-option" data-value="c"><div class="quiz-option-radio"></div><span>Записи, которые были в очереди оператора, после восстановления отправлены в функцию повторно</span></button>
+    </div>
+    <div class="quiz-feedback"></div>
+  </div>
+  <button class="quiz-check-btn">Проверить</button>
+  <button class="quiz-reset-btn">Ещё раз</button>
+</div>

@@ -1,0 +1,93 @@
+<h2>Что будет в конце</h2>
+<p>В задании появится вершина <code>cep-card-testing</code>. Она ищет по каждой карте три мелких платежа подряд и сразу за ними крупный, а алерты уходят через обогащение в <code>fraud.alerts</code> вместе с остальными. Генератор научится присылать такие атаки по флагу <code>--card-testing</code>.</p>
+<p>Правило impossible travel относится к заданию. Методы <code>impossibleTravel</code> и <code>impossibleTravelAlerts</code>, класс <code>DifferentCountry</code> и их тесты пока не пиши.</p>
+
+<h2>Шаг 1. Зависимость</h2>
+<div data-diff="lesson-09/build.gradle.kts lesson-10/build.gradle.kts"></div>
+<p>Библиотека <code>flink-cep</code> выходит вместе с Flink, поэтому версия берётся из той же переменной <code>flinkVersion</code>. Мы кладём её в толстый jar через <code>implementation</code>.</p>
+
+<div class="source-proof">
+<p class="source-proof-title">В исходниках</p>
+<p>Документация CEP пишет, что библиотеки нет в бинарном дистрибутиве. Сборка дистрибутива в теге 2.2.1 говорит обратное и кладёт jar в <code>lib/</code> с пометкой, что он нужен для <code>MATCH_RECOGNIZE</code>.</p>
+<div data-src="flink:flink-dist/src/main/assemblies/bin.xml" data-lines="95-101" data-must="flink-cep-${project.version}.jar"></div>
+<p>Классы из пакета <code>org.apache.flink.</code> всегда грузятся родительским загрузчиком, это мы уже встречали в ловушке урока 14.</p>
+<div data-src="flink:flink-core/src/main/java/org/apache/flink/configuration/CoreOptions.java" data-lines="107-126" data-must="&quot;org.apache.flink.&quot;"></div>
+<p>Если jar лежит в <code>lib/</code> кластера, работают его классы, а копия в нашем jar не используется. Версии совпадают, поэтому конфликта нет. Копия в jar страхует от образа, где библиотеку из <code>lib/</code> убрали. Проверить свой образ можно командой <code>docker compose exec jobmanager ls /opt/flink/lib</code>, мы этот вывод на стенде не снимали.</p>
+<p class="doc-links">Документация: <a href="https://nightlies.apache.org/flink/flink-docs-release-2.2/docs/libs/cep/#getting-started" target="_blank" rel="noopener">FlinkCEP Getting Started</a></p>
+</div>
+
+<h2>Шаг 2. Атаки в генераторе</h2>
+<p>Генератор получает два новых флага. <code>--card-testing</code> задаёт долю случаев, когда вместо обычного платежа начинается атака проверки карты. <code>--travel</code> делает то же для двух платежей из разных стран, он понадобится в задании.</p>
+<div data-diff="lesson-09/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java lesson-10/src/main/java/dev/study/payguard/loadgen/GeneratorConfig.java"></div>
+<p>Источник записей теперь берёт доли прямо из конфигурации, конструктор с пятью числами подряд стало слишком легко перепутать.</p>
+<div data-diff="lesson-09/src/main/java/dev/study/payguard/loadgen/RawRecordSource.java lesson-10/src/main/java/dev/study/payguard/loadgen/RawRecordSource.java"></div>
+<div data-diff="lesson-09/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java lesson-10/src/main/java/dev/study/payguard/loadgen/LoadGenerator.java"></div>
+<p>Атака складывается в ту же очередь <code>pendingBurst</code>, что и серия из урока 8. Шесть платежей одной карты уходят в Kafka друг за другом с метками через 1 мс. Между ними в топик попадут платежи других карт, но шаблону это не мешает. Поток разбит по <code>cardId</code>, и автомат каждой карты видит только её платежи.</p>
+<div data-diff="lesson-09/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java lesson-10/src/main/java/dev/study/payguard/loadgen/PaymentFactory.java"></div>
+
+<div class="callout callout-warning">
+  <div class="callout-icon">⚠</div>
+  <div class="callout-content">
+    <strong class="callout-title">Почему у карты появилась домашняя страна</strong>
+    <p>До этого урока генератор выбирал страну случайно для каждого платежа. Пока страну никто не сравнивал, это было безобидно. Первый же прогон правила impossible travel выдал 869 ложных алертов, потому что два соседних платежа одной карты в четырёх случаях из пяти приходили из разных стран. Теперь страна вычисляется из хеша номера карты методом <code>homeCountry</code>, и обычные платежи карты всегда идут из одной страны. Чужую страну <code>XX</code> даёт только атака по флагу <code>--travel</code>.</p>
+  </div>
+</div>
+
+<h2>Шаг 3. Шаблон проверки карты</h2>
+<p>Создай <code>pipeline/FraudPatterns.java</code>. Ниже части файла, которые относятся к практике. В снапшоте в том же файле лежит и решение задания, поэтому константы и импорт для него тоже видны. Их можно добавить сейчас или в задании.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="1-39"></div>
+<div class="translation-block">
+  <div class="translation-code" data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="31-38"></div>
+  <div class="translation-english">
+    <span class="translation-label">ПРОСТЫМИ СЛОВАМИ</span>
+    <div class="translation-lines">
+      <p class="tl">Метод возвращает шаблон над платежами. Знак вопроса во втором параметре типа означает, что тип последнего шага нам не важен.</p>
+      <p class="tl">Первый шаг называется <code>probes</code>. Вторым аргументом передаём стратегию пропуска, после совпадения выбрасываются все попытки, начатые до его конца. Без неё одна атака дала бы три алерта.</p>
+      <p class="tl">Шаг принимает только платежи меньше 500 минимальных единиц, то есть меньше пяти евро.</p>
+      <p class="tl">Таких платежей должно быть три или больше.</p>
+      <p class="tl">И они должны идти подряд. Обычный платёж посреди серии обрывает попытку.</p>
+      <p class="tl">Следующий шаг <code>cash-out</code> со строгой смежностью. Крупный платёж обязан идти сразу за последним мелким.</p>
+      <p class="tl">Крупный значит больше 30 000 минимальных единиц, то есть больше 300 евро.</p>
+      <p class="tl">Весь шаблон от первого мелкого до крупного должен уложиться в пять минут времени события.</p>
+    </div>
+  </div>
+</div>
+<p>Шаблон подключается к потоку методом <code>CEP.pattern</code>. Он принимает поток с ключом, поэтому совпадения ищутся отдельно для каждой карты. Имя и uid вершины нужны, как и раньше, для Web UI и для восстановления состояния из savepoint.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="49-54"></div>
+<p>Функция совпадения общая для обоих правил. CEP передаёт ей словарь, где ключ это имя шага, а значение это список принятых в шаг событий. Алерт строится по первому событию шага, имя которого передано в конструкторе. Для проверки карты это крупный платёж, и <code>alertId</code> будет вида <code>card-testing:&lt;paymentId&gt;</code>. Повторная обработка той же атаки даст тот же идентификатор.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/pipeline/FraudPatterns.java" data-lines="75-95"></div>
+
+<h2>Шаг 4. Подключи правило в задании</h2>
+<p>Алерты CEP объединяются с остальными до обогащения. В снапшоте объединение уже содержит и поток из задания. В практике добавь в <code>union</code> только <code>FraudPatterns.cardTestingAlerts(byCard)</code> и импорт <code>FraudPatterns</code>.</p>
+<div data-code="lesson-10/src/main/java/dev/study/payguard/job/PayGuardJob.java" data-lines="155-159"></div>
+<p>Поток <code>byCard</code> тот же, что у правил из уроков 7 и 8. Каждый его потребитель получает свою копию платежей по сети, поэтому у новой вершины вход равен входу <code>rules-dynamic</code>.</p>
+
+<h2>Шаг 5. Тесты</h2>
+<p>Тест запускает настоящий оператор CEP на MiniCluster. Это важно, потому что CEP работает во времени события, и без watermark совпадений не будет. Вспомогательный <code>streamOf</code> из прошлых уроков назначает метки по времени платежа. Когда данные кончаются, watermark уходит в бесконечность, и буфер CEP разбирается целиком. Ниже три теста на проверку карты. Они проверяют срабатывание, обрыв серии обычным платежом и предел в пять минут.</p>
+<div data-code="lesson-10/src/test/java/dev/study/payguard/pipeline/FraudPatternsTest.java" data-lines="1-71"></div>
+<p>Тест генератора проверяет, что атака начинается мелким платежом и заканчивается крупным.</p>
+<div data-diff="lesson-09/src/test/java/dev/study/payguard/loadgen/RawRecordSourceTest.java lesson-10/src/test/java/dev/study/payguard/loadgen/RawRecordSourceTest.java"></div>
+<pre data-lang="bash" data-title="терминал">./gradlew test</pre>
+
+<h2>Шаг 6. Собери и запусти</h2>
+<pre data-lang="bash" data-title="терминал">./gradlew shadowJar
+docker compose up -d --wait
+docker compose exec jobmanager flink list</pre>
+<p>Останови прошлое задание командой <code>flink cancel &lt;JobID&gt;</code> и отправь новое. Генератор запусти во втором терминале с атаками. Флаг <code>--card-testing 0.002</code> означает, что примерно на 500 обычных шагов генератора придётся одна атака. <code>--burst</code> оставляет серии для правила частоты.</p>
+<pre data-lang="bash" data-title="терминал">scripts/submit.sh
+./gradlew loadgen --args="--rate 100 --burst 0.001 --card-testing 0.002"</pre>
+<pre data-lang="text" data-title="вывод" data-output>Job has been submitted with JobID 01b9c903592784f694c70be4862860d4</pre>
+<p>Посмотри на граф задания той же командой, что в уроке 9.</p>
+<pre data-lang="bash" data-title="терминал">JOB=$(curl -s localhost:8081/jobs | jq -r '.jobs[] | select(.status == "RUNNING") | .id')
+curl -s localhost:8081/jobs/$JOB | jq -c '{name, state, vertices: [.vertices[] | {name, parallelism, status}]}'</pre>
+<pre data-lang="json" data-title="вывод" data-output>{"name":"payguard","state":"RUNNING","vertices":[{"name":"Source: payments-raw -> split-parsed -> (dlq-sink: Writer -> dlq-sink: Committer, lateness-probe)","parallelism":2,"status":"RUNNING"},{"name":"Source: rules-config","parallelism":2,"status":"RUNNING"},{"name":"Source: payment-confirmations","parallelism":2,"status":"RUNNING"},{"name":"deduplicate","parallelism":2,"status":"RUNNING"},{"name":"merchant-stats-1m -> (merchant-stats-sink: Writer -> merchant-stats-sink: Committer, too-late-sink: Writer -> too-late-sink: Committer)","parallelism":2,"status":"RUNNING"},{"name":"card-sessions -> card-sessions-sink: Writer -> card-sessions-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rules-dynamic","parallelism":2,"status":"RUNNING"},{"name":"rule-amount-spike","parallelism":2,"status":"RUNNING"},{"name":"join-confirmations -> confirmed-sink: Writer -> confirmed-sink: Committer","parallelism":2,"status":"RUNNING"},{"name":"rule-unconfirmed","parallelism":2,"status":"RUNNING"},{"name":"cep-card-testing","parallelism":2,"status":"RUNNING"},{"name":"cep-impossible-travel","parallelism":2,"status":"RUNNING"},{"name":"enrich-alerts -> alerts-sink: Writer -> alerts-sink: Committer","parallelism":2,"status":"RUNNING"}]}</pre>
+<p>Вывод снят со снапшота, где задание уже решено, поэтому в нём есть <code>cep-impossible-travel</code>. У тебя её пока нет. Вершина <code>cep-card-testing</code> отдельная, перед ней стоит keyBy по карте, а после неё объединение потоков.</p>
+<p>Теперь метрики вершины. Цикл тот же, что в уроке 9, меняется только имя.</p>
+<pre data-lang="bash" data-title="терминал">for NAME in cep-card-testing; do
+  V=$(curl -s localhost:8081/jobs/$JOB | jq -r --arg n "$NAME" '.vertices[] | select(.name | startswith($n)) | .id')
+  curl -s "localhost:8081/jobs/$JOB/vertices/$V/subtasks/metrics?get=numRecordsIn,numRecordsOut,busyTimeMsPerSecond,backPressuredTimeMsPerSecond&amp;agg=min,max,sum" | jq -c .
+done</pre>
+<pre data-lang="json" data-title="вывод" data-output>[{"id":"numRecordsIn","min":8554.0,"max":8611.0,"sum":17165.0},{"id":"numRecordsOut","min":17.0,"max":21.0,"sum":38.0},{"id":"busyTimeMsPerSecond","min":2.0,"max":2.0,"sum":4.0},{"id":"backPressuredTimeMsPerSecond","min":0.0,"max":0.0,"sum":0.0}]</pre>
+<p>На вход пришло 17165 платежей, столько же, сколько у <code>rules-dynamic</code> в этом прогоне. Оба оператора читают один поток <code>byCard</code>. На выход ушло 38 совпадений, по одному на атаку благодаря <code>skipPastLastEvent</code>. Подзадачи нагружены поровну, занятость 2 мс в секунду. Автомат с одной-двумя попытками на карту почти ничего не стоит.</p>
+<p>В отдельном прогоне на 60 секунд с теми же флагами правило card testing выдало 6 алертов, а правило частоты 7. У всех алертов было заполнено поле <code>merchantRisk</code> из PostgreSQL, они прошли обогащение вместе с остальными.</p>
+<p>Отдельно загляни в Web UI на вкладку Metrics вершины <code>cep-card-testing</code> и найди счётчик <code>numLateRecordsDropped</code>. Он показывает платежи, которые пришли позже watermark и в шаблон не попали. По умолчанию генератор задерживает 5 % платежей на время до 30 секунд, долю меняет флаг <code>--late</code>. При допуске 10 секунд часть таких платежей окажется за watermark, и счётчик будет расти. Значение счётчика мы на стенде не снимали.</p>
